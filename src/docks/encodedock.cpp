@@ -1622,6 +1622,7 @@ MeltJob *EncodeDock::createMeltJob(Mlt::Producer *service,
     if (xml.contains(QDir::fromNativeSeparators(target))) {
         if (error) {
             *error = tr("You cannot write to a file that is in your project.");
+            delete tmp;
             return nullptr;
         }
         QMessageBox::warning(this,
@@ -1640,6 +1641,7 @@ MeltJob *EncodeDock::createMeltJob(Mlt::Producer *service,
         for (const QString &candidate : candidates) {
             if (xml.contains(candidate) || xml.contains(candidate.toHtmlEscaped())) {
                 *error = tr("You cannot write to a file that is in your project.");
+                delete tmp;
                 return nullptr;
             }
         }
@@ -1757,7 +1759,8 @@ AbstractJob *EncodeDock::exportToFile(const QString &presetName,
     loadPresetFromProperties(*preset);
     delete preset;
 
-    // Same source choice as a person would make: the timeline, else the playlist, else the clip.
+    // Same source choice as a person would make: the timeline, else the current playlist bin,
+    // else the clip.
     const QString wanted = MAIN.isMultitrackValid() ? "timeline"
                            : MAIN.isPlaylistValid() ? "playlist"
                                                     : "clip";

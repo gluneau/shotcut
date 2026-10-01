@@ -21,7 +21,7 @@ are unchanged.
    exporter returns a clear tool error and changes nothing. No tool ever opens a dialog.
 4. `get_frame` returns a valid image the client can look at, including frames with timeline filters and
    transitions applied.
-5. All 91 stage 1 smoke checks still pass; the new checks run headless on an isolated `--appdata`.
+5. All stage 1 smoke checks still pass; the new checks run headless on an isolated `--appdata`.
 
 ### Non-goals
 
@@ -68,7 +68,7 @@ Changes to existing Shotcut code are limited to: small public accessors on `Main
 5. **No dialogs.** A tool must not call code that can show a modal dialog; where unavoidable it is
    pre-checked (as in stage 1) or given a quiet mode (export). The one known modal is the progress
    dialog `LongUiTask` inside `AppendCommand`; it spins the event loop but waits for no input, and the
-   existing `m_busy` guard rejects other `tools/call` requests meanwhile.
+   existing `m_busy` guard rejects other `tools/call` requests meanwhile. Tool calls are also refused while a user dialog is open (`QApplication::activeModalWidget()`), so a tool never runs inside the user's modal loop.
 6. **Playback.** Edit tools pause the player first (as Shotcut's own "add to timeline" does).
 
 ## 4. Tools
@@ -93,7 +93,7 @@ are timeline frames unless stated. Results are compact JSON text unless stated.
 
 | Tool | Arguments | Behavior |
 |------|-----------|----------|
-| `playlist_add` | `path` (absolute existing media file) | Opens the file as an MLT producer on the project profile, pushes `Playlist::AppendCommand`, returns the `get_playlist` result. Errors: not absolute / missing / not a file / MLT cannot open it / needs a duration (generators, images with no length are refused in stage 2). Resource (`:`-prefixed) paths are rejected as in stage 1. |
+| `playlist_add` | `path` (absolute existing media file) | Opens the file as an MLT producer on the project profile, pushes `Playlist::AppendCommand`, returns the `get_playlist` result. Errors: not absolute / missing / not a file / MLT cannot open it / is a project file (`.mlt`/`.xml`, any case; use `open_project`) / is a generator or producer without a length. Media files and still images are accepted; a still image is added with Shotcut's default image duration. Resource (`:`-prefixed) paths are rejected as in stage 1. |
 | `timeline_add_playlist` | `track?` (default: the lowest-numbered video track "V1", created if no timeline exists) | Copies every playlist item into a fresh `Mlt::Playlist`, pauses the player, and calls `TimelineDock::appendFromPlaylist(playlist, skipProxy=false, emptyTrack=false)` for that track. ALWAYS appends after existing clips on the track, as one undo step. Errors: empty playlist, locked track, unknown track. Returns `{appended:n, track:<summary>}`. Selection afterwards is whatever Shotcut selects (do not rely on it). |
 | `timeline_split` | `track`, `position` (absolute frame, strictly inside a clip) | Resolves the clip with `clipIndexAtPosition`, errors for blank/transition/locked, calls `TimelineDock::split`. Returns the updated track. |
 | `timeline_trim` | `track`, `clip`, `edge` (`in`\|`out`), exactly one of `frame` (absolute timeline frame the edge moves to) or `delta` (frames; for `in` positive moves the in-point later, for `out` positive shortens the clip), `ripple?` (default false) | Computes the delta from `frame`, validates with `trimClipInValid`/`trimClipOutValid`, pushes `TrimClipInCommand`/`TrimClipOutCommand` directly (they apply immediately). Errors for blank/transition/locked/invalid. Returns the updated track. |
@@ -107,8 +107,8 @@ are timeline frames unless stated. Results are compact JSON text unless stated.
 
 | Tool | Arguments | Behavior |
 |------|-----------|----------|
-| `export_video` | `path` (absolute), `preset?` (default `x264-medium`), `overwrite?` (default false) | Starts a background render and returns immediately `{job_id, output, preset}`. Source: the timeline if one exists, else the playlist, else the loaded clip. Preconditions, each a tool error: something loaded; no export already running; absolute path; extension matches the preset's `meta.preset.extension`; parent folder exists and is writable; free space at least 1 GiB; file does not exist unless `overwrite:true`; output path not inside the project XML; the preset exists; the `melt-7` binary exists where `MeltJob` looks for it (error text says how to fix it). Uses `EncodeDock::exportToFile` (section 5). |
-| `get_export_status` | `job_id?` (default: the latest export started through MCP) | `{job_id, state:"pending"\|"running"\|"paused"\|"succeeded"\|"failed"\|"stopped"\|"idle", percent, output, output_exists, output_bytes, exit_code, elapsed_ms, error}` where `error` is the last ~2 KB of the job log when failed. State is captured in a small struct from the job's `progressUpdated`/`finished` signals (idempotent; `MeltJob` can emit `finished` twice), so it survives the Jobs dock removing finished jobs; the live `AbstractJob` is held in a `QPointer`. Job ids are an increasing counter owned by the tool module, never queue row numbers. |
+| `export_video` | `path` (absolute), `preset?` (default `x264-medium`), `overwrite?` (default false) | Starts a background render and returns immediately `{job_id, output, preset}`. Source: the timeline if one exists, else the current playlist bin (Shotcut's "Current Playlist Bin"; with a bin selected only that bin exports), else the loaded clip. Preconditions, each a tool error: something loaded; no export already running; absolute path; extension matches the preset's `meta.preset.extension`; parent folder exists and is writable; free space at least 1 GiB; file does not exist unless `overwrite:true`; output path not a symbolic link or hard link, and not media used by the project (checked by path and by file identity, also in quiet-mode `createMeltJob`) or in the autosave folder; the preset exists; the melt binary (`melt-7` on Linux, `melt` on Windows/macOS) exists where `MeltJob` looks for it (error text says how to fix it). Uses `EncodeDock::exportToFile` (section 5). |
+| `get_export_status` | `job_id?` (default: the latest export started through MCP) | `{job_id, state:"pending"\|"running"\|"paused"\|"succeeded"\|"failed"\|"stopped"\|"removed"\|"idle", percent, output, output_exists, output_bytes, exit_code, elapsed_ms, error}` where `removed` means the job was taken out of the Jobs dock before it finished, `output_exists`/`output_bytes` describe the file on disk now, `elapsed_ms` is the run time so far (the total once finished) and `error` is the last ~2 KB of the job log when failed. State is captured in a small struct from the job's `progressUpdated`/`finished` signals (idempotent; `MeltJob` can emit `finished` twice), so it survives the Jobs dock removing finished jobs; the live `AbstractJob` is held in a `QPointer`. Job ids are an increasing counter owned by the tool module, never queue row numbers. |
 
 ## 5. Export design (the only non-additive change)
 
@@ -116,7 +116,7 @@ are timeline frames unless stated. Results are compact JSON text unless stated.
   QString &error)`. It checks the preconditions that need dock state, calls `resetOptions()`, loads the
   preset into the widgets the way `on_presetsTree_clicked` does (stock presets from the MLT repository
   `consumer/avformat/<name>`, custom presets from the app data `presets/encode` folder), selects the
-  source ("timeline" / "playlist" / "clip") on the "export from" combo, then builds the job with
+  source ("timeline" / "playlist", meaning the current playlist bin / "clip") on the "export from" combo, then builds the job with
   `createMeltJob(...)` and `JOBS.add(job)`.
 - `createMeltJob` gains a quiet mode (a parameter or an error-string out-parameter) so its
   `QMessageBox` calls (duplicate job target, target inside the project, not writable) become returned

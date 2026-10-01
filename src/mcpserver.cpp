@@ -17,6 +17,7 @@
 
 #include "Logger.h"
 
+#include <QApplication>
 #include <QCoreApplication>
 #include <QHostAddress>
 #include <QJsonArray>
@@ -340,6 +341,10 @@ QByteArray McpServer::callTool(const QJsonValue &id, const QJsonObject &params)
         return rpcError(id, -32602, "arguments must be an object");
     if (m_busy)
         return rpcError(id, -32000, "Server is busy with another tool call");
+    // A tool call runs inside whatever event loop is current; refuse while the user has a modal
+    // dialog open (the only modal a tool creates is LongUiTask, which exists only under m_busy).
+    if (QApplication::activeModalWidget())
+        return rpcError(id, -32000, "A dialog is open in Shotcut; close it and try again.");
 
     m_busy = true;
     const QJsonObject result = handler(arguments.toObject());

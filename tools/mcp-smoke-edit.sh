@@ -6,7 +6,7 @@
 # racing the render, that a second export is refused while one runs; it also proves a custom
 # preset is applied (1280x720 output). When unset, those two checks run against the fast
 # x264-medium render and may flake (a NOTE is printed).
-# Needs: bash, curl, jq, ffmpeg, ffprobe, base64, xxd. Run it against a FRESH, throwaway Shotcut
+# Needs: bash, curl, jq, ffmpeg, ffprobe, base64, xxd, md5sum, awk. Run it against a FRESH, throwaway Shotcut
 # (nothing loaded, empty playlist, no timeline): it adds clips, edits the timeline and exports
 # a video, and it aborts otherwise unless MCP_SMOKE_FORCE=1. See docs/mcp-server.md for the
 # headless recipe.
@@ -127,6 +127,10 @@ expect_eq "timeline_add_playlist: unknown track is an error (timeline exists)" t
 expect_eq "timeline_add_playlist: unchanged after the error" 3 "$(tool_json get_timeline '{}' | jq '.tracks[0].clips | length')"
 TL="$(tool_json get_timeline '{}')"
 expect_eq "timeline has a video track" video "$(echo "$TL" | jq -r '.tracks[0].type')"
+# Observed in a fresh isolated appdata: tracks are ["video"] only. Whether audio tracks get added
+# can follow Shotcut settings, so only the invariant is asserted: every audio track comes after
+# every video track.
+expect_eq "timeline: audio tracks (if any) come after all video tracks" true "$(echo "$TL" | jq '[.tracks[].type] as $t | ([range(0; $t | length)] | map(select($t[.] == "audio")) | min // 1e9) > ([range(0; $t | length)] | map(select($t[.] == "video")) | max)')"
 expect_eq "timeline: three clips" 3 "$(echo "$TL" | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
 expect_eq "timeline: contiguous starts" "0,75,175" "$(echo "$TL" | jq -r '[.tracks[0].clips[].start] | join(",")')"
 expect_eq "timeline: total duration is the sum" 300 "$(echo "$TL" | jq '.duration')"
@@ -317,12 +321,10 @@ expect_eq "joined: transition still present" transition "$(tool_json get_timelin
 expect_eq "joined: fade on a transition item is an error" true "$(tool_is_error timeline_fade "{\"track\":0,\"clip\":$TI,\"fade_in\":5}")"
 PLAIN_N="$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
 RAW="$(call_tool timeline_remove "{\"track\":0,\"clip\":$((TI + 1)),\"ripple\":false}")"
-if [ "$(echo "$RAW" | jq -r '.result.isError')" = true ]; then
-  pass "remove next to a transition: refused with a message"
-else
-  expect_eq "remove next to a transition: exactly one plain clip fewer" "$((PLAIN_N - 1))" "$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
-  tool_json undo '{}' >/dev/null
-fi
+# Lifting the clip next to a transition succeeds (it is not refused); undo restores it.
+expect_eq "remove next to a transition: succeeds" false "$(echo "$RAW" | jq -r '.result.isError')"
+expect_eq "remove next to a transition: exactly one plain clip fewer" "$((PLAIN_N - 1))" "$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
+tool_json undo '{}' >/dev/null
 expect_eq "remove next to a transition: state restored" "$STARTS_BEFORE|$PLAIN_N" "$(tool_json get_timeline '{}' | jq -r "($PSTARTS_T) + \"|\" + (([.tracks[0].clips[] | select(.kind==\"clip\")] | length | tostring))")"
 
 frame_to_file "{\"position\":$((TSTART - 3))}" "$TMP/tr_before.jpg"
@@ -358,7 +360,11 @@ TLDUR="$(tool_json get_timeline '{}' | jq '.duration')"
 expect_eq "export: relative path is an error" true "$(tool_is_error export_video '{"path":"out.mp4"}')"
 expect_eq "export: wrong extension is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/out.mkv\"}")"
 expect_eq "export: unknown preset is an error" true "$(tool_is_error export_video "{\"path\":\"$OUT\",\"preset\":\"no-such-preset\"}")"
-expect_eq "export: unwritable folder is an error" true "$(tool_is_error export_video '{"path":"/proc/out.mp4"}')"
+if [ "$(id -u)" != 0 ]; then
+  expect_eq "export: unwritable folder is an error" true "$(tool_is_error export_video '{"path":"/proc/out.mp4"}')"
+else
+  echo "SKIP  export: unwritable folder (running as root, which can write anywhere)"
+fi
 expect_eq "export: missing folder is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/nodir/out.mp4\"}")"
 echo existing > "$TMP/exists.mp4"
 expect_eq "export: existing file without overwrite is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/exists.mp4\"}")"

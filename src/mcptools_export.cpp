@@ -166,6 +166,7 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
     const QJsonValue presetValue = arguments.value("preset");
     if (!presetValue.isUndefined()) {
         preset = presetValue.toString();
+        // ".." anywhere is rejected, which also rejects (harmless) names such as "my..preset".
         if (!presetValue.isString() || preset.isEmpty() || preset.contains("..")
             || preset.contains('\\') || preset.contains(QChar(0)) || preset.startsWith('.')
             || QDir::isAbsolutePath(preset) || QFileInfo(preset).isAbsolute())
@@ -320,20 +321,20 @@ QList<McpTool> McpTools::exportTools()
 {
     return {
         {"export_video",
-         "Render the project (the timeline if there is one, else the playlist, else the loaded "
-         "clip) to a video file as a background job and return {job_id, output, preset} at once. "
-         "Poll get_export_status. path must be absolute and end in the preset's extension (mp4 "
-         "for x264-medium: H.264 + AAC, the project's resolution and frame rate); an existing "
-         "file is refused unless overwrite is true, and the path must not be a media file or the "
-         "project file used by the project, nor a symbolic link. The preset is a stock preset "
-         "name or a custom preset file name in Shotcut's presets folder. Only one export runs at "
-         "a time. Side effects: the Export panel's settings and its \"export from\" choice are "
-         "overwritten by the preset; the panel's hardware-encoder and proxy/preview-scale "
-         "choices may apply; the missing-files check and the analysis prompts are skipped, so "
-         "analysis filters are not run. The guard protects media used by the project (timeline "
-         "clips, playlist items, the loaded clip, the project file, by path and by file identity) "
-         "but cannot see files referenced only inside filters or nested project clips: do not "
-         "pass overwrite: true for a file you did not create.",
+         "Render the project (the timeline if there is one, else the current playlist bin, else "
+         "the loaded clip) to a video file as a background job and return {job_id, output, "
+         "preset} at once. Poll get_export_status. path must be absolute and end in the preset's "
+         "extension (mp4 for x264-medium: H.264 + AAC, the project's resolution and frame "
+         "rate); an existing file is refused unless overwrite is true, and the path must not be "
+         "a media file or the project file used by the project, nor a symbolic link. The preset "
+         "is a stock preset name or a custom preset file name in Shotcut's presets folder. Only "
+         "one export runs at a time. Side effects: the Export panel's settings and its "
+         "\"export from\" choice are overwritten by the preset; the panel's hardware-encoder and "
+         "proxy/preview-scale choices may apply; the missing-files check and the analysis "
+         "prompts are skipped, so analysis filters are not run. The guard protects media used by "
+         "the project (timeline clips, playlist items, the loaded clip, the project file, by "
+         "path and by file identity) but cannot see files referenced only inside filters or "
+         "nested project clips: do not pass overwrite: true for a file you did not create.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute output path, e.g. /home/me/out.mp4."},
              "preset":{"type":"string","description":"Preset name, default x264-medium."},
@@ -345,8 +346,10 @@ QList<McpTool> McpTools::exportTools()
          "stopped, removed, idle), percent, output, output_exists, output_bytes, exit_code, "
          "elapsed_ms, error}. Without job_id it reports the latest export started through MCP; "
          "error holds the end of the render log when it failed. removed means the job was taken "
-         "out of the Jobs dock before it finished. exit_code is the raw process exit code; a "
-         "render that reached 99% or more counts as succeeded.",
+         "out of the Jobs dock before it finished. output_exists and output_bytes describe the "
+         "file on disk now; elapsed_ms is the run time so far, or the total once finished. "
+         "exit_code is the raw process exit code; a render that reached 99% or more counts as "
+         "succeeded.",
          schema(R"({"type":"object","properties":{
              "job_id":{"type":"integer","minimum":0}
            }})"),

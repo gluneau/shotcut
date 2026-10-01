@@ -58,6 +58,8 @@ public:
     bool isExportInProgress() const;
     // Renders the current project to `path` with a stock or custom preset without any dialog.
     // Returns the queued job, or nullptr with `error` set.
+    // Path-safety checks (normalized path, symlinks, project media identity, hard links, free
+    // space) live in the MCP tool layer (src/mcptools_export.cpp); callers must apply them.
     AbstractJob *exportToFile(const QString &presetName, const QString &path, QString &error);
 
 signals:

@@ -155,7 +155,7 @@ QJsonObject playlistAddTool(const QJsonObject &arguments)
     const QFileInfo info(path);
     if (!info.exists() || !info.isFile())
         return textResult("No such file: " + path, true);
-    if (path.endsWith(".mlt") || path.endsWith(".xml"))
+    if (path.endsWith(".mlt", Qt::CaseInsensitive) || path.endsWith(".xml", Qt::CaseInsensitive))
         return textResult("Project files cannot be added to the playlist; use open_project.", true);
 
     // Like PlaylistDock::addFiles: runs animation formats in a subprocess so a crashing file
@@ -433,7 +433,8 @@ QJsonObject timelineMoveTool(const QJsonObject &arguments)
     if (readFrame(arguments, "track", track) != FrameArg::Ok
         || readFrame(arguments, "clip", clip) != FrameArg::Ok
         || readFrame(arguments, "to_start", toStart) != FrameArg::Ok || toStart > 1000000000)
-        return textResult("track, clip and to_start must be non-negative integers (to_start at most 1e9).",
+        return textResult("track, clip and to_start must be non-negative integers "
+                          "(to_start at most 1e9).",
                           true);
     int toTrack = track;
     const FrameArg toTrackArg = readFrame(arguments, "to_track", toTrack);
@@ -458,7 +459,8 @@ QJsonObject timelineMoveTool(const QJsonObject &arguments)
             && kindOf(model, track, neighbour) == "transition")
             return textResult("Clip " + QString::number(clip) + " on track "
                                   + QString::number(track)
-                                  + " is joined to a transition; remove or trim the transition first.",
+                                  + " is joined to a transition; remove or trim the transition "
+                                    "first.",
                               true);
     }
     const int positionDelta = toStart - info->start;
@@ -621,7 +623,8 @@ QList<McpTool> McpTools::timelineTools()
          getTimelineTool},
         {"playlist_add",
          "Add a media file (absolute path) to the end of the playlist. Still images are added "
-         "with Shotcut's default image duration. Project files and generators are not supported. With nothing loaded the first file also becomes the "
+         "with Shotcut's default image duration. Project files (.mlt/.xml, any case) and "
+         "generators are not supported. With nothing loaded the first file also becomes the "
          "loaded clip, as in Shotcut's Add Files. Returns the playlist.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute path of a media file."}
@@ -646,7 +649,8 @@ QList<McpTool> McpTools::timelineTools()
          timelineSplitTool},
         {"timeline_remove",
          "Remove a clip. ripple true (default) closes the gap; ripple false turns the lifted span "
-         "into a blank (blanks next to it merge, so later item indexes can shift). Track 0 is the TOPMOST video track. Returns the updated track.",
+         "into a blank (blanks next to it merge, so later item indexes can shift). Track 0 is the "
+         "TOPMOST video track. Returns the updated track.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0,"description":"Item index from get_timeline."},
@@ -654,7 +658,8 @@ QList<McpTool> McpTools::timelineTools()
            },"required":["track","clip"]})"),
          timelineRemoveTool},
         {"timeline_trim",
-         "Trim a clip edge (track 0 is the TOPMOST video track). Pass exactly one of frame (the absolute timeline frame the edge moves "
+         "Trim a clip edge (track 0 is the TOPMOST video track). Pass exactly one of frame (the "
+         "absolute timeline frame the edge moves "
          "to; for out the clip then ends just before it; with ripple true and edge in the clip "
          "start stays and later content shifts, so the edge does not end at frame) or delta "
          "(frames: for in positive moves the in-point later, for out positive shortens the clip). "
@@ -670,7 +675,8 @@ QList<McpTool> McpTools::timelineTools()
            },"required":["track","clip","edge"]})"),
          timelineTrimTool},
         {"timeline_move",
-         "Move a clip to an absolute start frame (track 0 is the TOPMOST video track), optionally to another track of the same type. "
+         "Move a clip to an absolute start frame (track 0 is the TOPMOST video track), optionally "
+         "to another track of the same type. "
          "Only free space is allowed (overlaps are refused); nothing ripples. A clip joined to a "
          "transition is refused. Returns the updated track (and from_track, the source track, "
          "when the track changes).",
@@ -685,8 +691,9 @@ QList<McpTool> McpTools::timelineTools()
          "Add Shotcut's default dissolve (with an audio cross-fade) between two touching clips on "
          "one track (track 0 is the TOPMOST video track). clip is the INCOMING (later) clip; "
          "duration frames of overlap, shorter than both clips. The clips overlap, so the timeline "
-         "gets shorter by duration: later clips move earlier by duration (with Shotcut's ripple-all-"
-         "tracks setting on, duration frames are also removed from the other unlocked tracks). "
+         "gets shorter by duration: later clips move earlier by duration (with Shotcut's "
+         "ripple-all-tracks setting on, duration frames are also removed from the other "
+         "unlocked tracks). "
          "The incoming clip must not already have a transition after it. Returns the updated "
          "track and transition_index.",
          schema(R"({"type":"object","properties":{
@@ -711,7 +718,8 @@ QList<McpTool> McpTools::timelineTools()
          schema(R"({"type":"object","properties":{}})"),
          undoTool},
         {"redo",
-         "Redo the last undone edit. This also redoes edits made in the Shotcut window. Returns {text, can_undo, can_redo}.",
+         "Redo the last undone edit. This also redoes edits made in the Shotcut window. Returns "
+         "{text, can_undo, can_redo}.",
          schema(R"({"type":"object","properties":{}})"),
          redoTool},
     };

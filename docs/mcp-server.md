@@ -83,7 +83,8 @@ result and render it.
 | `get_export_status` | Progress and result of an export | `job_id?` (default: the latest) |
 
 Positions and `to_start` are absolute timeline frames; `frame` in `timeline_trim` is the absolute
-timeline frame the edge moves to. Tool arguments are validated strictly and no tool opens a dialog.
+timeline frame the edge moves to. Tool arguments are validated strictly and no stage 2 tool
+opens a dialog.
 
 ### Editing rules
 
@@ -123,8 +124,8 @@ picture is theoretically possible with Realtime off or a very loaded GUI.
 
 ### Export
 
-`export_video` renders the timeline (else the playlist, else the loaded clip) as a background
-job that shows as a row in the Jobs dock, and returns `{job_id, output, preset}` at once. The
+`export_video` renders the timeline (else the current playlist bin, else the loaded clip) as a
+background job that shows as a row in the Jobs dock, and returns `{job_id, output, preset}` at once. The
 preset defaults to `x264-medium` (H.264 + AAC, `.mp4`, the project's resolution and frame rate).
 It can be any stock preset name, or a custom preset by plain file name from
 `<appdata>/presets/encode`; paths are not accepted. Preconditions, each a tool error:
@@ -134,7 +135,8 @@ It can be any stock preset name, or a custom preset by plain file name from
   directory, and its extension matches the preset's;
 - the folder exists and is writable, with at least 1 GiB free;
 - the file does not exist, unless `overwrite: true`;
-- `melt-7` exists next to the Shotcut binary. In a dev tree link it in (adjust to your MLT prefix):
+- the melt program exists next to the Shotcut binary. It is named `melt-7` on Linux and `melt` on
+  Windows and macOS. In a Linux dev tree link it in (adjust to your MLT prefix):
 
       ln -s <mlt prefix>/bin/melt-7 build/cc-debug-linux/src/melt-7
 
@@ -153,8 +155,10 @@ panel's setting.
 `get_export_status` returns `{job_id, state, percent, output, output_exists, output_bytes,
 exit_code, elapsed_ms, error}`. `state` is one of `pending`, `running`, `paused`, `succeeded`,
 `failed`, `stopped`, `removed` (taken out of the Jobs dock before it finished) or `idle` (no
-export started yet). `exit_code` is the raw process code; a render that reached 99% or more counts
-as succeeded. `error` is the end of the render log when it failed.
+export started yet). `output_exists` says whether the output file is on disk now, `output_bytes`
+is its size (0 if absent) and `elapsed_ms` is the run time so far, or the total once the job has
+finished. `exit_code` is the raw process code; a render that reached 99% or more counts as
+succeeded. `error` is the end of the render log when it failed.
 
 ## Security
 
@@ -168,8 +172,9 @@ token-gated.
 
 Stage 2 widens what the token allows. It can now edit the open project (every edit is undoable)
 and write one video file to any folder the user can write, never over media used by the project
-(see Export). `export_video`'s `preset` can only name a stock preset or a plain custom preset
-file, not a path.
+(see Export, with the caveat described there). `export_video`'s `preset` can only name a stock
+preset or a plain custom preset file, not a path. Tool calls are refused while a Shotcut dialog is
+open (close it and try again).
 
 ## Testing
 
@@ -196,7 +201,8 @@ temp dir. It aborts unless the session is fresh (nothing loaded, not modified), 
 `--appdata` directory of the Shotcut under test: the script then writes a deliberately slow custom
 preset there and uses it for deterministic checks of "a second export is refused while one runs"
 and "a custom preset is applied". Without it those two checks race the fast render and can flake.
-Both scripts must pass: at the time of writing stage 1 prints 91 PASS lines and the edit script 211.
+Both scripts must pass: every check prints PASS and the script ends with "All checks passed."
+(exit code 0).
 
 Manual checks (they need a modified project, which the tools cannot create):
 
@@ -217,6 +223,10 @@ Manual checks for stage 2 (GUI only; the headless script cannot cover them):
 - GPU mode: `get_frame` and `export_video` (not tested headless).
 - A timeline with several video tracks: index 0 is the topmost.
 - `get_frame` while playing, and with a reduced preview scale.
+- Remove a running MCP export job from the Jobs dock: `get_export_status` reports `removed`.
+- Rename or remove the dev-tree `melt-7` link: `export_video` reports a clear error (or a failed
+  job with the start-failure text).
+- With a dialog open (for example Settings), a tool call returns "A dialog is open in Shotcut".
 
 ## Known limits
 
