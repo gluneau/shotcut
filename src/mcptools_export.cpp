@@ -16,8 +16,14 @@
 #include "mcptools.h"
 #include "mcptoolsutil.h"
 
+#include "docks/timelinedock.h"
 #include "jobs/abstractjob.h"
 #include "mainwindow.h"
+#include "mltcontroller.h"
+#include "models/multitrackmodel.h"
+#include "proxymanager.h"
+
+#include <MltPlaylist.h>
 
 #include <QCoreApplication>
 #include <QDir>
@@ -25,6 +31,8 @@
 #include <QFileInfo>
 #include <QJsonObject>
 #include <QPointer>
+#include <QProcess>
+#include <QSet>
 #include <QStorageInfo>
 
 #include <algorithm>
@@ -68,7 +76,9 @@ std::shared_ptr<ExportRecord> findRecord(int id)
 QJsonObject statusJson(const std::shared_ptr<ExportRecord> &record)
 {
     QString state = record->state;
-    if (!record->done && record->job) {
+    if (!record->done && !record->job) {
+        state = QStringLiteral("removed"); // taken out of the Jobs dock before it finished
+    } else if (!record->done && record->job) {
         if (!record->job->ran())
             state = QStringLiteral("pending");
         else
@@ -87,6 +97,62 @@ QJsonObject statusJson(const std::shared_ptr<ExportRecord> &record)
          static_cast<double>(record->done ? record->elapsedMs : record->timer.elapsed())},
         {"error",
          record->error.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(record->error)}};
+}
+
+// Canonical form of a path that may not exist yet: the parent folder is resolved instead.
+QString canonicalTarget(const QString &path)
+{
+    const QFileInfo info(path);
+    if (info.exists())
+        return info.canonicalFilePath();
+    const QString folder = QFileInfo(info.absolutePath()).canonicalFilePath();
+    return folder.isEmpty() ? QString() : folder + "/" + info.fileName();
+}
+
+// Every media file and the project file that an export must never overwrite.
+QSet<QString> protectedFiles()
+{
+    QSet<QString> files;
+    const QString projectFolder = MAIN.fileName().isEmpty()
+                                      ? QString()
+                                      : QFileInfo(MAIN.fileName()).canonicalPath();
+    auto add = [&](QString path) {
+        if (path.isEmpty())
+            return;
+        if (!QDir::isAbsolutePath(path) && !projectFolder.isEmpty())
+            path = QDir(projectFolder).absoluteFilePath(path);
+        const QString canonical = canonicalTarget(path);
+        if (!canonical.isEmpty())
+            files.insert(canonical);
+    };
+    auto addProducer = [&](Mlt::Producer *producer) {
+        if (!producer || !producer->is_valid())
+            return;
+        add(ProxyManager::resource(*producer));
+        add(QString::fromUtf8(producer->get("resource")));
+    };
+    if (MAIN.isMultitrackValid()) {
+        MultitrackModel &model = *MAIN.timelineDock()->model();
+        for (int t = 0; t < model.trackList().size(); ++t) {
+            const int count = model.rowCount(model.index(t));
+            for (int c = 0; c < count; ++c) {
+                std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(t, c);
+                if (info)
+                    addProducer(info->producer);
+            }
+        }
+    }
+    Mlt::Playlist *playlist = MAIN.playlist();
+    if (playlist && playlist->is_valid()) {
+        for (int i = 0; i < playlist->count(); ++i) {
+            std::unique_ptr<Mlt::ClipInfo> info(playlist->clip_info(i));
+            if (info)
+                addProducer(info->producer);
+        }
+    }
+    add(MLT.resource());
+    add(MAIN.fileName());
+    return files;
 }
 
 QJsonObject exportVideoTool(const QJsonObject &arguments)
@@ -114,7 +180,11 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
                               true);
     }
 
+    if (path != QDir::cleanPath(path))
+        return textResult("path must be normalized (no ./, ../ or doubled slashes).", true);
     const QFileInfo target(path);
+    if (target.isSymLink())
+        return textResult("path must not be a symbolic link.", true);
     if (target.isDir())
         return textResult("path is a directory: " + path, true);
     if (target.exists() && !overwriteValue.toBool(false))
@@ -126,14 +196,18 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
                           true);
     if (QStorageInfo(folder.filePath()).bytesAvailable() < qint64(1) << 30)
         return textResult("Less than 1 GiB of free space in " + folder.filePath() + ".", true);
+    if (protectedFiles().contains(canonicalTarget(path)))
+        return textResult("The output path is a media file used by the project; "
+                          "choose another path.",
+                          true);
 
 #if defined(Q_OS_UNIX) && !defined(Q_OS_MAC)
     const QFileInfo melt(QCoreApplication::applicationDirPath(), "melt-7");
 #else
     const QFileInfo melt(QCoreApplication::applicationDirPath(), "melt");
 #endif
-    if (!melt.exists())
-        return textResult("Shotcut's melt program was not found at " + melt.filePath()
+    if (!melt.isExecutable())
+        return textResult("Shotcut's melt program was not found or is not executable at " + melt.filePath()
                               + ". In a development build link it in, for example: ln -s "
                                 "<mlt prefix>/bin/melt-7 "
                               + melt.filePath(),
@@ -171,6 +245,23 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
         else
             record->error = j->log().right(2048);
     });
+    // A process that cannot start (melt, or nice, which runs it) never emits finished.
+    auto startFailed = [record](AbstractJob *j) {
+        if (record->done)
+            return;
+        record->done = true;
+        record->elapsedMs = record->timer.elapsed();
+        record->state = "failed";
+        record->error = "The render process could not be started (melt, run through nice at the "
+                        "default job priority): "
+                        + j->errorString();
+    };
+    QObject::connect(job, &QProcess::errorOccurred, job, [job, startFailed](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart)
+            startFailed(job);
+    });
+    if (job->error() == QProcess::FailedToStart)
+        startFailed(job);
     return jsonResult(QJsonObject{{"job_id", record->id}, {"output", path}, {"preset", preset}});
 }
 
@@ -201,9 +292,13 @@ QList<McpTool> McpTools::exportTools()
          "clip) to a video file as a background job and return {job_id, output, preset} at once. "
          "Poll get_export_status. path must be absolute and end in the preset's extension (mp4 "
          "for x264-medium: H.264 + AAC, the project's resolution and frame rate); an existing "
-         "file is refused unless overwrite is true. The preset is a stock preset name or a custom "
-         "preset file name in Shotcut's presets folder. Only one export runs at a time. Side "
-         "effect: the settings in Shotcut's Export panel are replaced by the preset.",
+         "file is refused unless overwrite is true, and the path must not be a media file or the "
+         "project file used by the project, nor a symbolic link. The preset is a stock preset "
+         "name or a custom preset file name in Shotcut's presets folder. Only one export runs at "
+         "a time. Side effects: the Export panel's settings and its \"export from\" choice are "
+         "overwritten by the preset; the panel's hardware-encoder and proxy/preview-scale "
+         "choices may apply; the missing-files check and the analysis prompts are skipped, so "
+         "analysis filters are not run.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute output path, e.g. /home/me/out.mp4."},
              "preset":{"type":"string","description":"Preset name, default x264-medium."},
@@ -212,9 +307,11 @@ QList<McpTool> McpTools::exportTools()
          exportVideoTool},
         {"get_export_status",
          "Progress of an export: {job_id, state (pending, running, paused, succeeded, failed, "
-         "stopped, idle), percent, output, output_exists, output_bytes, exit_code, elapsed_ms, "
-         "error}. Without job_id it reports the latest export started through MCP; error holds the "
-         "end of the render log when it failed.",
+         "stopped, removed, idle), percent, output, output_exists, output_bytes, exit_code, "
+         "elapsed_ms, error}. Without job_id it reports the latest export started through MCP; "
+         "error holds the end of the render log when it failed. removed means the job was taken "
+         "out of the Jobs dock before it finished. exit_code is the raw process exit code; a "
+         "render that reached 99% or more counts as succeeded.",
          schema(R"({"type":"object","properties":{
              "job_id":{"type":"integer","minimum":0}
            }})"),

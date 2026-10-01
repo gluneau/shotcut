@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Edit / see / export smoke test for the Shotcut MCP server (stage 2).
-# Usage: MCP_TOKEN=<token> [MCP_PORT=7468] tools/mcp-smoke-edit.sh
+# Usage: MCP_TOKEN=<token> [MCP_PORT=7468] [MCP_APPDATA=<dir>] tools/mcp-smoke-edit.sh
+# MCP_APPDATA is the --appdata directory of the Shotcut under test. When set, the script writes a
+# deliberately slow custom preset there (presets/encode/mcp-slow) and uses it to test, without
+# racing the render, that a second export is refused while one runs; it also proves a custom
+# preset is applied (1280x720 output). When unset, those two checks run against the fast
+# x264-medium render and may flake (a NOTE is printed).
 # Needs: bash, curl, jq, ffmpeg, ffprobe, base64, xxd. Run it against a FRESH, throwaway Shotcut
 # (nothing loaded, empty playlist, no timeline): it adds clips, edits the timeline and exports
 # a video, and it aborts otherwise unless MCP_SMOKE_FORCE=1. See docs/mcp-server.md for the
@@ -367,17 +372,58 @@ for BADPRESET in '/etc/passwd' '../x' '..\x' '.hidden' 'a/../../etc/passwd'; do
 done
 expect_eq "export: refused presets started no job" idle "$(tool_json get_export_status '{}' | jq -r '.state')"
 
+echo "== export: never overwrite media used by the project"
+# A is only in the playlist, B is on the timeline; a symlink and a "/./" path must not get around it.
+ln -s "$CLIP_B" "$TMP/link.mp4"
+SUM_A="$(md5sum < "$CLIP_A")"; SUM_B="$(md5sum < "$CLIP_B")"
+expect_eq "export: overwrite of a timeline clip is refused" true "$(tool_is_error export_video "{\"path\":\"$CLIP_B\",\"overwrite\":true}")"
+expect_eq "export: overwrite of a playlist-only clip is refused" true "$(tool_is_error export_video "{\"path\":\"$CLIP_A\",\"overwrite\":true}")"
+expect_eq "export: a /./ path to a clip is refused" true "$(tool_is_error export_video "{\"path\":\"$TMP/./b.mp4\",\"overwrite\":true}")"
+expect_eq "export: a symlink to a clip is refused" true "$(tool_is_error export_video "{\"path\":\"$TMP/link.mp4\",\"overwrite\":true}")"
+expect_eq "export: clip B is unchanged" "$SUM_B" "$(md5sum < "$CLIP_B")"
+expect_eq "export: clip A is unchanged" "$SUM_A" "$(md5sum < "$CLIP_A")"
+expect_eq "export: refused overwrites started no job" idle "$(tool_json get_export_status '{}' | jq -r '.state')"
+
+wait_export() { # job id -> final state (up to 300 s)
+  local st=""
+  for _ in $(seq 1 300); do
+    st="$(tool_json get_export_status "{\"job_id\":$1}" | jq -r '.state')"
+    case "$st" in succeeded|failed|stopped|removed) break ;; esac
+    sleep 1
+  done
+  echo "$st"
+}
+
+if [ -n "${MCP_APPDATA:-}" ]; then
+  echo "== export: slow custom preset (deterministic while-running checks)"
+  mkdir -p "$MCP_APPDATA/presets/encode"
+  printf '%s\n' f=mp4 vcodec=libx264 preset=slower crf=18 width=1280 height=720 acodec=aac ab=128k \
+    meta.preset.extension=mp4 > "$MCP_APPDATA/presets/encode/mcp-slow"
+  SLOW="$TMP/slow.mp4"
+  SSTART="$(tool_json export_video "{\"path\":\"$SLOW\",\"preset\":\"mcp-slow\"}")"
+  SJOB="$(echo "$SSTART" | jq '.job_id')"
+  expect_eq "export: custom preset by file name is accepted" "$SLOW" "$(echo "$SSTART" | jq -r '.output')"
+  expect_eq "export: slow job is not finished right after it starts" true "$(tool_json get_export_status "{\"job_id\":$SJOB}" | jq '.state | IN("pending","running")')"
+  expect_eq "export: a second export while one runs is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/second.mp4\"}")"
+  expect_eq "export: a repeat with overwrite while running is an error (no dialog)" true "$(tool_is_error export_video "{\"path\":\"$SLOW\",\"overwrite\":true}")"
+  expect_eq "export: slow job still running after the refusals" true "$(tool_json get_export_status "{\"job_id\":$SJOB}" | jq '.state | IN("pending","running")')"
+  SSTATE="$(wait_export "$SJOB")"
+  expect_eq "export: slow job finished successfully" succeeded "$SSTATE"
+  echo "NOTE: slow export took $(tool_json get_export_status "{\"job_id\":$SJOB}" | jq '.elapsed_ms') ms"
+  expect_eq "export: custom preset applied (1280x720)" 1280x720 "$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$SLOW")"
+  expect_eq "export: custom preset applied (h264)" h264 "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$SLOW")"
+else
+  echo "NOTE: MCP_APPDATA is not set; the two 'while one runs' checks race the fast render and may flake."
+fi
+
 START="$(tool_json export_video "{\"path\":\"$OUT\"}")"
 JOB="$(echo "$START" | jq '.job_id')"
 expect_eq "export: returns a job id and the output path" "$OUT" "$(echo "$START" | jq -r '.output')"
-expect_eq "export: a second export while one runs is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/second.mp4\"}")"
-expect_eq "export: a repeat with overwrite while running is an error (no dialog)" true "$(tool_is_error export_video "{\"path\":\"$OUT\",\"overwrite\":true}")"
-STATE=""
-for _ in $(seq 1 300); do
-  STATE="$(tool_json get_export_status "{\"job_id\":$JOB}" | jq -r '.state')"
-  case "$STATE" in succeeded|failed|stopped) break ;; esac
-  sleep 1
-done
+if [ -z "${MCP_APPDATA:-}" ]; then
+  expect_eq "export: a second export while one runs is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/second.mp4\"}")"
+  expect_eq "export: a repeat with overwrite while running is an error (no dialog)" true "$(tool_is_error export_video "{\"path\":\"$OUT\",\"overwrite\":true}")"
+fi
+STATE="$(wait_export "$JOB")"
 expect_eq "export: finished successfully" succeeded "$STATE"
 S="$(tool_json get_export_status "{\"job_id\":$JOB}")"
 expect_eq "export: percent is 100" 100 "$(echo "$S" | jq '.percent')"

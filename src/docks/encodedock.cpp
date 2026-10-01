@@ -1630,6 +1630,20 @@ MeltJob *EncodeDock::createMeltJob(Mlt::Producer *service,
                                 "Try again with a different folder or file name."));
         return nullptr;
     }
+    if (error) {
+        // Quiet mode is stricter: also test the canonical path and the XML-escaped forms
+        // (a plain substring test misses "/./", symlinks and names with & or <).
+        QStringList candidates{QDir::fromNativeSeparators(target)};
+        const QString canonical = QFileInfo(target).canonicalFilePath();
+        if (!canonical.isEmpty())
+            candidates << canonical;
+        for (const QString &candidate : candidates) {
+            if (xml.contains(candidate) || xml.contains(candidate.toHtmlEscaped())) {
+                *error = tr("You cannot write to a file that is in your project.");
+                return nullptr;
+            }
+        }
+    }
 
     // Add autoclose to playlists.
     QDomNodeList playlists = dom.elementsByTagName("playlist");
@@ -1687,9 +1701,14 @@ AbstractJob *EncodeDock::exportToFile(const QString &presetName,
 
     // Stock presets come from the MLT repository, custom ones from the app data folder.
     Mlt::Properties *preset = nullptr;
+    QString profileFolder; // set for a stock preset inside a profile folder
     const QByteArray stockKey = ("consumer/avformat/" + presetName).toLatin1();
     if (m_presets->get_data(stockKey.constData())) {
         preset = new Mlt::Properties((mlt_properties) m_presets->get_data(stockKey.constData()));
+        // consumer/avformat/<profile>/<preset>: same test as on_presetsTree_clicked().
+        const QStringList textParts = QString::fromLatin1(stockKey).split('/');
+        if (textParts.count() > 3 && m_profiles->get_data(textParts.at(2).toLatin1().constData()))
+            profileFolder = textParts.at(2);
     } else {
         // A custom preset is a plain file name inside <appdata>/presets/encode, never a path.
         QDir dir(Settings.appDataLocation());
@@ -1697,7 +1716,8 @@ AbstractJob *EncodeDock::exportToFile(const QString &presetName,
             && QFileInfo(presetName).fileName() == presetName && dir.cd("presets")
             && dir.cd("encode")) {
             const QString file = QFileInfo(dir.absoluteFilePath(presetName)).canonicalFilePath();
-            if (!file.isEmpty() && file.startsWith(dir.canonicalPath() + "/")) {
+            if (!file.isEmpty() && QFileInfo(file).isFile()
+                && file.startsWith(dir.canonicalPath() + "/")) {
                 preset = new Mlt::Properties();
                 preset->load(file.toLatin1().constData());
             }
@@ -1709,14 +1729,31 @@ AbstractJob *EncodeDock::exportToFile(const QString &presetName,
         return nullptr;
     }
     const QString extension = QString::fromLatin1(preset->get("meta.preset.extension"));
-    if (!extension.isEmpty() && !path.endsWith("." + extension, Qt::CaseInsensitive)) {
+    if (extension.isEmpty()) {
+        delete preset;
+        error = tr("The preset has no file extension.");
+        return nullptr;
+    }
+    if (!path.endsWith("." + extension, Qt::CaseInsensitive)) {
         delete preset;
         error = tr("The preset %1 produces .%2 files; the path must end in .%2.")
                     .arg(presetName, extension);
         return nullptr;
     }
 
+    // Follow the project like the Reset button, then the preset's profile folder like a click
+    // on the preset in the tree.
     resetOptions();
+    onProfileChanged();
+    if (!profileFolder.isEmpty()) {
+        Mlt::Profile p(profileFolder.toLatin1().constData());
+        ui->widthSpinner->setValue(p.width());
+        ui->heightSpinner->setValue(p.height());
+        ui->aspectNumSpinner->setValue(p.display_aspect_num());
+        ui->aspectDenSpinner->setValue(p.display_aspect_den());
+        ui->scanModeCombo->setCurrentIndex(p.progressive());
+        ui->fpsSpinner->setValue(p.fps());
+    }
     loadPresetFromProperties(*preset);
     delete preset;
 
@@ -1736,7 +1773,12 @@ AbstractJob *EncodeDock::exportToFile(const QString &presetName,
         return nullptr;
     }
 
-    const int threads = qBound(1, QThread::idealThreadCount() - 1, 4);
+    // Same thread count as the Export button.
+    int threads = QThread::idealThreadCount();
+    if (threads > 2 && ui->parallelCheckbox->isChecked())
+        threads = qMin(threads - 1, 4);
+    else
+        threads = 1;
     MeltJob *job = createMeltJob(service,
                                  path,
                                  Settings.playerGPU() ? -1 : -threads,
