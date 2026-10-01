@@ -91,5 +91,27 @@ expect_eq "get_frame: max_width too small is an error" true "$(tool_is_error get
 expect_eq "get_frame: max_width too large is an error" true "$(tool_is_error get_frame '{"max_width":5000}')"
 expect_eq "get_frame: bad format is an error" true "$(tool_is_error get_frame '{"format":"gif"}')"
 
+echo "== playlist and timeline (read)"
+expect_eq "get_playlist: empty at first" 0 "$(tool_json get_playlist '{}' | jq '.items | length')"
+expect_eq "get_timeline: no tracks yet" 0 "$(tool_json get_timeline '{}' | jq '.tracks | length')"
+expect_eq "get_timeline: fps" 25 "$(tool_json get_timeline '{}' | jq '.fps')"
+
+expect_eq "playlist_add: relative path is an error" true "$(tool_is_error playlist_add '{"path":"a.mp4"}')"
+expect_eq "playlist_add: missing file is an error" true "$(tool_is_error playlist_add "{\"path\":\"$TMP/missing.mp4\"}")"
+expect_eq "playlist_add: directory is an error" true "$(tool_is_error playlist_add "{\"path\":\"$TMP\"}")"
+expect_eq "playlist_add: resource path is an error" true "$(tool_is_error playlist_add '{"path":":/a.mp4"}')"
+echo "not media" > "$TMP/junk.mp4"
+expect_eq "playlist_add: a non-media file is an error" true "$(tool_is_error playlist_add "{\"path\":\"$TMP/junk.mp4\"}")"
+expect_eq "get_playlist unchanged after the errors" 0 "$(tool_json get_playlist '{}' | jq '.items | length')"
+
+expect_eq "playlist_add a" false "$(tool_is_error playlist_add "{\"path\":\"$CLIP_A\"}")"
+expect_eq "playlist_add b" false "$(tool_is_error playlist_add "{\"path\":\"$CLIP_B\"}")"
+RES="$(tool_json playlist_add "{\"path\":\"$CLIP_C\"}")"
+expect_eq "playlist_add returns the whole playlist" 3 "$(echo "$RES" | jq '.items | length')"
+expect_eq "get_playlist: three items" 3 "$(tool_json get_playlist '{}' | jq '.items | length')"
+expect_eq "get_playlist: durations in order" "75,100,125" "$(tool_json get_playlist '{}' | jq -r '[.items[].duration] | join(",")')"
+expect_eq "get_playlist: paths in order" "$CLIP_A,$CLIP_B,$CLIP_C" "$(tool_json get_playlist '{}' | jq -r '[.items[].path] | join(",")')"
+expect_eq "get_playlist: indexes" "0,1,2" "$(tool_json get_playlist '{}' | jq -r '[.items[].index] | join(",")')"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
