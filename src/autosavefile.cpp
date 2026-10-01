@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2016 Meltytech, LLC
+ * Copyright (c) 2011-2026 Meltytech, LLC
  * Author: Dan Dennedy <dan@dennedy.org>
  * Loosely based on ideas from KAutoSaveFile by Jacob R Rideout <kde@jacobrideout.net>
  * and Kdenlive by Jean-Baptiste Mardelle.
@@ -87,6 +87,11 @@ AutoSaveFile *AutoSaveFile::getFile(const QString &filename)
     }
 
     return result;
+}
+
+bool AutoSaveFile::exists(const QString &filename)
+{
+    return QFileInfo(path(), hashName(filename) + extension).exists();
 }
 
 QString AutoSaveFile::path()

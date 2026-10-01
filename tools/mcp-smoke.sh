@@ -75,6 +75,41 @@ expect_eq "invalid JSON -> -32700" -32700 "$(rpc '{bad' | jq -r '.error.code')"
 expect_eq "unknown tool -> -32602" -32602 "$(call_tool nope '{}' | jq -r '.error.code')"
 expect_eq "non-object arguments -> -32602" -32602 "$(rpc '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"x","arguments":5}}' | jq -r '.error.code')"
 
+echo "== project tools"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+HAVE_CLIP=0
+if command -v ffmpeg >/dev/null 2>&1 \
+   && ffmpeg -loglevel error -f lavfi -i testsrc=duration=4:size=320x240:rate=25 -pix_fmt yuv420p "$TMP/clip.mp4"; then
+  HAVE_CLIP=1
+fi
+
+expect_eq "tools/list has get_state" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["get_state","open_project","save_project"])')"
+expect_eq "get_state.loaded is a boolean" boolean "$(tool_json get_state '{}' | jq -r '.loaded | type')"
+expect_eq "get_state.modified is a boolean" boolean "$(tool_json get_state '{}' | jq -r '.modified | type')"
+
+expect_eq "open_project: relative path is an error" true "$(tool_is_error open_project '{"path":"clip.mp4"}')"
+expect_eq "open_project: missing file is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP/missing.mp4\"}")"
+expect_eq "open_project: directory is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP\"}")"
+expect_eq "open_project: no path is an error" true "$(tool_is_error open_project '{}')"
+expect_eq "open_project: non-boolean discard_changes is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP\",\"discard_changes\":\"yes\"}")"
+
+expect_eq "save_project: relative path is an error" true "$(tool_is_error save_project '{"path":"copy.mlt"}')"
+expect_eq "save_project: non-.mlt path is an error" true "$(tool_is_error save_project "{\"path\":\"$TMP/copy.txt\"}")"
+expect_eq "save_project: directory is an error" true "$(tool_is_error save_project "{\"path\":\"$TMP\"}")"
+expect_eq "save_project: unwritable folder is an error" true "$(tool_is_error save_project '{"path":"/proc/copy.mlt"}')"
+expect_eq "save_project: numeric path is an error" true "$(tool_is_error save_project '{"path":5}')"
+
+if [ "$HAVE_CLIP" = 1 ]; then
+  expect_eq "open_project: opens a media file" false "$(tool_is_error open_project "{\"path\":\"$TMP/clip.mp4\"}")"
+  sleep 1.5
+  expect_eq "get_state: loaded after open" true "$(tool_json get_state '{}' | jq -r '.loaded')"
+  expect_eq "get_state: duration is 100 frames" 100 "$(tool_json get_state '{}' | jq -r '.duration')"
+  expect_eq "save_project: writes a copy" false "$(tool_is_error save_project "{\"path\":\"$TMP/copy.mlt\"}")"
+  expect_eq "save_project: the copy is a non-empty file" true "$([ -s "$TMP/copy.mlt" ] && echo true || echo false)"
+else
+  echo "SKIP  media checks (ffmpeg not available)"
+fi
+
 # --- tool checks are added below by later tasks ---
 
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
