@@ -42,6 +42,7 @@ class EncodeDock;
 class JobsDock;
 class PlaylistDock;
 class QUndoStack;
+class McpServer;
 class QActionGroup;
 class FilterController;
 class ScopeController;
@@ -152,6 +153,7 @@ private:
     void setupMenuView();
     void connectVideoWidgetSignals();
     void setupSettingsMenu();
+    void setupMcpServer();
     void setupOpenOtherMenu();
     void setupActions();
     void mirrorViewActionShortcuts();
@@ -196,6 +198,7 @@ private:
     QString m_currentFile;
     bool m_isKKeyPressed;
     QUndoStack *m_undoStack;
+    McpServer *m_mcpServer = nullptr;
     QDockWidget *m_historyDock;
     QActionGroup *m_profileGroup;
     QActionGroup *m_externalGroup;

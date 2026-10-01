@@ -89,6 +89,8 @@ add_executable(shotcut WIN32 MACOSX_BUNDLE
   main.cpp
   mainwindow.cpp mainwindow.h
   mainwindow.ui
+  mcpserver.cpp mcpserver.h
+  mcptools.cpp mcptools.h
   mltcontroller.cpp mltcontroller.h
   mltxmlchecker.cpp mltxmlchecker.h
   models/actionsmodel.cpp models/actionsmodel.h

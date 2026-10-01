@@ -53,6 +53,7 @@
 #include "hdrpreviewwindow.h"
 #include "jobqueue.h"
 #include "jobs/screencapturejob.h"
+#include "mcpserver.h"
 #include "models/audiolevelstask.h"
 #include "models/keyframesmodel.h"
 #include "models/motiontrackermodel.h"
@@ -225,6 +226,7 @@ MainWindow::MainWindow()
     setupAndConnectPlayerWidget();
 
     setupSettingsMenu();
+    setupMcpServer();
     readPlayerSettings();
     configureVideoWidget();
 
@@ -1100,6 +1102,44 @@ MainWindow::~MainWindow()
 {
     delete ui;
     Mlt::Controller::destroy();
+}
+
+void MainWindow::setupMcpServer()
+{
+    m_mcpServer = new McpServer(this);
+
+    QMenu *menu = ui->menuSettings->addMenu(tr("MCP Server"));
+    QAction *enable = menu->addAction(tr("Enable"));
+    enable->setObjectName("mcpServerEnableAction");
+    enable->setCheckable(true);
+    QAction *copyToken = menu->addAction(tr("Copy Token to Clipboard"));
+    copyToken->setObjectName("mcpServerCopyTokenAction");
+    QAction *regenerate = menu->addAction(tr("Regenerate Token"));
+    regenerate->setObjectName("mcpServerRegenerateTokenAction");
+
+    connect(enable, &QAction::toggled, this, [this, enable](bool on) {
+        Settings.setMcpServerEnabled(on);
+        if (!on) {
+            m_mcpServer->stop();
+            showStatusMessage(tr("MCP server stopped"));
+        } else if (m_mcpServer->start(Settings.mcpServerPort(), Settings.mcpServerToken())) {
+            showStatusMessage(tr("MCP server listening on 127.0.0.1:%1").arg(Settings.mcpServerPort()));
+        } else {
+            showStatusMessage(tr("MCP server failed to start: %1").arg(m_mcpServer->errorString()));
+            enable->setChecked(false); // re-enters this lambda with on == false
+        }
+    });
+    connect(copyToken, &QAction::triggered, this, [this]() {
+        QGuiApplication::clipboard()->setText(Settings.mcpServerToken());
+        showStatusMessage(tr("MCP token copied to the clipboard"));
+    });
+    connect(regenerate, &QAction::triggered, this, [this]() {
+        Settings.regenerateMcpServerToken();
+        m_mcpServer->setToken(Settings.mcpServerToken());
+        showStatusMessage(tr("MCP token regenerated"));
+    });
+
+    enable->setChecked(Settings.mcpServerEnabled()); // starts the server when enabled
 }
 
 void MainWindow::setupSettingsMenu()
