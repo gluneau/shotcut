@@ -57,14 +57,18 @@ QJsonObject clipJson(MultitrackModel &model, int track, int clip)
 {
     const QModelIndex index = model.index(clip, 0, model.index(track));
     QJsonObject o{{"index", clip}, {"kind", kindOf(model, track, clip)}};
-    if (std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, clip)) {
+    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, clip);
+    if (info) {
         o["start"] = info->start;
         o["duration"] = info->frame_count;
         o["in"] = info->frame_in;
         o["out"] = info->frame_out;
     }
     o["name"] = model.data(index, MultitrackModel::NameRole).toString();
-    o["path"] = model.data(index, MultitrackModel::ResourceRole).toString();
+    if (o["kind"] == "clip" && info && info->producer && info->producer->is_valid())
+        o["path"] = ProxyManager::resource(*info->producer);
+    else
+        o["path"] = model.data(index, MultitrackModel::ResourceRole).toString();
     o["fade_in"] = model.data(index, MultitrackModel::FadeInRole).toInt();
     o["fade_out"] = model.data(index, MultitrackModel::FadeOutRole).toInt();
     return o;
@@ -151,6 +155,11 @@ QJsonObject playlistAddTool(const QJsonObject &arguments)
     if (path.endsWith(".mlt") || path.endsWith(".xml"))
         return textResult("Project files cannot be added to the playlist; use open_project.", true);
 
+    // Like PlaylistDock::addFiles: runs animation formats in a subprocess so a crashing file
+    // cannot take Shotcut down. It shows no dialog.
+    if (MLT.checkFile(path))
+        return textResult("Shotcut cannot open " + path + " as media.", true);
+
     Mlt::Producer probe(MLT.profile(), path.toUtf8().constData());
     if (!probe.is_valid() || probe.get_length() <= 0)
         return textResult("Shotcut cannot open " + path + " as media.", true);
@@ -173,9 +182,11 @@ QJsonObject playlistAddTool(const QJsonObject &arguments)
     if (!producer || !producer->is_valid())
         return textResult("Shotcut could not prepare " + path + ".", true);
     producer->set(kShotcutSkipConvertProperty, 1);
-    // Generators and still images need a duration, which Shotcut asks for with a dialog.
+    // Generators (producers without a finite length) would need Shotcut's duration dialog.
+    // Still images do not: setupNewProducer gives them the default image duration. A probe is
+    // not reported live before setupNewProducer, so this can only be checked here.
     if (MLT.isLiveProducer(producer.data()) && !producer->get_int(kShotcutVirtualClip))
-        return textResult("Generators and still images are not supported by playlist_add.", true);
+        return textResult("Generators are not supported by playlist_add.", true);
 
     ProxyManager::generateIfNotExists(*producer);
     MAIN.undoStack()->push(
@@ -201,8 +212,8 @@ QList<McpTool> McpTools::timelineTools()
          schema(R"({"type":"object","properties":{}})"),
          getTimelineTool},
         {"playlist_add",
-         "Add a media file (absolute path) to the end of the playlist. Project files, generators "
-         "and still images are not supported. With nothing loaded the first file also becomes the "
+         "Add a media file (absolute path) to the end of the playlist. Still images are added "
+         "with Shotcut's default image duration. Project files and generators are not supported. With nothing loaded the first file also becomes the "
          "loaded clip, as in Shotcut's Add Files. Returns the playlist.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute path of a media file."}

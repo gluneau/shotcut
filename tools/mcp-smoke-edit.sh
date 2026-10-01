@@ -65,8 +65,11 @@ echo "== get_frame"
 expect_eq "tools/list has get_frame" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["get_frame"])')"
 expect_eq "get_frame: nothing loaded is an error" true "$(tool_is_error get_frame '{}')"
 
-expect_eq "open a clip" false "$(tool_is_error open_project "{\"path\":\"$CLIP_A\"}")"
-expect_eq "clip loaded" true "$(wait_state get_state '{}' '.loaded' true)"
+# The first playlist_add runs on the empty session: the file also becomes the loaded clip.
+expect_eq "playlist_add a on the empty session" false "$(tool_is_error playlist_add "{\"path\":\"$CLIP_A\"}")"
+expect_eq "clip loaded by the first playlist_add" true "$(wait_state get_state '{}' '.loaded' true)"
+expect_eq "profile follows the first file (fps)" 25 "$(tool_json get_state '{}' | jq '.fps')"
+expect_eq "playlist has one item after the first add" 1 "$(tool_json get_playlist '{}' | jq '.items | length')"
 
 frame_to_file() { call_tool get_frame "$1" | jq -r '.result.content[0].data' | base64 -d > "$2"; }
 expect_eq "get_frame: image content" image "$(call_tool get_frame '{}' | jq -r '.result.content[0].type')"
@@ -92,7 +95,6 @@ expect_eq "get_frame: max_width too large is an error" true "$(tool_is_error get
 expect_eq "get_frame: bad format is an error" true "$(tool_is_error get_frame '{"format":"gif"}')"
 
 echo "== playlist and timeline (read)"
-expect_eq "get_playlist: empty at first" 0 "$(tool_json get_playlist '{}' | jq '.items | length')"
 expect_eq "get_timeline: no tracks yet" 0 "$(tool_json get_timeline '{}' | jq '.tracks | length')"
 expect_eq "get_timeline: fps" 25 "$(tool_json get_timeline '{}' | jq '.fps')"
 
@@ -102,9 +104,8 @@ expect_eq "playlist_add: directory is an error" true "$(tool_is_error playlist_a
 expect_eq "playlist_add: resource path is an error" true "$(tool_is_error playlist_add '{"path":":/a.mp4"}')"
 echo "not media" > "$TMP/junk.mp4"
 expect_eq "playlist_add: a non-media file is an error" true "$(tool_is_error playlist_add "{\"path\":\"$TMP/junk.mp4\"}")"
-expect_eq "get_playlist unchanged after the errors" 0 "$(tool_json get_playlist '{}' | jq '.items | length')"
+expect_eq "get_playlist unchanged after the errors" 1 "$(tool_json get_playlist '{}' | jq '.items | length')"
 
-expect_eq "playlist_add a" false "$(tool_is_error playlist_add "{\"path\":\"$CLIP_A\"}")"
 expect_eq "playlist_add b" false "$(tool_is_error playlist_add "{\"path\":\"$CLIP_B\"}")"
 RES="$(tool_json playlist_add "{\"path\":\"$CLIP_C\"}")"
 expect_eq "playlist_add returns the whole playlist" 3 "$(echo "$RES" | jq '.items | length')"
