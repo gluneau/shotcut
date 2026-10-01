@@ -3,6 +3,9 @@
 # Usage: MCP_TOKEN=<token> [MCP_PORT=8765] tools/mcp-smoke.sh
 # Needs: bash, curl, jq (and ffmpeg for the media checks). Shotcut must be running
 # with Settings > MCP Server > Enable checked. The slow-request check takes ~12 s.
+# WARNING: this opens and replaces whatever is loaded in the target Shotcut. Run it against a
+# throwaway session (see docs/mcp-server.md, Testing). It exits with status 2 if the project has
+# unsaved changes, unless MCP_SMOKE_FORCE=1 is set.
 set -u
 
 PORT="${MCP_PORT:-8765}"
@@ -38,6 +41,12 @@ raw() {
   timeout 14 head -n 1 <&3 | tr -d '\r'
   exec 3<&- 3>&-
 }
+
+if [ "$(tool_json get_state '{}' | jq -r '.modified')" = true ] && [ "${MCP_SMOKE_FORCE:-0}" != 1 ]; then
+  echo "Refusing to run: the project in Shotcut has unsaved changes and this test replaces it."
+  echo "Use a throwaway Shotcut session, or set MCP_SMOKE_FORCE=1 to run anyway."
+  exit 2
+fi
 
 echo "== HTTP checks"
 expect_eq "no token -> 401" 401 "$(http_status -X POST "$URL" "${JSON[@]}" -d '{}')"
@@ -76,6 +85,16 @@ expect_eq "unknown tool -> -32602" -32602 "$(call_tool nope '{}' | jq -r '.error
 expect_eq "non-object arguments -> -32602" -32602 "$(rpc '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"x","arguments":5}}' | jq -r '.error.code')"
 
 echo "== project tools"
+# Polls get_state (up to ~5 s) until the jq field equals the expected value; prints the last value.
+wait_state() {
+  local field="$1" want="$2" got="" i
+  for i in $(seq 1 25); do
+    got="$(tool_json get_state '{}' | jq -r "$field")"
+    [ "$got" = "$want" ] && break
+    sleep 0.2
+  done
+  echo "$got"
+}
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 HAVE_CLIP=0
 if command -v ffmpeg >/dev/null 2>&1 \
@@ -113,21 +132,24 @@ if [ "$HAVE_CLIP" = 1 ]; then
   printf '<mlt' > "$TMP/broken.mlt"
   expect_eq "open_project: invalid .mlt is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP/broken.mlt\"}")"
   expect_eq "open_project: invalid .mlt leaves state unchanged" "$BEFORE" "$(tool_json get_state '{}' | jq -c '[.project,.loaded]')"
+  REALCOPY="$(realpath "$TMP/copy.mlt")"
+  expect_eq "open_project: opens a saved .mlt project" false "$(tool_is_error open_project "{\"path\":\"$TMP/copy.mlt\"}")"
+  expect_eq "get_state: project is the opened .mlt" "$REALCOPY" "$(wait_state .project "$REALCOPY")"
+  expect_eq "open_project: opens the same .mlt again" false "$(tool_is_error open_project "{\"path\":\"$TMP/copy.mlt\"}")"
+  expect_eq "get_state: project is still the .mlt" "$REALCOPY" "$(wait_state .project "$REALCOPY")"
+  tool_is_error open_project "{\"path\":\"$TMP/clip.mp4\"}" >/dev/null
+  sleep 1.5
+  cp "$TMP/copy.mlt" "$TMP/ro.mlt"; chmod a-w "$TMP/ro.mlt"
+  if [ -w "$TMP/ro.mlt" ]; then
+    echo "SKIP  read-only save check (file still writable, running as root?)"
+  else
+    expect_eq "save_project: read-only existing file is an error" true "$(tool_is_error save_project "{\"path\":\"$TMP/ro.mlt\"}")"
+  fi
 else
   echo "SKIP  media checks (ffmpeg not available)"
 fi
 
 echo "== transport tools"
-# Polls get_state (up to ~5 s) until the jq field equals the expected value; prints the last value.
-wait_state() {
-  local field="$1" want="$2" got="" i
-  for i in $(seq 1 25); do
-    got="$(tool_json get_state '{}' | jq -r "$field")"
-    [ "$got" = "$want" ] && break
-    sleep 0.2
-  done
-  echo "$got"
-}
 if [ "$HAVE_CLIP" = 1 ]; then
   tool_is_error open_project "{\"path\":\"$TMP/clip.mp4\",\"discard_changes\":true}" >/dev/null
   sleep 1.5

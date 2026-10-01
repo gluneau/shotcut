@@ -13,7 +13,8 @@ MCP client (for example Claude Code) can control it. It is off by default.
          --header "Authorization: Bearer <token>"
 
 The port is read from `mcpServer/port` (1024-65535, default 8765) in Shotcut's settings file when
-the server starts, so toggle Enable off and on after changing it. "Regenerate Token" invalidates
+the server starts, so toggle Enable off and on after changing it. An invalid value silently falls
+back to 8765. "Regenerate Token" invalidates
 the old token immediately.
 
 The server speaks MCP over HTTP with a handshake: `initialize` is required first. Supported
@@ -31,7 +32,10 @@ revision is not supported.
 | `list_actions`, `trigger_action` | List and trigger a fixed allowlist of 17 player actions |
 
 `open_project` refuses if the project has unsaved changes unless `discard_changes` is true, and
-refuses if an auto-save file exists for the project. It returns an error (and restores the modified
+refuses if an auto-save file exists for the project (`.mlt`/`.xml` project files only).
+`discard_changes` applies only when a project file (`.mlt`/`.xml`, case-sensitive) is opened or no
+project is loaded; opening a media file while a timeline or playlist project is loaded neither
+needs it nor touches the project or its modified flag. It returns an error (and restores the modified
 flag) if Shotcut did not actually open the file. Rare project-repair or compatibility dialogs inside
 Shotcut's open code can still appear for unusual project files and block the request until they
 are answered; call `get_state` to confirm the result.
@@ -62,7 +66,10 @@ is stored unencrypted in the settings file.
 
     MCP_TOKEN=<token> tools/mcp-smoke.sh
 
-Needs curl and jq, plus ffmpeg for the media checks; takes about a minute. Shotcut can be run
+Needs curl and jq, plus ffmpeg for the media checks; takes roughly 25 s. The test opens and replaces
+whatever is loaded in the target Shotcut, so run it against a throwaway session (the headless
+recipe below); it aborts if the project has unsaved changes unless `MCP_SMOKE_FORCE=1` is set.
+Shotcut can be run
 headless for it: pre-seed `<scratch dir>/shotcut.ini` with a `[mcpServer]` section containing
 `enabled=true` and a `token=` value, then start
 `xvfb-run -a build/cc-debug-linux/src/shotcut --appdata <scratch dir>`.

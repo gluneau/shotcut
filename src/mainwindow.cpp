@@ -1141,7 +1141,10 @@ void MainWindow::setupMcpServer()
         showStatusMessage(tr("MCP token regenerated"));
     });
 
-    enable->setChecked(Settings.mcpServerEnabled()); // starts the server when enabled
+    // Start after the constructor finishes so no request can reach a half-built MainWindow.
+    QTimer::singleShot(0, this, [this, enable]() {
+        enable->setChecked(Settings.mcpServerEnabled()); // starts the server when enabled
+    });
 }
 
 void MainWindow::setupSettingsMenu()
@@ -3837,6 +3840,13 @@ bool MainWindow::continueModified()
         }
     }
     return true;
+}
+
+void MainWindow::discardModified()
+{
+    setWindowModified(false);
+    QMutexLocker locker(&m_autosaveMutex);
+    m_autosaveFile.reset();
 }
 
 bool MainWindow::continueJobsRunning()

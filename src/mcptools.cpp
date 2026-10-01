@@ -46,10 +46,10 @@ bool isResourcePath(const QString &path)
 
 // True if the requested file is what Shotcut now has open: the project file for .mlt/.xml,
 // otherwise the producer's resource.
-bool isCurrentFile(const QString &path, const QString &suffix)
+bool isCurrentFile(const QString &path, bool isProjectFile)
 {
     const QString wanted = QFileInfo(path).canonicalFilePath();
-    const QString current = (suffix == "mlt" || suffix == "xml") ? MAIN.fileName() : MLT.resource();
+    const QString current = isProjectFile ? MAIN.fileName() : MLT.resource();
     return !wanted.isEmpty() && QFileInfo(current).canonicalFilePath() == wanted;
 }
 
@@ -63,6 +63,8 @@ bool isLoaded()
 bool isWritableTarget(const QString &path)
 {
     QFileInfo info(path);
+    if (info.isFile() && !info.isWritable())
+        return false;
     if (!info.isDir())
         info = QFileInfo(info.dir().path());
     return info.isWritable();
@@ -96,25 +98,29 @@ QJsonObject openProject(const QJsonObject &arguments)
     if (!discard.isUndefined() && !discard.isBool())
         return McpTools::textResult("discard_changes must be a boolean.", true);
 
-    const QString suffix = info.suffix().toLower();
-    if ((suffix == "mlt" || suffix == "xml") && AutoSaveFile::exists(path)) {
+    // Same case-sensitive test as MainWindow::open().
+    const bool isProjectFile = path.endsWith(".mlt") || path.endsWith(".xml");
+    if (isProjectFile && AutoSaveFile::exists(path)) {
         return McpTools::textResult("An auto-save file exists for this project. Open the project "
                                     "once in the Shotcut window to choose whether to recover it.",
                                     true);
     }
-    const bool hadChanges = MAIN.isWindowModified();
+    // open() only asks what to do with unsaved changes when it opens a project file or when no
+    // project is loaded. Otherwise the project stays open and its changes must not be touched.
+    const bool wouldPrompt = isProjectFile || (!MAIN.playlist() && !MAIN.multitrack());
+    const bool hadChanges = wouldPrompt && MAIN.isWindowModified();
     if (hadChanges) {
         if (!discard.toBool(false)) {
             return McpTools::textResult("The current project has unsaved changes. Save it first "
                                         "or pass discard_changes: true.",
                                         true);
         }
-        MAIN.setWindowModified(false); // so open() does not ask what to do with the changes
+        MAIN.discardModified(); // so open() does not ask what to do with the changes
     }
 
     // open() reports some failures only through the status bar, so clients should call
     // get_state afterwards to confirm what is loaded.
-    if (!MAIN.open(path, nullptr, false) || !isCurrentFile(path, suffix)) {
+    if (!MAIN.open(path, nullptr, false) || !isCurrentFile(path, isProjectFile)) {
         // open() can return without opening anything; the old project is then still loaded.
         if (hadChanges)
             MAIN.setWindowModified(true);
@@ -336,10 +342,12 @@ QList<McpTool> McpTools::all()
          getState},
         {"open_project",
          "Open a project (.mlt) or media file by absolute path. Fails if the current project has "
-         "unsaved changes unless discard_changes is true. Call get_state afterwards to confirm.",
+         "unsaved changes unless discard_changes is true; that flag only matters when a project "
+         "file is opened or no project is loaded (opening a media file into a loaded project "
+         "leaves the project and its changes alone). Call get_state afterwards to confirm.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute path to the file."},
-             "discard_changes":{"type":"boolean","description":"Discard unsaved changes in the current project."}
+             "discard_changes":{"type":"boolean","description":"Discard unsaved changes when a project file is opened or no project is loaded."}
            },"required":["path"]})"),
          openProject},
         {"save_project",
