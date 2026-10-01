@@ -585,7 +585,9 @@ QJsonObject timelineFadeTool(const QJsonObject &arguments)
         return textResult("A fade cannot be longer than the clip.", true);
 
     MLT.pause();
-    MAIN.undoStack()->beginMacro(QObject::tr("Set clip fades"));
+    MAIN.undoStack()->beginMacro(inArg != FrameArg::Ok    ? QObject::tr("Set clip fade out")
+                                 : outArg != FrameArg::Ok ? QObject::tr("Set clip fade in")
+                                                          : QObject::tr("Set clip fades"));
     if (inArg == FrameArg::Ok)
         dock->fadeIn(track, clip, fadeIn);
     if (outArg == FrameArg::Ok)
@@ -658,19 +660,22 @@ QList<McpTool> McpTools::timelineTools()
            },"required":["track","clip"]})"),
          timelineRemoveTool},
         {"timeline_trim",
-         "Trim a clip edge (track 0 is the TOPMOST video track). Pass exactly one of frame (the "
-         "absolute timeline frame the edge moves "
-         "to; for out the clip then ends just before it; with ripple true and edge in the clip "
-         "start stays and later content shifts, so the edge does not end at frame) or delta "
-         "(frames: for in positive moves the in-point later, for out positive shortens the clip). "
-         "ripple false (default) leaves a gap. An extension longer than the neighbouring gap is "
-         "refused. Each trim is one undo step. Returns the updated track.",
+         "Trim the in or out edge of a clip. Pass EXACTLY ONE of frame or delta. "
+         "frame is the absolute timeline frame the edge moves to; for edge out the clip then ends "
+         "just before that frame. delta is the number of frames to move the edge: for in, "
+         "positive moves the in-point later (the clip gets shorter at its start); for out, "
+         "positive shortens the end. A negative delta extends the clip into a neighbouring gap; "
+         "it is refused when the gap is shorter than the extension or the source runs out. "
+         "ripple false (default) leaves a gap where frames were removed; ripple true closes it "
+         "(later clips move earlier). With edge in and ripple true the clip keeps its start "
+         "frame, so the edge does not end at frame. Every trim is ONE undo step. Returns the "
+         "updated track; clip indexes may shift. Track 0 is the TOPMOST video track.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},
              "edge":{"type":"string","enum":["in","out"]},
-             "frame":{"type":"integer","minimum":0},
-             "delta":{"type":"integer"},
+             "frame":{"type":"integer","minimum":0,"description":"Absolute timeline frame the edge moves to."},
+             "delta":{"type":"integer","description":"Frames to move the edge; positive shortens the clip, negative extends it."},
              "ripple":{"type":"boolean"}
            },"required":["track","clip","edge"]})"),
          timelineTrimTool},

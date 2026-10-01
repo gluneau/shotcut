@@ -289,8 +289,22 @@ expect_eq "fade: values reported" "10,5" "$(echo "$FADE" | jq -r '.track.clips[1
 expect_eq "fade: get_timeline agrees" "10,5" "$(tool_json get_timeline '{}' | jq -r '.tracks[0].clips[1] | "\(.fade_in),\(.fade_out)"')"
 FADE="$(tool_json timeline_fade '{"track":0,"clip":1,"fade_in":0}')"
 expect_eq "fade: 0 removes" "0,5" "$(echo "$FADE" | jq -r '.track.clips[1] | "\(.fade_in),\(.fade_out)"')"
+FADES='.tracks[0].clips[1] | "\(.fade_in),\(.fade_out)"'
+tool_json timeline_fade '{"track":0,"clip":1,"fade_in":8}' >/dev/null
+expect_eq "fade in only: undo text names the fade in" "Set clip fade in" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "fade in only: undone" "0,5" "$(tool_json get_timeline '{}' | jq -r "$FADES")"
+tool_json redo '{}' >/dev/null
+expect_eq "fade in only: redo restores it" "8,5" "$(tool_json get_timeline '{}' | jq -r "$FADES")"
+tool_json undo '{}' >/dev/null
+tool_json timeline_fade '{"track":0,"clip":1,"fade_out":9}' >/dev/null
+expect_eq "fade out only: undo text names the fade out" "Set clip fade out" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "fade out only: undone" "0,5" "$(tool_json get_timeline '{}' | jq -r "$FADES")"
+tool_json redo '{}' >/dev/null
+expect_eq "fade out only: redo restores it" "0,9" "$(tool_json get_timeline '{}' | jq -r "$FADES")"
+tool_json undo '{}' >/dev/null
 tool_json timeline_fade '{"track":0,"clip":1,"fade_in":7,"fade_out":3}' >/dev/null
-expect_eq "fade: both values in one call are one undo step" "0,5" "$(tool_json undo '{}' >/dev/null; tool_json get_timeline '{}' | jq -r '.tracks[0].clips[1] | "\(.fade_in),\(.fade_out)"')"
+expect_eq "fade: both values in one call are one undo step named for both" "Set clip fades" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "fade: both values undone together" "0,5" "$(tool_json get_timeline '{}' | jq -r "$FADES")"
 echo "== get_frame: a frame taken after an edit at a position requested before"
 FP=$(( $(tool_json get_timeline '{}' | jq '.tracks[0].clips[1].start') + 2 ))
 for rep in 1 2 3 4 5; do
