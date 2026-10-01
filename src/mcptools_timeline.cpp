@@ -384,8 +384,8 @@ QJsonObject timelineTrimTool(const QJsonObject &arguments)
     int delta = 0;
     if (!frameValue.isUndefined()) {
         int frame = 0;
-        if (readFrame(arguments, "frame", frame) != FrameArg::Ok)
-            return textResult("frame must be a non-negative integer.", true);
+        if (readFrame(arguments, "frame", frame) != FrameArg::Ok || frame > 1000000000)
+            return textResult("frame must be a non-negative integer (at most 1e9).", true);
         // The edge moves to `frame`; for out the clip then ends just before it.
         delta = edge == "in" ? frame - info->start : info->start + info->frame_count - frame;
     } else {
@@ -400,13 +400,29 @@ QJsonObject timelineTrimTool(const QJsonObject &arguments)
         if (!valid)
             return textResult("Shotcut cannot trim this edge by " + QString::number(delta)
                                   + " frames (source limits, a neighbour or a transition).", true);
+        if (delta < 0) {
+            // trimClipIn/Out silently clamp an extension to the neighbouring blank.
+            const int neighbour = edge == "in" ? clip - 1 : clip + 1;
+            if (neighbour >= 0 && neighbour < model.rowCount(model.index(track))
+                && kindOf(model, track, neighbour) == "blank") {
+                std::unique_ptr<Mlt::ClipInfo> gap = model.getClipInfo(track, neighbour);
+                if (gap && gap->frame_count < -delta)
+                    return textResult("The neighbouring gap is only "
+                                          + QString::number(gap->frame_count) + " frames.",
+                                      true);
+            }
+        }
         MLT.pause();
+        // A macro never merges with other trims (merging matches on clip index, which can shift).
+        MAIN.undoStack()->beginMacro(edge == "in" ? QObject::tr("Trim clip in point")
+                                                  : QObject::tr("Trim clip out point"));
         if (edge == "in")
             MAIN.undoStack()->push(new Timeline::TrimClipInCommand(
                 model, *dock->markersModel(), track, clip, delta, ripple));
         else
             MAIN.undoStack()->push(new Timeline::TrimClipOutCommand(
                 model, *dock->markersModel(), track, clip, delta, ripple));
+        MAIN.undoStack()->endMacro();
     }
     return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
 }
@@ -416,8 +432,9 @@ QJsonObject timelineMoveTool(const QJsonObject &arguments)
     int track = 0, clip = 0, toStart = 0;
     if (readFrame(arguments, "track", track) != FrameArg::Ok
         || readFrame(arguments, "clip", clip) != FrameArg::Ok
-        || readFrame(arguments, "to_start", toStart) != FrameArg::Ok)
-        return textResult("track, clip and to_start must be non-negative integers.", true);
+        || readFrame(arguments, "to_start", toStart) != FrameArg::Ok || toStart > 1000000000)
+        return textResult("track, clip and to_start must be non-negative integers (to_start at most 1e9).",
+                          true);
     int toTrack = track;
     const FrameArg toTrackArg = readFrame(arguments, "to_track", toTrack);
     if (toTrackArg == FrameArg::Invalid)
@@ -436,6 +453,14 @@ QJsonObject timelineMoveTool(const QJsonObject &arguments)
     if (!info)
         return textResult("Cannot read the clip.", true);
 
+    for (const int neighbour : {clip - 1, clip + 1}) {
+        if (neighbour >= 0 && neighbour < model.rowCount(model.index(track))
+            && kindOf(model, track, neighbour) == "transition")
+            return textResult("Clip " + QString::number(clip) + " on track "
+                                  + QString::number(track)
+                                  + " is joined to a transition; remove or trim the transition first.",
+                              true);
+    }
     const int positionDelta = toStart - info->start;
     const int trackDelta = toTrack - track;
     if (positionDelta == 0 && trackDelta == 0)
@@ -542,9 +567,11 @@ QList<McpTool> McpTools::timelineTools()
          timelineRemoveTool},
         {"timeline_trim",
          "Trim a clip edge (track 0 is the TOPMOST video track). Pass exactly one of frame (the absolute timeline frame the edge moves "
-         "to; for out the clip then ends just before it) or delta (frames: for in positive moves "
-         "the in-point later, for out positive shortens the clip). ripple false (default) leaves a "
-         "gap. Consecutive trims of the same clip may merge into one undo step.",
+         "to; for out the clip then ends just before it; with ripple true and edge in the clip "
+         "start stays and later content shifts, so the edge does not end at frame) or delta "
+         "(frames: for in positive moves the in-point later, for out positive shortens the clip). "
+         "ripple false (default) leaves a gap. An extension longer than the neighbouring gap is "
+         "refused. Each trim is one undo step. Returns the updated track.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},
@@ -556,7 +583,9 @@ QList<McpTool> McpTools::timelineTools()
          timelineTrimTool},
         {"timeline_move",
          "Move a clip to an absolute start frame (track 0 is the TOPMOST video track), optionally to another track of the same type. "
-         "Only free space is allowed (overlaps are refused); nothing ripples.",
+         "Only free space is allowed (overlaps are refused); nothing ripples. A clip joined to a "
+         "transition is refused. Returns the updated track (and from_track, the source track, "
+         "when the track changes).",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},
@@ -570,7 +599,7 @@ QList<McpTool> McpTools::timelineTools()
          schema(R"({"type":"object","properties":{}})"),
          undoTool},
         {"redo",
-         "Redo the last undone edit. Returns {text, can_undo, can_redo}.",
+         "Redo the last undone edit. This also redoes edits made in the Shotcut window. Returns {text, can_undo, can_redo}.",
          schema(R"({"type":"object","properties":{}})"),
          redoTool},
     };

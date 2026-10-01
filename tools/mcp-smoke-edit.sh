@@ -210,5 +210,16 @@ tool_json undo '{}' >/dev/null
 expect_eq "undo of the last-clip lift: two clips" 2 "$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
 expect_eq "final: total duration" 215 "$(tool_json get_timeline '{}' | jq '.duration')"
 
+echo "== timeline: trim extension and clamp"
+PSTARTS='[.tracks[0].clips[] | select(.kind=="clip") | .start] | join(",")'
+EXT="$(tool_json timeline_trim '{"track":0,"clip":1,"edge":"in","frame":65}')"
+expect_eq "trim in extension: not clamped" "65,60" "$(echo "$EXT" | jq -r '[.track.clips[] | select(.kind=="clip")][0] | "\(.start),\(.duration)"')"
+tool_json undo '{}' >/dev/null
+expect_eq "undo of the extension: start restored" "75,50" "$(tool_json get_timeline '{}' | jq -r '[.tracks[0].clips[] | select(.kind=="clip")][0] | "\(.start),\(.duration)"')"
+expect_eq "trim in: extension past the gap is an error" true "$(tool_is_error timeline_trim '{"track":0,"clip":1,"edge":"in","delta":-9999}')"
+expect_eq "trim: frame beyond 1e9 is an error" true "$(tool_is_error timeline_trim '{"track":0,"clip":1,"edge":"in","frame":2000000000}')"
+expect_eq "move: to_start beyond 1e9 is an error" true "$(tool_is_error timeline_move '{"track":0,"clip":1,"to_start":2000000000}')"
+expect_eq "after the clamp error: starts unchanged" "75,125" "$(tool_json get_timeline '{}' | jq -r "$PSTARTS")"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
