@@ -504,6 +504,82 @@ QJsonObject historyTool(bool undo)
                                   {"can_redo", stack->canRedo()}});
 }
 
+QJsonObject timelineAddTransitionTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0, duration = 0;
+    if (readFrame(arguments, "track", track) != FrameArg::Ok
+        || readFrame(arguments, "clip", clip) != FrameArg::Ok
+        || readFrame(arguments, "duration", duration) != FrameArg::Ok || duration < 1)
+        return textResult("track and clip must be non-negative integers and duration at least 1.",
+                          true);
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
+    QString error;
+    if (!plainClip(model, track, clip, error))
+        return textResult(error, true);
+    if (clip < 1 || kindOf(model, track, clip - 1) != "clip")
+        return textResult("The item before the incoming clip must be a plain clip (no blank, "
+                          "transition or first position).",
+                          true);
+    std::unique_ptr<Mlt::ClipInfo> previous = model.getClipInfo(track, clip - 1);
+    std::unique_ptr<Mlt::ClipInfo> incoming = model.getClipInfo(track, clip);
+    if (!previous || !incoming)
+        return textResult("Cannot read the clips.", true);
+    if (previous->start + previous->frame_count != incoming->start)
+        return textResult("The two clips must touch (no gap between them).", true);
+    if (duration >= previous->frame_count || duration >= incoming->frame_count)
+        return textResult("duration must be shorter than both clips.", true);
+
+    const int position = incoming->start - duration;
+    if (!model.addTransitionValid(track, track, clip, position, false))
+        return textResult("Shotcut cannot add a transition between these clips.", true);
+
+    MLT.pause();
+    auto *command = new Timeline::AddTransitionCommand(*dock, track, clip, position, false);
+    MAIN.undoStack()->push(command);
+    const int transitionIndex = command->getTransitionIndex();
+    if (transitionIndex < 0 || kindOf(model, track, transitionIndex) != "transition") {
+        MAIN.undoStack()->undo(); // do not leave a half-applied command as the newest step
+        return textResult("Shotcut did not create the transition.", true);
+    }
+    return jsonResult(QJsonObject{{"transition_index", transitionIndex},
+                                  {"track", trackJson(model, track)}});
+}
+
+QJsonObject timelineFadeTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0, fadeIn = -1, fadeOut = -1;
+    if (readFrame(arguments, "track", track) != FrameArg::Ok
+        || readFrame(arguments, "clip", clip) != FrameArg::Ok)
+        return textResult("track and clip must be non-negative integers.", true);
+    const FrameArg inArg = readFrame(arguments, "fade_in", fadeIn);
+    const FrameArg outArg = readFrame(arguments, "fade_out", fadeOut);
+    if (inArg == FrameArg::Invalid || outArg == FrameArg::Invalid)
+        return textResult("fade_in and fade_out must be non-negative integers.", true);
+    if (inArg == FrameArg::Missing && outArg == FrameArg::Missing)
+        return textResult("Pass fade_in and/or fade_out.", true);
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
+    QString error;
+    if (!plainClip(model, track, clip, error))
+        return textResult(error, true);
+    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, clip);
+    if (!info || (inArg == FrameArg::Ok && fadeIn > info->frame_count)
+        || (outArg == FrameArg::Ok && fadeOut > info->frame_count))
+        return textResult("A fade cannot be longer than the clip.", true);
+
+    MLT.pause();
+    if (inArg == FrameArg::Ok)
+        dock->fadeIn(track, clip, fadeIn);
+    if (outArg == FrameArg::Ok)
+        dock->fadeOut(track, clip, fadeOut);
+    return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
+}
+
 QJsonObject undoTool(const QJsonObject &)
 {
     return historyTool(true);
@@ -593,6 +669,27 @@ QList<McpTool> McpTools::timelineTools()
              "to_track":{"type":"integer","minimum":0}
            },"required":["track","clip","to_start"]})"),
          timelineMoveTool},
+        {"timeline_add_transition",
+         "Add Shotcut's default dissolve (with an audio cross-fade) between two touching clips on "
+         "one track (track 0 is the TOPMOST video track). clip is the INCOMING (later) clip; "
+         "duration frames of overlap, shorter than both clips. The clips overlap, so the timeline "
+         "gets shorter by duration. Returns the updated track and transition_index.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":1,"description":"Index of the incoming clip."},
+             "duration":{"type":"integer","minimum":1,"description":"Overlap in frames."}
+           },"required":["track","clip","duration"]})"),
+         timelineAddTransitionTool},
+        {"timeline_fade",
+         "Set a clip's fade-in and/or fade-out length in frames (0 removes the fade; track 0 is "
+         "the TOPMOST video track). Returns the updated track.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0},
+             "fade_in":{"type":"integer","minimum":0},
+             "fade_out":{"type":"integer","minimum":0}
+           },"required":["track","clip"]})"),
+         timelineFadeTool},
         {"undo",
          "Undo the last edit in Shotcut's history. This also undoes edits made in the Shotcut "
          "window. Returns {text, can_undo, can_redo}.",

@@ -221,5 +221,71 @@ expect_eq "trim: frame beyond 1e9 is an error" true "$(tool_is_error timeline_tr
 expect_eq "move: to_start beyond 1e9 is an error" true "$(tool_is_error timeline_move '{"track":0,"clip":1,"to_start":2000000000}')"
 expect_eq "after the clamp error: starts unchanged" "75,125" "$(tool_json get_timeline '{}' | jq -r "$PSTARTS")"
 
+echo "== timeline: transition and fade"
+TL="$(tool_json get_timeline '{}')"
+# Use the last two plain clips on track 0 as the pair (previous clip, incoming clip).
+N="$(echo "$TL" | jq '.tracks[0].clips | length')"
+PAIR_OK="$(echo "$TL" | jq '[.tracks[0].clips[-2].kind, .tracks[0].clips[-1].kind] == ["clip","clip"]
+        and (.tracks[0].clips[-2].start + .tracks[0].clips[-2].duration) == .tracks[0].clips[-1].start')"
+expect_eq "transition fixture: last two items are butted clips" true "$PAIR_OK"
+IN=$((N - 1))
+DUR_BEFORE="$(echo "$TL" | jq '.duration')"
+expect_eq "transition: first item cannot be the incoming clip" true "$(tool_is_error timeline_add_transition '{"track":0,"clip":0,"duration":10}')"
+expect_eq "transition: zero duration is an error" true "$(tool_is_error timeline_add_transition "{\"track\":0,\"clip\":$IN,\"duration\":0}")"
+expect_eq "transition: longer than a clip is an error" true "$(tool_is_error timeline_add_transition "{\"track\":0,\"clip\":$IN,\"duration\":9999}")"
+expect_eq "transition: string duration is an error" true "$(tool_is_error timeline_add_transition "{\"track\":0,\"clip\":$IN,\"duration\":\"x\"}")"
+TRANS="$(tool_json timeline_add_transition "{\"track\":0,\"clip\":$IN,\"duration\":20}")"
+expect_eq "transition: a transition item exists" true "$(echo "$TRANS" | jq '[.track.clips[] | select(.kind=="transition")] | length == 1')"
+expect_eq "transition: index points at it" transition "$(echo "$TRANS" | jq -r '.track.clips[.transition_index].kind')"
+expect_eq "transition: timeline got 20 frames shorter" "$((DUR_BEFORE - 20))" "$(tool_json get_timeline '{}' | jq '.duration')"
+expect_eq "transition: result matches get_timeline" "$(tool_json get_timeline '{}' | jq -c '.tracks[0]')" "$(echo "$TRANS" | jq -c '.track')"
+expect_eq "transition: a second one on the same pair is refused" true "$(tool_is_error timeline_add_transition "{\"track\":0,\"clip\":$((IN + 1)),\"duration\":10}")"
+expect_eq "transition is undoable" false "$(tool_is_error undo '{}')"
+expect_eq "undo removed it" "$DUR_BEFORE" "$(tool_json get_timeline '{}' | jq '.duration')"
+
+expect_eq "fade: nothing requested is an error" true "$(tool_is_error timeline_fade '{"track":0,"clip":1}')"
+expect_eq "fade: negative is an error" true "$(tool_is_error timeline_fade '{"track":0,"clip":1,"fade_in":-1}')"
+expect_eq "fade: longer than the clip is an error" true "$(tool_is_error timeline_fade '{"track":0,"clip":1,"fade_in":99999}')"
+expect_eq "fade: blank item is an error" true "$(tool_is_error timeline_fade '{"track":0,"clip":0,"fade_in":5}')"
+FADE="$(tool_json timeline_fade '{"track":0,"clip":1,"fade_in":10,"fade_out":5}')"
+expect_eq "fade: values reported" "10,5" "$(echo "$FADE" | jq -r '.track.clips[1] | "\(.fade_in),\(.fade_out)"')"
+expect_eq "fade: get_timeline agrees" "10,5" "$(tool_json get_timeline '{}' | jq -r '.tracks[0].clips[1] | "\(.fade_in),\(.fade_out)"')"
+FADE="$(tool_json timeline_fade '{"track":0,"clip":1,"fade_in":0}')"
+expect_eq "fade: 0 removes" "0,5" "$(echo "$FADE" | jq -r '.track.clips[1] | "\(.fade_in),\(.fade_out)"')"
+# Put the transition back so the export below renders it.
+TRANS="$(tool_json timeline_add_transition "{\"track\":0,\"clip\":$IN,\"duration\":20}")"
+TI="$(echo "$TRANS" | jq '.transition_index')"
+expect_eq "transition again for the export" transition "$(echo "$TRANS" | jq -r '.track.clips[.transition_index].kind')"
+
+echo "== timeline: clips joined to a transition"
+TL="$(tool_json get_timeline '{}')"
+TSTART="$(echo "$TL" | jq ".tracks[0].clips[$TI].start")"
+PSTARTS_T='[.tracks[0].clips[] | select(.kind=="clip") | .start] | join(",")'
+STARTS_BEFORE="$(echo "$TL" | jq -r "$PSTARTS_T")"
+expect_eq "joined: move of the incoming clip is refused" true "$(tool_is_error timeline_move "{\"track\":0,\"clip\":$((TI + 1)),\"to_start\":5000}")"
+expect_eq "joined: move of the previous clip is refused" true "$(tool_is_error timeline_move "{\"track\":0,\"clip\":$((TI - 1)),\"to_start\":5000}")"
+expect_eq "joined: plain clip starts unchanged" "$STARTS_BEFORE" "$(tool_json get_timeline '{}' | jq -r "$PSTARTS_T")"
+expect_eq "joined: transition still present" transition "$(tool_json get_timeline '{}' | jq -r ".tracks[0].clips[$TI].kind")"
+expect_eq "joined: fade on a transition item is an error" true "$(tool_is_error timeline_fade "{\"track\":0,\"clip\":$TI,\"fade_in\":5}")"
+PLAIN_N="$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
+RAW="$(call_tool timeline_remove "{\"track\":0,\"clip\":$((TI + 1)),\"ripple\":false}")"
+if [ "$(echo "$RAW" | jq -r '.result.isError')" = true ]; then
+  pass "remove next to a transition: refused with a message"
+else
+  expect_eq "remove next to a transition: exactly one plain clip fewer" "$((PLAIN_N - 1))" "$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
+  tool_json undo '{}' >/dev/null
+fi
+expect_eq "remove next to a transition: state restored" "$STARTS_BEFORE|$PLAIN_N" "$(tool_json get_timeline '{}' | jq -r "($PSTARTS_T) + \"|\" + (([.tracks[0].clips[] | select(.kind==\"clip\")] | length | tostring))")"
+
+# get_frame can return the previous request's frame right after a far seek; the second request
+# at the same position is settled, so each frame is fetched twice and the second one is kept.
+settled_frame() { frame_to_file "$1" "$2"; frame_to_file "$1" "$2"; }
+settled_frame "{\"position\":$((TSTART - 3))}" "$TMP/tr_before.jpg"
+settled_frame "{\"position\":$((TSTART + 5))}" "$TMP/tr_mid.jpg"
+settled_frame "{\"position\":$((TSTART + 23))}" "$TMP/tr_after.jpg"
+expect_eq "transition frame: JPEG signature" ffd8ff "$(head -c 3 "$TMP/tr_mid.jpg" | xxd -p)"
+expect_eq "transition frame: differs from the frame before" true "$([ "$(md5sum < "$TMP/tr_mid.jpg")" != "$(md5sum < "$TMP/tr_before.jpg")" ] && echo true || echo false)"
+expect_eq "transition frame: differs from the frame after" true "$([ "$(md5sum < "$TMP/tr_mid.jpg")" != "$(md5sum < "$TMP/tr_after.jpg")" ] && echo true || echo false)"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
