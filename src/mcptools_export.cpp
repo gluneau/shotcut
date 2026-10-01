@@ -16,6 +16,7 @@
 #include "mcptools.h"
 #include "mcptoolsutil.h"
 
+#include "autosavefile.h"
 #include "docks/timelinedock.h"
 #include "jobs/abstractjob.h"
 #include "mainwindow.h"
@@ -36,6 +37,7 @@
 #include <QStorageInfo>
 
 #include <algorithm>
+#include <filesystem>
 #include <memory>
 #include <vector>
 
@@ -180,7 +182,8 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
                               true);
     }
 
-    if (path != QDir::cleanPath(path))
+    const QString slashPath = QDir::fromNativeSeparators(path);
+    if (slashPath != QDir::cleanPath(slashPath))
         return textResult("path must be normalized (no ./, ../ or doubled slashes).", true);
     const QFileInfo target(path);
     if (target.isSymLink())
@@ -196,7 +199,32 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
                           true);
     if (QStorageInfo(folder.filePath()).bytesAvailable() < qint64(1) << 30)
         return textResult("Less than 1 GiB of free space in " + folder.filePath() + ".", true);
-    if (protectedFiles().contains(canonicalTarget(path)))
+    const QSet<QString> protectedSet = protectedFiles();
+    const QString canonical = canonicalTarget(path);
+    const QString autosave = QFileInfo(AutoSaveFile::path()).canonicalFilePath();
+    bool isProtected = protectedSet.contains(canonical)
+                       || (!autosave.isEmpty() && canonical.startsWith(autosave + "/"));
+    if (!isProtected && target.exists()) {
+        // Same file under another name (hard link, bind mount): compare file identity.
+        const std::filesystem::path targetPath(path.toStdString());
+        std::error_code ec;
+        const auto links = std::filesystem::hard_link_count(targetPath, ec);
+        if (ec || links > 1)
+            return textResult("The output file has other names (hard links); choose another "
+                              "path.",
+                              true);
+        for (const QString &file : protectedSet) {
+            if (!QFileInfo::exists(file))
+                continue;
+            ec.clear();
+            const bool same = std::filesystem::equivalent(targetPath, file.toStdString(), ec);
+            if (ec || same) {
+                isProtected = true;
+                break;
+            }
+        }
+    }
+    if (isProtected)
         return textResult("The output path is a media file used by the project; "
                           "choose another path.",
                           true);
@@ -207,7 +235,8 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
     const QFileInfo melt(QCoreApplication::applicationDirPath(), "melt");
 #endif
     if (!melt.isExecutable())
-        return textResult("Shotcut's melt program was not found or is not executable at " + melt.filePath()
+        return textResult("Shotcut's melt program was not found or is not executable at "
+                              + melt.filePath()
                               + ". In a development build link it in, for example: ln -s "
                                 "<mlt prefix>/bin/melt-7 "
                               + melt.filePath(),
@@ -245,21 +274,24 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
         else
             record->error = j->log().right(2048);
     });
-    // A process that cannot start (melt, or nice, which runs it) never emits finished.
+    // A process that cannot start never emits finished.
     auto startFailed = [record](AbstractJob *j) {
         if (record->done)
             return;
         record->done = true;
         record->elapsedMs = record->timer.elapsed();
         record->state = "failed";
-        record->error = "The render process could not be started (melt, run through nice at the "
-                        "default job priority): "
+        record->error = "melt could not be started (or nice, which Shotcut runs it through "
+                        "for some job priorities): "
                         + j->errorString();
     };
-    QObject::connect(job, &QProcess::errorOccurred, job, [job, startFailed](QProcess::ProcessError e) {
-        if (e == QProcess::FailedToStart)
-            startFailed(job);
-    });
+    QObject::connect(job,
+                     &QProcess::errorOccurred,
+                     job,
+                     [job, startFailed](QProcess::ProcessError e) {
+                         if (e == QProcess::FailedToStart)
+                             startFailed(job);
+                     });
     if (job->error() == QProcess::FailedToStart)
         startFailed(job);
     return jsonResult(QJsonObject{{"job_id", record->id}, {"output", path}, {"preset", preset}});
@@ -298,7 +330,10 @@ QList<McpTool> McpTools::exportTools()
          "a time. Side effects: the Export panel's settings and its \"export from\" choice are "
          "overwritten by the preset; the panel's hardware-encoder and proxy/preview-scale "
          "choices may apply; the missing-files check and the analysis prompts are skipped, so "
-         "analysis filters are not run.",
+         "analysis filters are not run. The guard protects media used by the project (timeline "
+         "clips, playlist items, the loaded clip, the project file, by path and by file identity) "
+         "but cannot see files referenced only inside filters or nested project clips: do not "
+         "pass overwrite: true for a file you did not create.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute output path, e.g. /home/me/out.mp4."},
              "preset":{"type":"string","description":"Preset name, default x264-medium."},

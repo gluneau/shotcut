@@ -380,6 +380,18 @@ expect_eq "export: overwrite of a timeline clip is refused" true "$(tool_is_erro
 expect_eq "export: overwrite of a playlist-only clip is refused" true "$(tool_is_error export_video "{\"path\":\"$CLIP_A\",\"overwrite\":true}")"
 expect_eq "export: a /./ path to a clip is refused" true "$(tool_is_error export_video "{\"path\":\"$TMP/./b.mp4\",\"overwrite\":true}")"
 expect_eq "export: a symlink to a clip is refused" true "$(tool_is_error export_video "{\"path\":\"$TMP/link.mp4\",\"overwrite\":true}")"
+LINKDIR="$(mktemp -d)"; ln -s "$TMP" "$LINKDIR/tmplink"
+expect_eq "export: a symlinked parent folder to a clip is refused" true "$(tool_is_error export_video "{\"path\":\"$LINKDIR/tmplink/b.mp4\",\"overwrite\":true}")"
+if ln "$CLIP_B" "$TMP/hl.mp4" 2>/dev/null && cp "$CLIP_B" "$TMP/unrelated.mp4" && ln "$TMP/unrelated.mp4" "$TMP/unrelated-hl.mp4" 2>/dev/null; then
+  SUM_HL="$(md5sum < "$TMP/hl.mp4")"; SUM_UN="$(md5sum < "$TMP/unrelated.mp4")"
+  expect_eq "export: a hard link to a clip is refused" true "$(tool_is_error export_video "{\"path\":\"$TMP/hl.mp4\",\"overwrite\":true}")"
+  expect_eq "export: a hard-linked file outside the project is refused" true "$(tool_is_error export_video "{\"path\":\"$TMP/unrelated-hl.mp4\",\"overwrite\":true}")"
+  expect_eq "export: the hard link is unchanged" "$SUM_B" "$(md5sum < "$TMP/hl.mp4")"
+  expect_eq "export: the unrelated hard-linked file is unchanged" "$SUM_UN" "$(md5sum < "$TMP/unrelated.mp4")"
+else
+  echo "SKIP: hard links are not possible in $TMP"
+fi
+rm -rf "$LINKDIR"
 expect_eq "export: clip B is unchanged" "$SUM_B" "$(md5sum < "$CLIP_B")"
 expect_eq "export: clip A is unchanged" "$SUM_A" "$(md5sum < "$CLIP_A")"
 expect_eq "export: refused overwrites started no job" idle "$(tool_json get_export_status '{}' | jq -r '.state')"
