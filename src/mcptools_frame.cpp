@@ -74,6 +74,9 @@ QJsonObject getFrameTool(const QJsonObject &arguments)
         position = qMin(position, lastFrame());
         bool ready = false;
         int matches = 0;
+        // Two skipped displays by default; with Player > Realtime off MLT.realTime() is minus the
+        // parallel worker count (-1 to -4), so more frames can be in flight.
+        const int requiredMatches = 3 + qMax(0, -MLT.realTime() - 1);
         QImage matched;
         QEventLoop loop;
         QTimer timeout;
@@ -88,7 +91,7 @@ QJsonObject getFrameTool(const QJsonObject &arguments)
                              // The first match can predate an edit made just before this call
                              // (same position, so the seek is a no-op); only a match shown after
                              // a refresh issued by this call is trusted.
-                             if (++matches < 3) {
+                             if (++matches < requiredMatches) {
                                  MLT.refreshConsumer();
                                  return;
                              }

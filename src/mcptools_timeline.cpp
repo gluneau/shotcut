@@ -532,7 +532,8 @@ QJsonObject timelineAddTransitionTool(const QJsonObject &arguments)
     if (duration >= previous->frame_count || duration >= incoming->frame_count)
         return textResult("duration must be shorter than both clips.", true);
 
-    if (clip + 1 < model.rowCount(model.index(track)) && kindOf(model, track, clip + 1) == "transition")
+    if (clip + 1 < model.rowCount(model.index(track))
+        && kindOf(model, track, clip + 1) == "transition")
         return textResult("The incoming clip already has a transition after it.", true);
 
     const int position = incoming->start - duration;
@@ -545,8 +546,12 @@ QJsonObject timelineAddTransitionTool(const QJsonObject &arguments)
     MAIN.undoStack()->push(command);
     const int transitionIndex = command->getTransitionIndex();
     if (transitionIndex < 0 || kindOf(model, track, transitionIndex) != "transition") {
+        // Revert whatever was applied (undo() does nothing when no transition was created), then
+        // mark the command obsolete so the stack drops it instead of keeping it on the redo stack.
+        // QUndoStack::undo() skips the undo() of an obsolete command, so the order matters.
+        command->undo();
         command->setObsolete(true);
-        MAIN.undoStack()->undo(); // do not leave a half-applied command as the newest step
+        MAIN.undoStack()->undo();
         return textResult("Shotcut did not create the transition.", true);
     }
     return jsonResult(QJsonObject{{"transition_index", transitionIndex},
@@ -680,7 +685,8 @@ QList<McpTool> McpTools::timelineTools()
          "Add Shotcut's default dissolve (with an audio cross-fade) between two touching clips on "
          "one track (track 0 is the TOPMOST video track). clip is the INCOMING (later) clip; "
          "duration frames of overlap, shorter than both clips. The clips overlap, so the timeline "
-         "gets shorter by duration: later clips move earlier by duration. The incoming clip must "
+         "gets shorter by duration: later clips move earlier by duration (with Shotcut's ripple-all-"
+         "tracks setting on, duration frames are also removed from the other unlocked tracks). The incoming clip must "
          "not already have a transition after it. Returns the updated track and transition_index.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
