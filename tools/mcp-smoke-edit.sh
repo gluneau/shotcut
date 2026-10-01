@@ -243,6 +243,34 @@ expect_eq "transition: a second one on the same pair is refused" true "$(tool_is
 expect_eq "transition is undoable" false "$(tool_is_error undo '{}')"
 expect_eq "undo removed it" "$DUR_BEFORE" "$(tool_json get_timeline '{}' | jq '.duration')"
 
+echo "== timeline: mid-track transition (ripple) and refusals"
+PSTARTS_M='[.tracks[0].clips[] | select(.kind=="clip") | .start]'
+expect_eq "mid-track: append A, B, C" false "$(tool_is_error timeline_add_playlist '{}')"
+TL="$(tool_json get_timeline '{}')"
+expect_eq "mid-track: six items [blank, B2, C, A, B, C']" "blank,clip,clip,clip,clip,clip" "$(echo "$TL" | jq -r '[.tracks[0].clips[].kind] | join(",")')"
+M_DUR="$(echo "$TL" | jq '.duration')"
+M_STARTS="$(echo "$TL" | jq -c "$PSTARTS_M")"
+M_A_START="$(echo "$TL" | jq '.tracks[0].clips[3].start')"
+M1="$(tool_json timeline_add_transition '{"track":0,"clip":2,"duration":10}')"
+expect_eq "mid-track: transition item right after B2" transition "$(echo "$M1" | jq -r '.track.clips[2].kind')"
+expect_eq "mid-track: total shortened by exactly 10" "$((M_DUR - 10))" "$(tool_json get_timeline '{}' | jq '.duration')"
+expect_eq "mid-track: the clip after the incoming one moved left by exactly 10" "$((M_A_START - 10))" "$(echo "$M1" | jq '[.track.clips[] | select(.kind=="clip")][2].start')"
+expect_eq "mid-track: no blank opened after the incoming clip" "blank,clip,transition,clip,clip,clip,clip" "$(echo "$M1" | jq -r '[.track.clips[].kind] | join(",")')"
+# Incoming B (item 5 now): between A and B.
+M2="$(tool_json timeline_add_transition '{"track":0,"clip":5,"duration":10}')"
+expect_eq "mid-track: second transition created" transition "$(echo "$M2" | jq -r '.track.clips[5].kind')"
+TRACK_BEFORE="$(tool_json get_timeline '{}' | jq -c '.tracks[0]')"
+# Incoming A (item 4) now has a transition on its right.
+expect_eq "refusal: incoming clip that already has a transition after it" true "$(tool_is_error timeline_add_transition '{"track":0,"clip":4,"duration":10}')"
+expect_eq "refusal: track unchanged" "$TRACK_BEFORE" "$(tool_json get_timeline '{}' | jq -c '.tracks[0]')"
+tool_json undo '{}' >/dev/null
+tool_json undo '{}' >/dev/null
+expect_eq "mid-track undo: starts restored" "$M_STARTS" "$(tool_json get_timeline '{}' | jq -c "$PSTARTS_M")"
+expect_eq "mid-track undo: total restored" "$M_DUR" "$(tool_json get_timeline '{}' | jq '.duration')"
+tool_json undo '{}' >/dev/null
+expect_eq "mid-track undo of the append: total 215, two plain clips" "215,2" "$(tool_json get_timeline '{}' | jq -r '"\(.duration),\([.tracks[0].clips[] | select(.kind=="clip")] | length)"')"
+
+
 expect_eq "fade: nothing requested is an error" true "$(tool_is_error timeline_fade '{"track":0,"clip":1}')"
 expect_eq "fade: negative is an error" true "$(tool_is_error timeline_fade '{"track":0,"clip":1,"fade_in":-1}')"
 expect_eq "fade: longer than the clip is an error" true "$(tool_is_error timeline_fade '{"track":0,"clip":1,"fade_in":99999}')"
@@ -252,6 +280,21 @@ expect_eq "fade: values reported" "10,5" "$(echo "$FADE" | jq -r '.track.clips[1
 expect_eq "fade: get_timeline agrees" "10,5" "$(tool_json get_timeline '{}' | jq -r '.tracks[0].clips[1] | "\(.fade_in),\(.fade_out)"')"
 FADE="$(tool_json timeline_fade '{"track":0,"clip":1,"fade_in":0}')"
 expect_eq "fade: 0 removes" "0,5" "$(echo "$FADE" | jq -r '.track.clips[1] | "\(.fade_in),\(.fade_out)"')"
+tool_json timeline_fade '{"track":0,"clip":1,"fade_in":7,"fade_out":3}' >/dev/null
+expect_eq "fade: both values in one call are one undo step" "0,5" "$(tool_json undo '{}' >/dev/null; tool_json get_timeline '{}' | jq -r '.tracks[0].clips[1] | "\(.fade_in),\(.fade_out)"')"
+echo "== get_frame: a frame taken after an edit at a position requested before"
+FP=$(( $(tool_json get_timeline '{}' | jq '.tracks[0].clips[1].start') + 2 ))
+for rep in 1 2 3 4 5; do
+  frame_to_file "{\"position\":$FP}" "$TMP/e0.jpg"
+  tool_json timeline_fade '{"track":0,"clip":1,"fade_in":30}' >/dev/null
+  frame_to_file "{\"position\":$FP}" "$TMP/e1.jpg"
+  tool_json undo '{}' >/dev/null
+  frame_to_file "{\"position\":$FP}" "$TMP/e2.jpg"
+  expect_eq "edit then same position ($rep): faded frame differs" true "$([ "$(md5sum < "$TMP/e0.jpg")" != "$(md5sum < "$TMP/e1.jpg")" ] && echo true || echo false)"
+  expect_eq "edit then same position ($rep): undo restores the original frame" true "$([ "$(md5sum < "$TMP/e0.jpg")" = "$(md5sum < "$TMP/e2.jpg")" ] && echo true || echo false)"
+done
+tool_json timeline_fade '{"track":0,"clip":1,"fade_in":10,"fade_out":5}' >/dev/null
+tool_json timeline_fade '{"track":0,"clip":1,"fade_in":0}' >/dev/null
 # Put the transition back so the export below renders it.
 TRANS="$(tool_json timeline_add_transition "{\"track\":0,\"clip\":$IN,\"duration\":20}")"
 TI="$(echo "$TRANS" | jq '.transition_index')"
@@ -289,7 +332,8 @@ echo "== get_frame: strict repeatability on the timeline with the transition"
 FAIL_BEFORE_STRESS=$failures
 declare -A FIRST
 for round in 1 2 3 4 5 6 7 8; do
-  for pos in 10 90 $((TSTART + 10)) 150; do
+  if [ $((round % 2)) -eq 0 ]; then ORDER="150 $((TSTART + 10)) 90 10"; else ORDER="10 90 $((TSTART + 10)) 150"; fi
+  for pos in $ORDER; do
     frame_to_file "{\"position\":$pos}" "$TMP/st.jpg"
     SUM="$(md5sum < "$TMP/st.jpg" | cut -c1-32)"
     if [ -z "${FIRST[$pos]:-}" ]; then FIRST[$pos]="$SUM"; fi

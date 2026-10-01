@@ -532,15 +532,20 @@ QJsonObject timelineAddTransitionTool(const QJsonObject &arguments)
     if (duration >= previous->frame_count || duration >= incoming->frame_count)
         return textResult("duration must be shorter than both clips.", true);
 
+    if (clip + 1 < model.rowCount(model.index(track)) && kindOf(model, track, clip + 1) == "transition")
+        return textResult("The incoming clip already has a transition after it.", true);
+
     const int position = incoming->start - duration;
-    if (!model.addTransitionValid(track, track, clip, position, false))
+    // Ripple, so the clips after the incoming one close up by duration (no gap opens).
+    if (!model.addTransitionValid(track, track, clip, position, true))
         return textResult("Shotcut cannot add a transition between these clips.", true);
 
     MLT.pause();
-    auto *command = new Timeline::AddTransitionCommand(*dock, track, clip, position, false);
+    auto *command = new Timeline::AddTransitionCommand(*dock, track, clip, position, true);
     MAIN.undoStack()->push(command);
     const int transitionIndex = command->getTransitionIndex();
     if (transitionIndex < 0 || kindOf(model, track, transitionIndex) != "transition") {
+        command->setObsolete(true);
         MAIN.undoStack()->undo(); // do not leave a half-applied command as the newest step
         return textResult("Shotcut did not create the transition.", true);
     }
@@ -573,10 +578,12 @@ QJsonObject timelineFadeTool(const QJsonObject &arguments)
         return textResult("A fade cannot be longer than the clip.", true);
 
     MLT.pause();
+    MAIN.undoStack()->beginMacro(QObject::tr("Set clip fades"));
     if (inArg == FrameArg::Ok)
         dock->fadeIn(track, clip, fadeIn);
     if (outArg == FrameArg::Ok)
         dock->fadeOut(track, clip, fadeOut);
+    MAIN.undoStack()->endMacro();
     return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
 }
 
@@ -673,7 +680,8 @@ QList<McpTool> McpTools::timelineTools()
          "Add Shotcut's default dissolve (with an audio cross-fade) between two touching clips on "
          "one track (track 0 is the TOPMOST video track). clip is the INCOMING (later) clip; "
          "duration frames of overlap, shorter than both clips. The clips overlap, so the timeline "
-         "gets shorter by duration. Returns the updated track and transition_index.",
+         "gets shorter by duration: later clips move earlier by duration. The incoming clip must "
+         "not already have a transition after it. Returns the updated track and transition_index.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":1,"description":"Index of the incoming clip."},
@@ -682,7 +690,7 @@ QList<McpTool> McpTools::timelineTools()
          timelineAddTransitionTool},
         {"timeline_fade",
          "Set a clip's fade-in and/or fade-out length in frames (0 removes the fade; track 0 is "
-         "the TOPMOST video track). Returns the updated track.",
+         "the TOPMOST video track). One call is one undo step. Returns the updated track.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},

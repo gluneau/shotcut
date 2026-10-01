@@ -73,6 +73,7 @@ QJsonObject getFrameTool(const QJsonObject &arguments)
         // wrong image.
         position = qMin(position, lastFrame());
         bool ready = false;
+        int matches = 0;
         QImage matched;
         QEventLoop loop;
         QTimer timeout;
@@ -84,6 +85,13 @@ QJsonObject getFrameTool(const QJsonObject &arguments)
                          [&](const SharedFrame &frame) {
                              if (ready || frame.get_position() != position)
                                  return;
+                             // The first match can predate an edit made just before this call
+                             // (same position, so the seek is a no-op); only a match shown after
+                             // a refresh issued by this call is trusted.
+                             if (++matches < 3) {
+                                 MLT.refreshConsumer();
+                                 return;
+                             }
                              const uint8_t *data = frame.get_image(mlt_image_rgba);
                              if (!data)
                                  return;
@@ -97,6 +105,7 @@ QJsonObject getFrameTool(const QJsonObject &arguments)
                          });
         QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
         QObject::connect(&refresh, &QTimer::timeout, &loop, []() { MLT.refreshConsumer(); });
+        MLT.pause();
         movePlayhead(position);
         MLT.refreshConsumer();
         timeout.start(3000);
