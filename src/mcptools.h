@@ -16,6 +16,7 @@
 #ifndef MCPTOOLS_H
 #define MCPTOOLS_H
 
+#include <QByteArray>
 #include <QJsonObject>
 #include <QList>
 #include <QString>
@@ -39,6 +40,16 @@ QJsonObject textResult(const QString &text, bool isError = false);
 
 // An MCP tools/call result whose text item is the compact JSON of `object`.
 QJsonObject jsonResult(const QJsonObject &object);
+
+// An MCP tools/call result with an image item (base64 in the JSON) and an optional text item.
+QJsonObject imageResult(const QByteArray &bytes,
+                        const QString &mimeType,
+                        const QString &text = QString());
+
+// Tool groups, registered by all(). Each lives in its own mcptools_*.cpp.
+QList<McpTool> frameTools();
+QList<McpTool> timelineTools();
+QList<McpTool> exportTools();
 
 } // namespace McpTools
 

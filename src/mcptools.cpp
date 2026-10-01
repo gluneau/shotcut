@@ -18,6 +18,7 @@
 #include "actions.h"
 #include "autosavefile.h"
 #include "mainwindow.h"
+#include "mcptoolsutil.h"
 #include "mltcontroller.h"
 
 #include <QAction>
@@ -30,17 +31,9 @@
 #include <cmath>
 #include <limits>
 
+using namespace McpTools;
+
 namespace {
-
-QJsonObject schema(const char *json)
-{
-    return QJsonDocument::fromJson(json).object();
-}
-
-bool isResourcePath(const QString &path)
-{
-    return path.startsWith(':');
-}
 
 // True if the requested file is what Shotcut now has open: the project file for .mlt/.xml,
 // otherwise the producer's resource.
@@ -49,11 +42,6 @@ bool isCurrentFile(const QString &path, bool isProjectFile)
     const QString wanted = QFileInfo(path).canonicalFilePath();
     const QString current = isProjectFile ? MAIN.fileName() : MLT.resource();
     return !wanted.isEmpty() && QFileInfo(current).canonicalFilePath() == wanted;
-}
-
-bool isLoaded()
-{
-    return MLT.producer() && MLT.producer()->is_valid();
 }
 
 // True if `path` can be written (the file, or its folder when it does not exist yet).
@@ -169,45 +157,6 @@ QJsonObject saveProject(const QJsonObject &arguments)
     if (!MAIN.saveXML(path))
         return McpTools::textResult("Saving failed.", true);
     return McpTools::jsonResult(QJsonObject{{"savedCopy", path}});
-}
-
-enum class FrameArg { Missing, Ok, Invalid };
-
-// Reads a non-negative integer frame number from `arguments[key]`.
-FrameArg readFrame(const QJsonObject &arguments, const char *key, int &value)
-{
-    const QJsonValue v = arguments.value(key);
-    if (v.isUndefined())
-        return FrameArg::Missing;
-    const double d = v.toDouble();
-    if (!v.isDouble() || d != std::floor(d) || d < 0
-        || d > std::numeric_limits<int>::max()) {
-        return FrameArg::Invalid;
-    }
-    value = static_cast<int>(d);
-    return FrameArg::Ok;
-}
-
-// The multitrack when a timeline is open, otherwise null.
-Mlt::Producer *timeline()
-{
-    return MAIN.isMultitrackValid() ? MAIN.multitrack() : nullptr;
-}
-
-// seekTimeline() switches the player to the multitrack, so clamp against its length then.
-int lastFrame()
-{
-    Mlt::Producer *tl = timeline();
-    Mlt::Producer *producer = tl ? tl : MLT.producer();
-    return producer ? qMax(0, producer->get_playtime() - 1) : 0;
-}
-
-void movePlayhead(int position)
-{
-    if (timeline())
-        MAIN.seekTimeline(position);
-    else
-        MLT.seek(position);
 }
 
 QJsonObject playTool(const QJsonObject &arguments)
@@ -342,7 +291,7 @@ QJsonObject McpTools::jsonResult(const QJsonObject &object)
     return textResult(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
 }
 
-QList<McpTool> McpTools::all()
+static QList<McpTool> stage1Tools()
 {
     return {
         {"get_state",
@@ -408,4 +357,26 @@ QList<McpTool> McpTools::all()
            },"required":["key"]})"),
          triggerAction},
     };
+}
+
+QList<McpTool> McpTools::all()
+{
+    QList<McpTool> tools = stage1Tools();
+    tools += frameTools();
+    tools += timelineTools();
+    tools += exportTools();
+    return tools;
+}
+
+QJsonObject McpTools::imageResult(const QByteArray &bytes,
+                                  const QString &mimeType,
+                                  const QString &text)
+{
+    QJsonArray content;
+    content.append(QJsonObject{{"type", "image"},
+                               {"data", QString::fromLatin1(bytes.toBase64())},
+                               {"mimeType", mimeType}});
+    if (!text.isEmpty())
+        content.append(QJsonObject{{"type", "text"}, {"text", text}});
+    return QJsonObject{{"content", content}, {"isError", false}};
 }
