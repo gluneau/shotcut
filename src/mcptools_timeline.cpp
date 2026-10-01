@@ -17,6 +17,7 @@
 #include "mcptoolsutil.h"
 
 #include "commands/playlistcommands.h"
+#include "commands/timelinecommands.h"
 #include "docks/playlistdock.h"
 #include "docks/timelinedock.h"
 #include "mainwindow.h"
@@ -32,7 +33,9 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QScopedPointer>
+#include <QUndoStack>
 
+#include <cmath>
 #include <memory>
 
 using namespace McpTools;
@@ -349,6 +352,143 @@ QJsonObject timelineRemoveTool(const QJsonObject &arguments)
     return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
 }
 
+QJsonObject timelineTrimTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0;
+    if (readFrame(arguments, "track", track) != FrameArg::Ok
+        || readFrame(arguments, "clip", clip) != FrameArg::Ok)
+        return textResult("track and clip must be non-negative integers.", true);
+    const QString edge = arguments.value("edge").toString();
+    if (edge != "in" && edge != "out")
+        return textResult("edge must be \"in\" or \"out\".", true);
+    const QJsonValue frameValue = arguments.value("frame");
+    const QJsonValue deltaValue = arguments.value("delta");
+    if (frameValue.isUndefined() == deltaValue.isUndefined())
+        return textResult("Pass exactly one of frame or delta.", true);
+    const QJsonValue rippleValue = arguments.value("ripple");
+    if (!rippleValue.isUndefined() && !rippleValue.isBool())
+        return textResult("ripple must be a boolean.", true);
+    const bool ripple = rippleValue.toBool(false);
+
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
+    QString error;
+    if (!plainClip(model, track, clip, error))
+        return textResult(error, true);
+    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, clip);
+    if (!info)
+        return textResult("Cannot read the clip.", true);
+
+    int delta = 0;
+    if (!frameValue.isUndefined()) {
+        int frame = 0;
+        if (readFrame(arguments, "frame", frame) != FrameArg::Ok)
+            return textResult("frame must be a non-negative integer.", true);
+        // The edge moves to `frame`; for out the clip then ends just before it.
+        delta = edge == "in" ? frame - info->start : info->start + info->frame_count - frame;
+    } else {
+        const double d = deltaValue.toDouble();
+        if (!deltaValue.isDouble() || d != std::floor(d) || qAbs(d) > 1e9)
+            return textResult("delta must be an integer number of frames.", true);
+        delta = static_cast<int>(d);
+    }
+    if (delta != 0) {
+        const bool valid = edge == "in" ? model.trimClipInValid(track, clip, delta, ripple)
+                                        : model.trimClipOutValid(track, clip, delta, ripple);
+        if (!valid)
+            return textResult("Shotcut cannot trim this edge by " + QString::number(delta)
+                                  + " frames (source limits, a neighbour or a transition).", true);
+        MLT.pause();
+        if (edge == "in")
+            MAIN.undoStack()->push(new Timeline::TrimClipInCommand(
+                model, *dock->markersModel(), track, clip, delta, ripple));
+        else
+            MAIN.undoStack()->push(new Timeline::TrimClipOutCommand(
+                model, *dock->markersModel(), track, clip, delta, ripple));
+    }
+    return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
+}
+
+QJsonObject timelineMoveTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0, toStart = 0;
+    if (readFrame(arguments, "track", track) != FrameArg::Ok
+        || readFrame(arguments, "clip", clip) != FrameArg::Ok
+        || readFrame(arguments, "to_start", toStart) != FrameArg::Ok)
+        return textResult("track, clip and to_start must be non-negative integers.", true);
+    int toTrack = track;
+    const FrameArg toTrackArg = readFrame(arguments, "to_track", toTrack);
+    if (toTrackArg == FrameArg::Invalid)
+        return textResult("to_track must be a non-negative integer.", true);
+
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
+    QString error;
+    if (!plainClip(model, track, clip, error) || !validTrack(model, toTrack, error))
+        return textResult(error, true);
+    if (model.trackList().at(track).type != model.trackList().at(toTrack).type)
+        return textResult("Clips cannot move between video and audio tracks.", true);
+    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, clip);
+    if (!info)
+        return textResult("Cannot read the clip.", true);
+
+    const int positionDelta = toStart - info->start;
+    const int trackDelta = toTrack - track;
+    if (positionDelta == 0 && trackDelta == 0)
+        return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
+
+    // Only free space is allowed: refuse any overlap with a clip or transition on the target track.
+    const int end = toStart + info->frame_count;
+    const QModelIndex targetIndex = model.index(toTrack);
+    for (int c = 0; c < model.rowCount(targetIndex); ++c) {
+        if ((toTrack == track && c == clip) || kindOf(model, toTrack, c) == "blank")
+            continue;
+        std::unique_ptr<Mlt::ClipInfo> other = model.getClipInfo(toTrack, c);
+        if (other && toStart < other->start + other->frame_count && end > other->start)
+            return textResult("The clip would overlap item " + QString::number(c)
+                                  + " on track " + QString::number(toTrack) + ".", true);
+    }
+
+    MLT.pause();
+    auto *command = new Timeline::MoveClipCommand(*dock, trackDelta, positionDelta, false);
+    command->addClip(track, clip);
+    MAIN.undoStack()->push(command);
+    QJsonObject result{{"track", trackJson(model, toTrack)}};
+    if (toTrack != track)
+        result["from_track"] = trackJson(model, track);
+    return jsonResult(result);
+}
+
+QJsonObject historyTool(bool undo)
+{
+    QUndoStack *stack = MAIN.undoStack();
+    if (undo ? !stack->canUndo() : !stack->canRedo())
+        return textResult(undo ? "There is nothing to undo." : "There is nothing to redo.", true);
+    const QString text = undo ? stack->undoText() : stack->redoText();
+    MLT.pause();
+    if (undo)
+        stack->undo();
+    else
+        stack->redo();
+    return jsonResult(QJsonObject{{"text", text},
+                                  {"can_undo", stack->canUndo()},
+                                  {"can_redo", stack->canRedo()}});
+}
+
+QJsonObject undoTool(const QJsonObject &)
+{
+    return historyTool(true);
+}
+
+QJsonObject redoTool(const QJsonObject &)
+{
+    return historyTool(false);
+}
+
 } // namespace
 
 QList<McpTool> McpTools::timelineTools()
@@ -400,5 +540,38 @@ QList<McpTool> McpTools::timelineTools()
              "ripple":{"type":"boolean"}
            },"required":["track","clip"]})"),
          timelineRemoveTool},
+        {"timeline_trim",
+         "Trim a clip edge (track 0 is the TOPMOST video track). Pass exactly one of frame (the absolute timeline frame the edge moves "
+         "to; for out the clip then ends just before it) or delta (frames: for in positive moves "
+         "the in-point later, for out positive shortens the clip). ripple false (default) leaves a "
+         "gap. Consecutive trims of the same clip may merge into one undo step.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0},
+             "edge":{"type":"string","enum":["in","out"]},
+             "frame":{"type":"integer","minimum":0},
+             "delta":{"type":"integer"},
+             "ripple":{"type":"boolean"}
+           },"required":["track","clip","edge"]})"),
+         timelineTrimTool},
+        {"timeline_move",
+         "Move a clip to an absolute start frame (track 0 is the TOPMOST video track), optionally to another track of the same type. "
+         "Only free space is allowed (overlaps are refused); nothing ripples.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0},
+             "to_start":{"type":"integer","minimum":0},
+             "to_track":{"type":"integer","minimum":0}
+           },"required":["track","clip","to_start"]})"),
+         timelineMoveTool},
+        {"undo",
+         "Undo the last edit in Shotcut's history. This also undoes edits made in the Shotcut "
+         "window. Returns {text, can_undo, can_redo}.",
+         schema(R"({"type":"object","properties":{}})"),
+         undoTool},
+        {"redo",
+         "Redo the last undone edit. Returns {text, can_undo, can_redo}.",
+         schema(R"({"type":"object","properties":{}})"),
+         redoTool},
     };
 }

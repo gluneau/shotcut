@@ -150,5 +150,65 @@ expect_eq "ripple remove: gap closes" 3 "$(echo "$RIP" | jq '.track.clips | leng
 expect_eq "ripple remove: next clip moved up" 75 "$(echo "$RIP" | jq '.track.clips[1].start')"
 expect_eq "ripple remove: total shrank" 250 "$(tool_json get_timeline '{}' | jq '.duration')"
 
+echo "== timeline: image add and undo"
+TL_BEFORE="$(tool_json get_timeline '{}' | jq -c '[.duration, ([.tracks[0].clips[] | select(.kind=="clip")] | length)]')"
+ffmpeg -loglevel error -y -f lavfi -i testsrc=size=320x240:rate=1 -frames:v 1 "$TMP/img.png"
+expect_eq "playlist_add: still image is not an error" false "$(tool_is_error playlist_add "{\"path\":\"$TMP/img.png\"}")"
+expect_eq "get_playlist: four items after the image" 4 "$(tool_json get_playlist '{}' | jq '.items | length')"
+expect_eq "get_playlist: image has a positive duration" true "$(tool_json get_playlist '{}' | jq '.items[3].duration > 0')"
+expect_eq "image add: timeline unaffected" "$TL_BEFORE" "$(tool_json get_timeline '{}' | jq -c '[.duration, ([.tracks[0].clips[] | select(.kind=="clip")] | length)]')"
+expect_eq "undo (image add): not an error" false "$(tool_is_error undo '{}')"
+expect_eq "undo (image add): playlist is back to three items" 3 "$(tool_json get_playlist '{}' | jq '.items | length')"
+expect_eq "undo (image add): paths in order" "$CLIP_A,$CLIP_B,$CLIP_C" "$(tool_json get_playlist '{}' | jq -r '[.items[].path] | join(",")')"
+expect_eq "undo (image add): timeline unaffected" "$TL_BEFORE" "$(tool_json get_timeline '{}' | jq -c '[.duration, ([.tracks[0].clips[] | select(.kind=="clip")] | length)]')"
+
+echo "== timeline: trim, move, undo, redo"
+expect_eq "trim: both frame and delta is an error" true "$(tool_is_error timeline_trim '{"track":0,"clip":2,"edge":"in","frame":5,"delta":5}')"
+expect_eq "trim: neither frame nor delta is an error" true "$(tool_is_error timeline_trim '{"track":0,"clip":2,"edge":"in"}')"
+expect_eq "trim: bad edge is an error" true "$(tool_is_error timeline_trim '{"track":0,"clip":2,"edge":"middle","delta":1}')"
+expect_eq "trim: string delta is an error" true "$(tool_is_error timeline_trim '{"track":0,"clip":2,"edge":"in","delta":"x"}')"
+expect_eq "trim: blank item is refused" true "$(tool_is_error timeline_trim '{"track":0,"clip":0,"edge":"out","delta":1}')"
+expect_eq "trim: out past the source is refused" true "$(tool_is_error timeline_trim '{"track":0,"clip":2,"edge":"out","delta":-9999}')"
+TRIM="$(tool_json timeline_trim '{"track":0,"clip":2,"edge":"out","frame":225}')"
+expect_eq "trim out: clip is 25 frames shorter" 100 "$(echo "$TRIM" | jq '.track.clips[2].duration')"
+expect_eq "trim out: total shrank" 225 "$(tool_json get_timeline '{}' | jq '.duration')"
+TRIM="$(tool_json timeline_trim '{"track":0,"clip":2,"edge":"in","delta":10,"ripple":true}')"
+expect_eq "trim in (ripple): clip is 10 frames shorter" 90 "$(echo "$TRIM" | jq '.track.clips[2].duration')"
+
+expect_eq "move: onto a neighbour is refused" true "$(tool_is_error timeline_move '{"track":0,"clip":2,"to_start":20}')"
+expect_eq "move: to a negative start is an error" true "$(tool_is_error timeline_move '{"track":0,"clip":1,"to_start":-1}')"
+expect_eq "move: blank item is refused" true "$(tool_is_error timeline_move '{"track":0,"clip":0,"to_start":5}')"
+expect_eq "move: unknown to_track is an error" true "$(tool_is_error timeline_move '{"track":0,"clip":1,"to_start":0,"to_track":9}')"
+MOVED="$(tool_json timeline_move '{"track":0,"clip":1,"to_start":0}')"
+expect_eq "move: clip now starts at 0" 0 "$(echo "$MOVED" | jq '[.track.clips[] | select(.kind=="clip")][0].start')"
+expect_eq "move: result matches get_timeline" "$(tool_json get_timeline '{}' | jq -c '.tracks[0]')" "$(echo "$MOVED" | jq -c '.track')"
+
+# History: newest first.
+UNDO="$(tool_json undo '{}')"
+expect_eq "undo: names the command" true "$(echo "$UNDO" | jq '.text | length > 0')"
+expect_eq "undo: the move is reverted" 75 "$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")][0].start')"
+expect_eq "redo: the move is applied again" 0 "$(tool_json redo '{}' >/dev/null; tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")][0].start')"
+expect_eq "undo again" 75 "$(tool_json undo '{}' >/dev/null; tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")][0].start')"
+expect_eq "redo: nothing newer than the redone step" true "$(tool_json redo '{}' >/dev/null; tool_is_error redo '{}')"
+tool_json undo '{}' >/dev/null
+
+echo "== timeline: lift edge cases"
+expect_eq "state before lifts: two plain clips" 2 "$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
+expect_eq "state before lifts: starts" "75,125" "$(tool_json get_timeline '{}' | jq -r '[.tracks[0].clips[] | select(.kind=="clip") | .start] | join(",")')"
+RAW="$(call_tool timeline_remove '{"track":0,"clip":1,"ripple":false}')"
+expect_eq "lift next to the blank: not an error" false "$(echo "$RAW" | jq '.result.isError')"
+LIFT="$(echo "$RAW" | jq -c '.result.content[0].text | fromjson')"
+expect_eq "lift next to the blank: one clip left" 1 "$(echo "$LIFT" | jq '[.track.clips[] | select(.kind=="clip")] | length')"
+tool_json undo '{}' >/dev/null
+expect_eq "undo of the lift: two clips" 2 "$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
+expect_eq "undo of the lift: same starts" "75,125" "$(tool_json get_timeline '{}' | jq -r '[.tracks[0].clips[] | select(.kind=="clip") | .start] | join(",")')"
+RAW="$(call_tool timeline_remove '{"track":0,"clip":2,"ripple":false}')"
+expect_eq "lift the last clip: not an error" false "$(echo "$RAW" | jq '.result.isError')"
+LIFT="$(echo "$RAW" | jq -c '.result.content[0].text | fromjson')"
+expect_eq "lift the last clip: one clip left" 1 "$(echo "$LIFT" | jq '[.track.clips[] | select(.kind=="clip")] | length')"
+tool_json undo '{}' >/dev/null
+expect_eq "undo of the last-clip lift: two clips" 2 "$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
+expect_eq "final: total duration" 215 "$(tool_json get_timeline '{}' | jq '.duration')"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
