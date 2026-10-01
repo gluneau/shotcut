@@ -28,9 +28,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 
-#include <cmath>
-#include <limits>
-
 using namespace McpTools;
 
 namespace {
