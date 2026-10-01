@@ -194,6 +194,155 @@ QJsonObject playlistAddTool(const QJsonObject &arguments)
     return jsonResult(playlistJson());
 }
 
+// Validates a track index; with needVideo the track must be a video track.
+bool validTrack(MultitrackModel &model, int track, QString &error, bool needVideo = false)
+{
+    if (track < 0 || track >= model.trackList().size()) {
+        error = QStringLiteral("There is no track %1; call get_timeline.").arg(track);
+        return false;
+    }
+    if (needVideo && model.trackList().at(track).type != VideoTrackType) {
+        error = QStringLiteral("Track %1 is not a video track.").arg(track);
+        return false;
+    }
+    if (MAIN.timelineDock()->isTrackLocked(track)) {
+        error = QStringLiteral("Track %1 is locked.").arg(track);
+        return false;
+    }
+    return true;
+}
+
+// Index 0 is the topmost video track, so V1 (the lowest) is the last video track.
+int lowestVideoTrack(MultitrackModel &model)
+{
+    for (int t = model.trackList().size() - 1; t >= 0; --t) {
+        if (model.trackList().at(t).type == VideoTrackType)
+            return t;
+    }
+    return -1;
+}
+
+// Resolves (track, clip) to a plain clip; returns false with a message otherwise.
+bool plainClip(MultitrackModel &model, int track, int clip, QString &error)
+{
+    if (!validTrack(model, track, error))
+        return false;
+    if (clip < 0 || clip >= model.rowCount(model.index(track))) {
+        error = QStringLiteral("Track %1 has no clip %2; call get_timeline.").arg(track).arg(clip);
+        return false;
+    }
+    if (kindOf(model, track, clip) != "clip") {
+        error = QStringLiteral("Item %1 on track %2 is a %3, not a clip.")
+                    .arg(clip)
+                    .arg(track)
+                    .arg(kindOf(model, track, clip));
+        return false;
+    }
+    return true;
+}
+
+QJsonObject timelineAddPlaylistTool(const QJsonObject &arguments)
+{
+    int track = 0;
+    const FrameArg trackArg = readFrame(arguments, "track", track);
+    if (trackArg == FrameArg::Invalid)
+        return textResult("track must be a non-negative integer.", true);
+    Mlt::Playlist *playlist = MAIN.playlist();
+    if (!playlist || !playlist->is_valid() || playlist->count() <= 0)
+        return textResult("The playlist is empty; use playlist_add first.", true);
+
+    TimelineDock *dock = MAIN.timelineDock();
+    QString error;
+    if (MAIN.isMultitrackValid()) {
+        MultitrackModel &model = *dock->model();
+        if (trackArg == FrameArg::Missing)
+            track = lowestVideoTrack(model);
+        if (track < 0 || !validTrack(model, track, error, true))
+            return textResult(error.isEmpty() ? QStringLiteral("There is no video track.") : error,
+                              true);
+        dock->setCurrentTrack(track);
+    } else if (trackArg == FrameArg::Ok && track != 0) {
+        return textResult("There is no timeline yet; omit track (a video track is created).", true);
+    }
+
+    Mlt::Playlist copy(MLT.profile());
+    for (int i = 0; i < playlist->count(); ++i) {
+        QScopedPointer<Mlt::ClipInfo> info(playlist->clip_info(i));
+        if (info && info->producer && info->producer->is_valid())
+            copy.append(*info->producer, info->frame_in, info->frame_out);
+    }
+    if (copy.count() <= 0)
+        return textResult("The playlist has no usable items.", true);
+
+    MLT.pause();
+    dock->appendFromPlaylist(&copy, false, false);
+    if (!MAIN.isMultitrackValid())
+        return textResult("Shotcut did not create the timeline.", true);
+    MultitrackModel &model = *dock->model();
+    const int target = trackArg == FrameArg::Ok ? track : lowestVideoTrack(model);
+    return jsonResult(QJsonObject{{"appended", copy.count()}, {"track", trackJson(model, target)}});
+}
+
+QJsonObject timelineSplitTool(const QJsonObject &arguments)
+{
+    int track = 0, position = 0;
+    if (readFrame(arguments, "track", track) != FrameArg::Ok
+        || readFrame(arguments, "position", position) != FrameArg::Ok)
+        return textResult("track and position must be non-negative integers.", true);
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
+    QString error;
+    if (!validTrack(model, track, error))
+        return textResult(error, true);
+    const int clip = dock->clipIndexAtPosition(track, position);
+    if (clip < 0 || !plainClip(model, track, clip, error))
+        return textResult(error.isEmpty() ? QStringLiteral("No clip at frame %1.").arg(position)
+                                          : error,
+                          true);
+    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, clip);
+    if (!info || position <= info->start || position >= info->start + info->frame_count)
+        return textResult("position must be strictly inside the clip (it starts at frame "
+                              + QString::number(info ? info->start : 0) + ").",
+                          true);
+    MLT.pause();
+    if (!dock->split(track, clip, position))
+        return textResult("Shotcut refused the split.", true);
+    return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
+}
+
+QJsonObject timelineRemoveTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0;
+    if (readFrame(arguments, "track", track) != FrameArg::Ok
+        || readFrame(arguments, "clip", clip) != FrameArg::Ok)
+        return textResult("track and clip must be non-negative integers.", true);
+    const QJsonValue rippleValue = arguments.value("ripple");
+    if (!rippleValue.isUndefined() && !rippleValue.isBool())
+        return textResult("ripple must be a boolean.", true);
+    const bool ripple = rippleValue.toBool(true);
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
+    QString error;
+    if (!plainClip(model, track, clip, error))
+        return textResult(error, true);
+
+    const int before = model.rowCount(model.index(track));
+    MLT.pause();
+    if (ripple)
+        dock->remove(track, clip);
+    else
+        dock->lift(track, clip);
+    const bool worked = ripple ? model.rowCount(model.index(track)) < before
+                               : kindOf(model, track, clip) == "blank";
+    if (!worked)
+        return textResult("Shotcut did not remove the clip.", true);
+    return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
+}
+
 } // namespace
 
 QList<McpTool> McpTools::timelineTools()
@@ -219,5 +368,31 @@ QList<McpTool> McpTools::timelineTools()
              "path":{"type":"string","description":"Absolute path of a media file."}
            },"required":["path"]})"),
          playlistAddTool},
+        {"timeline_add_playlist",
+         "Append every playlist item to the end of a video track as ONE undo step (default the "
+         "lowest video track V1; the timeline is created if none exists). Track 0 is the TOPMOST "
+         "video track. Returns {appended, track}.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0,"description":"Video track index (0 is the topmost). Default V1."}
+           }})"),
+         timelineAddPlaylistTool},
+        {"timeline_split",
+         "Split the clip at an absolute timeline frame (strictly inside the clip). Track 0 is the "
+         "TOPMOST video track. Clip indexes after the split shift by one; the returned track shows "
+         "the new indexes.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "position":{"type":"integer","minimum":0,"description":"Absolute timeline frame."}
+           },"required":["track","position"]})"),
+         timelineSplitTool},
+        {"timeline_remove",
+         "Remove a clip. ripple true (default) closes the gap; ripple false leaves a blank of the "
+         "same length. Track 0 is the TOPMOST video track. Returns the updated track.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0,"description":"Item index from get_timeline."},
+             "ripple":{"type":"boolean"}
+           },"required":["track","clip"]})"),
+         timelineRemoveTool},
     };
 }
