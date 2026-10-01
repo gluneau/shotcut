@@ -260,7 +260,6 @@ QJsonObject timelineAddPlaylistTool(const QJsonObject &arguments)
         if (track < 0 || !validTrack(model, track, error, true))
             return textResult(error.isEmpty() ? QStringLiteral("There is no video track.") : error,
                               true);
-        dock->setCurrentTrack(track);
     } else if (trackArg == FrameArg::Ok && track != 0) {
         return textResult("There is no timeline yet; omit track (a video track is created).", true);
     }
@@ -274,6 +273,8 @@ QJsonObject timelineAddPlaylistTool(const QJsonObject &arguments)
     if (copy.count() <= 0)
         return textResult("The playlist has no usable items.", true);
 
+    if (MAIN.isMultitrackValid())
+        dock->setCurrentTrack(track);
     MLT.pause();
     dock->appendFromPlaylist(&copy, false, false);
     if (!MAIN.isMultitrackValid())
@@ -330,15 +331,20 @@ QJsonObject timelineRemoveTool(const QJsonObject &arguments)
     if (!plainClip(model, track, clip, error))
         return textResult(error, true);
 
-    const int before = model.rowCount(model.index(track));
+    // Lifting consolidates blanks, so item indexes are not stable; count the clips instead.
+    const auto clipCount = [&]() {
+        int n = 0;
+        for (int c = 0; c < model.rowCount(model.index(track)); ++c)
+            n += kindOf(model, track, c) == "clip" ? 1 : 0;
+        return n;
+    };
+    const int before = clipCount();
     MLT.pause();
     if (ripple)
         dock->remove(track, clip);
     else
         dock->lift(track, clip);
-    const bool worked = ripple ? model.rowCount(model.index(track)) < before
-                               : kindOf(model, track, clip) == "blank";
-    if (!worked)
+    if (clipCount() != before - 1)
         return textResult("Shotcut did not remove the clip.", true);
     return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
 }
@@ -386,8 +392,8 @@ QList<McpTool> McpTools::timelineTools()
            },"required":["track","position"]})"),
          timelineSplitTool},
         {"timeline_remove",
-         "Remove a clip. ripple true (default) closes the gap; ripple false leaves a blank of the "
-         "same length. Track 0 is the TOPMOST video track. Returns the updated track.",
+         "Remove a clip. ripple true (default) closes the gap; ripple false turns the lifted span "
+         "into a blank (blanks next to it merge, so later item indexes can shift). Track 0 is the TOPMOST video track. Returns the updated track.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0,"description":"Item index from get_timeline."},
