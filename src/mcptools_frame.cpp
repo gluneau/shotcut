@@ -18,6 +18,7 @@
 
 #include "mainwindow.h"
 #include "mltcontroller.h"
+#include "sharedframe.h"
 #include "videowidget.h"
 
 #include <QBuffer>
@@ -62,31 +63,51 @@ QJsonObject getFrameTool(const QJsonObject &arguments)
     if (!widget)
         return textResult("There is no video widget to read a frame from.", true);
 
+    QImage image;
     if (positionArg == FrameArg::Ok) {
-        // The display lags a seek, so ask for the next displayed frame and wait for it
-        // (the way Shotcut's own Export Frame does); a timeout is an error, not a stale image.
+        // After a seek the consumer shows the frame it rendered BEFORE the seek first (the display
+        // lags one request), and Mlt::VideoWidget::requestImage() is consumed by whichever frame is
+        // displayed next, so imageReady can deliver a stale picture. Instead take the first
+        // displayed frame whose position is the requested one (the way a position-less call reads
+        // what is shown), re-pushing the frame while waiting; a timeout is an error, never a
+        // wrong image.
         position = qMin(position, lastFrame());
         bool ready = false;
+        QImage matched;
         QEventLoop loop;
         QTimer timeout;
+        QTimer refresh;
         timeout.setSingleShot(true);
-        QObject::connect(widget, &Mlt::VideoWidget::imageReady, &loop, [&]() {
-            ready = true;
-            loop.quit();
-        });
+        QObject::connect(widget,
+                         &Mlt::VideoWidget::frameDisplayed,
+                         &loop,
+                         [&](const SharedFrame &frame) {
+                             if (ready || frame.get_position() != position)
+                                 return;
+                             const uint8_t *data = frame.get_image(mlt_image_rgba);
+                             if (!data)
+                                 return;
+                             matched = QImage(data,
+                                              frame.get_image_width(),
+                                              frame.get_image_height(),
+                                              QImage::Format_RGBA8888)
+                                           .copy();
+                             ready = true;
+                             loop.quit();
+                         });
         QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        QObject::connect(&refresh, &QTimer::timeout, &loop, []() { MLT.refreshConsumer(); });
         movePlayhead(position);
-        widget->requestImage();
         MLT.refreshConsumer();
-        if (!ready) {
-            timeout.start(2000);
-            loop.exec();
-        }
+        timeout.start(3000);
+        refresh.start(200);
+        loop.exec();
         if (!ready)
             return textResult("The frame was not ready in time; try again.", true);
+        image = matched;
+    } else {
+        image = widget->image();
     }
-
-    QImage image = widget->image();
     if (image.isNull())
         return textResult("No frame is available yet.", true);
 

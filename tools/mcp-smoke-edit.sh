@@ -277,15 +277,30 @@ else
 fi
 expect_eq "remove next to a transition: state restored" "$STARTS_BEFORE|$PLAIN_N" "$(tool_json get_timeline '{}' | jq -r "($PSTARTS_T) + \"|\" + (([.tracks[0].clips[] | select(.kind==\"clip\")] | length | tostring))")"
 
-# get_frame can return the previous request's frame right after a far seek; the second request
-# at the same position is settled, so each frame is fetched twice and the second one is kept.
-settled_frame() { frame_to_file "$1" "$2"; frame_to_file "$1" "$2"; }
-settled_frame "{\"position\":$((TSTART - 3))}" "$TMP/tr_before.jpg"
-settled_frame "{\"position\":$((TSTART + 5))}" "$TMP/tr_mid.jpg"
-settled_frame "{\"position\":$((TSTART + 23))}" "$TMP/tr_after.jpg"
+frame_to_file "{\"position\":$((TSTART - 3))}" "$TMP/tr_before.jpg"
+frame_to_file "{\"position\":$((TSTART + 5))}" "$TMP/tr_mid.jpg"
+frame_to_file "{\"position\":$((TSTART + 23))}" "$TMP/tr_after.jpg"
 expect_eq "transition frame: JPEG signature" ffd8ff "$(head -c 3 "$TMP/tr_mid.jpg" | xxd -p)"
 expect_eq "transition frame: differs from the frame before" true "$([ "$(md5sum < "$TMP/tr_mid.jpg")" != "$(md5sum < "$TMP/tr_before.jpg")" ] && echo true || echo false)"
 expect_eq "transition frame: differs from the frame after" true "$([ "$(md5sum < "$TMP/tr_mid.jpg")" != "$(md5sum < "$TMP/tr_after.jpg")" ] && echo true || echo false)"
+
+echo "== get_frame: strict repeatability on the timeline with the transition"
+# Positions: blank (10), plain clip (90), inside the transition (TSTART+10), plain clip C (150).
+FAIL_BEFORE_STRESS=$failures
+declare -A FIRST
+for round in 1 2 3 4 5 6 7 8; do
+  for pos in 10 90 $((TSTART + 10)) 150; do
+    frame_to_file "{\"position\":$pos}" "$TMP/st.jpg"
+    SUM="$(md5sum < "$TMP/st.jpg" | cut -c1-32)"
+    if [ -z "${FIRST[$pos]:-}" ]; then FIRST[$pos]="$SUM"; fi
+    if [ "${FIRST[$pos]}" != "$SUM" ]; then fail "get_frame stress: position $pos round $round" "image differs from round 1 (stale frame)"; fi
+  done
+done
+[ "$failures" -eq "$FAIL_BEFORE_STRESS" ] && pass "get_frame stress: 8 rounds x 4 positions byte-identical"
+DISTINCT="$(printf '%s\n' "${FIRST[@]}" | sort -u | wc -l)"
+expect_eq "get_frame stress: four positions give four different images" 4 "$DISTINCT"
+frame_to_file "{\"position\":90}" "$TMP/same1.jpg"; frame_to_file "{\"position\":90}" "$TMP/same2.jpg"
+expect_eq "get_frame: the same position twice in a row is identical" true "$([ "$(md5sum < "$TMP/same1.jpg")" = "$(md5sum < "$TMP/same2.jpg")" ] && echo true || echo false)"
 
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
