@@ -40,7 +40,7 @@ wait_state() {
 wait_job() {
   local out="" i
   for i in $(seq 1 $(( ${2:-60} * 5 ))); do
-    out="$(tool_json get_job "{\"id\":\"$1\"}")"
+    out="$(tool_json get_job "{\"job_id\":$1}")"
     [ "$(echo "$out" | jq -r '.state')" != running ] && break
     sleep 0.2
   done

@@ -42,57 +42,6 @@ using namespace McpTools;
 
 namespace {
 
-bool itemFlag(MultitrackModel &model, int track, int clip, int role)
-{
-    return model.data(model.index(clip, 0, model.index(track)), role).toBool();
-}
-
-QString kindOf(MultitrackModel &model, int track, int clip)
-{
-    if (itemFlag(model, track, clip, MultitrackModel::IsBlankRole))
-        return QStringLiteral("blank");
-    if (itemFlag(model, track, clip, MultitrackModel::IsTransitionRole))
-        return QStringLiteral("transition");
-    return QStringLiteral("clip");
-}
-
-QJsonObject clipJson(MultitrackModel &model, int track, int clip)
-{
-    const QModelIndex index = model.index(clip, 0, model.index(track));
-    QJsonObject o{{"index", clip}, {"kind", kindOf(model, track, clip)}};
-    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, clip);
-    if (info) {
-        o["start"] = info->start;
-        o["duration"] = info->frame_count;
-        o["in"] = info->frame_in;
-        o["out"] = info->frame_out;
-    }
-    o["name"] = model.data(index, MultitrackModel::NameRole).toString();
-    if (o["kind"] == "clip" && info && info->producer && info->producer->is_valid())
-        o["path"] = ProxyManager::resource(*info->producer);
-    else
-        o["path"] = model.data(index, MultitrackModel::ResourceRole).toString();
-    o["fade_in"] = model.data(index, MultitrackModel::FadeInRole).toInt();
-    o["fade_out"] = model.data(index, MultitrackModel::FadeOutRole).toInt();
-    return o;
-}
-
-QJsonObject trackJson(MultitrackModel &model, int track)
-{
-    const QModelIndex index = model.index(track);
-    QJsonArray clips;
-    for (int c = 0; c < model.rowCount(index); ++c)
-        clips.append(clipJson(model, track, c));
-    return QJsonObject{
-        {"index", track},
-        {"name", model.data(index, MultitrackModel::NameRole).toString()},
-        {"type", model.trackList().at(track).type == AudioTrackType ? "audio" : "video"},
-        {"locked", model.data(index, MultitrackModel::IsLockedRole).toBool()},
-        {"muted", model.data(index, MultitrackModel::IsMuteRole).toBool()},
-        {"hidden", model.data(index, MultitrackModel::IsHiddenRole).toBool()},
-        {"clips", clips}};
-}
-
 QJsonObject playlistJson()
 {
     QJsonArray items;
@@ -197,24 +146,6 @@ QJsonObject playlistAddTool(const QJsonObject &arguments)
     return jsonResult(playlistJson());
 }
 
-// Validates a track index; with needVideo the track must be a video track.
-bool validTrack(MultitrackModel &model, int track, QString &error, bool needVideo = false)
-{
-    if (track < 0 || track >= model.trackList().size()) {
-        error = QStringLiteral("There is no track %1; call get_timeline.").arg(track);
-        return false;
-    }
-    if (needVideo && model.trackList().at(track).type != VideoTrackType) {
-        error = QStringLiteral("Track %1 is not a video track.").arg(track);
-        return false;
-    }
-    if (MAIN.timelineDock()->isTrackLocked(track)) {
-        error = QStringLiteral("Track %1 is locked.").arg(track);
-        return false;
-    }
-    return true;
-}
-
 // Index 0 is the topmost video track, so V1 (the lowest) is the last video track.
 int lowestVideoTrack(MultitrackModel &model)
 {
@@ -223,25 +154,6 @@ int lowestVideoTrack(MultitrackModel &model)
             return t;
     }
     return -1;
-}
-
-// Resolves (track, clip) to a plain clip; returns false with a message otherwise.
-bool plainClip(MultitrackModel &model, int track, int clip, QString &error)
-{
-    if (!validTrack(model, track, error))
-        return false;
-    if (clip < 0 || clip >= model.rowCount(model.index(track))) {
-        error = QStringLiteral("Track %1 has no clip %2; call get_timeline.").arg(track).arg(clip);
-        return false;
-    }
-    if (kindOf(model, track, clip) != "clip") {
-        error = QStringLiteral("Item %1 on track %2 is a %3, not a clip.")
-                    .arg(clip)
-                    .arg(track)
-                    .arg(kindOf(model, track, clip));
-        return false;
-    }
-    return true;
 }
 
 QJsonObject timelineAddPlaylistTool(const QJsonObject &arguments)

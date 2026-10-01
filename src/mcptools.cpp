@@ -362,6 +362,7 @@ QList<McpTool> McpTools::all()
     tools += frameTools();
     tools += timelineTools();
     tools += exportTools();
+    tools += analysisTools();
     return tools;
 }
 

@@ -15,15 +15,52 @@
 
 #include "mcptoolsutil.h"
 
+#include "docks/timelinedock.h"
 #include "mainwindow.h"
 #include "mltcontroller.h"
+#include "models/multitrackmodel.h"
+#include "proxymanager.h"
 
+#include <MltPlaylist.h>
+
+#include <QDir>
+#include <QFileInfo>
 #include <QJsonDocument>
 
 #include <cmath>
 #include <limits>
 
 namespace McpTools {
+
+namespace {
+
+bool itemFlag(MultitrackModel &model, int track, int clip, int role)
+{
+    return model.data(model.index(clip, 0, model.index(track)), role).toBool();
+}
+
+QJsonObject clipJson(MultitrackModel &model, int track, int clip)
+{
+    const QModelIndex index = model.index(clip, 0, model.index(track));
+    QJsonObject o{{"index", clip}, {"kind", kindOf(model, track, clip)}};
+    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, clip);
+    if (info) {
+        o["start"] = info->start;
+        o["duration"] = info->frame_count;
+        o["in"] = info->frame_in;
+        o["out"] = info->frame_out;
+    }
+    o["name"] = model.data(index, MultitrackModel::NameRole).toString();
+    if (o["kind"] == "clip" && info && info->producer && info->producer->is_valid())
+        o["path"] = ProxyManager::resource(*info->producer);
+    else
+        o["path"] = model.data(index, MultitrackModel::ResourceRole).toString();
+    o["fade_in"] = model.data(index, MultitrackModel::FadeInRole).toInt();
+    o["fade_out"] = model.data(index, MultitrackModel::FadeOutRole).toInt();
+    return o;
+}
+
+} // namespace
 
 QJsonObject schema(const char *json)
 {
@@ -76,6 +113,163 @@ void movePlayhead(int position)
         MAIN.seekTimeline(position);
     else
         MLT.seek(position);
+}
+
+QString kindOf(MultitrackModel &model, int track, int clip)
+{
+    if (itemFlag(model, track, clip, MultitrackModel::IsBlankRole))
+        return QStringLiteral("blank");
+    if (itemFlag(model, track, clip, MultitrackModel::IsTransitionRole))
+        return QStringLiteral("transition");
+    return QStringLiteral("clip");
+}
+
+QJsonObject trackJson(MultitrackModel &model, int track)
+{
+    const QModelIndex index = model.index(track);
+    QJsonArray clips;
+    for (int c = 0; c < model.rowCount(index); ++c)
+        clips.append(clipJson(model, track, c));
+    return QJsonObject{
+        {"index", track},
+        {"name", model.data(index, MultitrackModel::NameRole).toString()},
+        {"type", model.trackList().at(track).type == AudioTrackType ? "audio" : "video"},
+        {"locked", model.data(index, MultitrackModel::IsLockedRole).toBool()},
+        {"muted", model.data(index, MultitrackModel::IsMuteRole).toBool()},
+        {"hidden", model.data(index, MultitrackModel::IsHiddenRole).toBool()},
+        {"clips", clips}};
+}
+
+bool validTrack(MultitrackModel &model, int track, QString &error, bool needVideo)
+{
+    if (track < 0 || track >= model.trackList().size()) {
+        error = QStringLiteral("There is no track %1; call get_timeline.").arg(track);
+        return false;
+    }
+    if (needVideo && model.trackList().at(track).type != VideoTrackType) {
+        error = QStringLiteral("Track %1 is not a video track.").arg(track);
+        return false;
+    }
+    if (MAIN.timelineDock()->isTrackLocked(track)) {
+        error = QStringLiteral("Track %1 is locked.").arg(track);
+        return false;
+    }
+    return true;
+}
+
+std::unique_ptr<Mlt::ClipInfo> plainClip(MultitrackModel &model,
+                                         int track,
+                                         int clip,
+                                         QString &error)
+{
+    if (!validTrack(model, track, error))
+        return nullptr;
+    if (clip < 0 || clip >= model.rowCount(model.index(track))) {
+        error = QStringLiteral("Track %1 has no clip %2; call get_timeline.").arg(track).arg(clip);
+        return nullptr;
+    }
+    if (kindOf(model, track, clip) != "clip") {
+        error = QStringLiteral("Item %1 on track %2 is a %3, not a clip.")
+                    .arg(clip)
+                    .arg(track)
+                    .arg(kindOf(model, track, clip));
+        return nullptr;
+    }
+    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, clip);
+    if (!info)
+        error = QStringLiteral("Track %1 has no clip %2; call get_timeline.").arg(track).arg(clip);
+    return info;
+}
+
+QString clipSourcePath(Mlt::ClipInfo &info)
+{
+    if (!info.producer || !info.producer->is_valid())
+        return QString();
+    QString path = ProxyManager::resource(*info.producer);
+    if (!path.isEmpty() && !QDir::isAbsolutePath(path) && !MAIN.fileName().isEmpty())
+        path = QDir(QFileInfo(MAIN.fileName()).canonicalPath()).absoluteFilePath(path);
+    return path;
+}
+
+bool resolveSource(const QJsonObject &arguments, SourceRef &ref, QString &error)
+{
+    const QJsonValue pathValue = arguments.value("path");
+    const bool hasTrack = !arguments.value("track").isUndefined();
+    const bool hasClip = !arguments.value("clip").isUndefined();
+    if (!pathValue.isUndefined() && (hasTrack || hasClip)) {
+        error = QStringLiteral("Pass either path or track and clip, not both.");
+        return false;
+    }
+    if (!pathValue.isUndefined()) {
+        const QString path = pathValue.toString();
+        if (!pathValue.isString() || path.isEmpty() || isResourcePath(path)
+            || !QDir::isAbsolutePath(path)) {
+            error = QStringLiteral("path must be an absolute file path.");
+            return false;
+        }
+        const QFileInfo info(path);
+        if (!info.exists() || !info.isFile()) {
+            error = "No such file: " + path;
+            return false;
+        }
+        ref = SourceRef();
+        ref.path = path;
+        return true;
+    }
+    if (!hasTrack || !hasClip) {
+        error = QStringLiteral("Pass path, or track and clip.");
+        return false;
+    }
+    int track = 0;
+    int clip = 0;
+    if (readFrame(arguments, "track", track) != FrameArg::Ok
+        || readFrame(arguments, "clip", clip) != FrameArg::Ok) {
+        error = QStringLiteral("track and clip must be non-negative integers.");
+        return false;
+    }
+    if (!MAIN.isMultitrackValid()) {
+        error = QStringLiteral("There is no timeline.");
+        return false;
+    }
+    std::unique_ptr<Mlt::ClipInfo> info = plainClip(*MAIN.timelineDock()->model(),
+                                                    track,
+                                                    clip,
+                                                    error);
+    if (!info)
+        return false;
+    const QString path = clipSourcePath(*info);
+    const QFileInfo file(path);
+    if (path.isEmpty() || !file.exists() || !file.isFile()) {
+        error = QStringLiteral("Clip %1 on track %2 has no source file.").arg(clip).arg(track);
+        return false;
+    }
+    const double fps = MLT.profile().fps();
+    ref = SourceRef();
+    ref.path = path;
+    ref.inSeconds = info->frame_in / fps;
+    ref.outSeconds = (info->frame_out + 1) / fps;
+    ref.isClip = true;
+    ref.track = track;
+    ref.clip = clip;
+    ref.clipStart = info->start;
+    ref.clipFrameIn = info->frame_in;
+    ref.clipFrameCount = info->frame_count;
+    ref.speedChanged = info->producer->property_exists("warp_speed")
+                       && info->producer->get_double("warp_speed") != 1.0;
+    return true;
+}
+
+QJsonArray mapRangeToTimeline(const SourceRef &ref, double startSec, double endSec)
+{
+    if (!ref.isClip || ref.speedChanged)
+        return QJsonArray();
+    const double fps = MLT.profile().fps();
+    const int a = qMax(qRound(startSec * fps), ref.clipFrameIn);
+    const int b = qMin(qRound(endSec * fps), ref.clipFrameIn + ref.clipFrameCount);
+    if (a >= b)
+        return QJsonArray();
+    return QJsonArray{QJsonObject{{"start", ref.clipStart + (a - ref.clipFrameIn)},
+                                  {"end", ref.clipStart + (b - ref.clipFrameIn)}}};
 }
 
 } // namespace McpTools

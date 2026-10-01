@@ -50,6 +50,7 @@ QJsonObject imageResult(const QByteArray &bytes,
 QList<McpTool> frameTools();
 QList<McpTool> timelineTools();
 QList<McpTool> exportTools();
+QList<McpTool> analysisTools();
 
 } // namespace McpTools
 
