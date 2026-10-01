@@ -128,7 +128,11 @@ QJsonObject openProject(const QJsonObject &arguments)
                                         + "; see the status bar or call get_state.",
                                     true);
     }
-    return McpTools::jsonResult(QJsonObject{{"requested", path}, {"project", MAIN.fileName()}});
+    return McpTools::jsonResult(QJsonObject{{"requested", path},
+                                                  {"project",
+                                                   MAIN.fileName().isEmpty()
+                                                       ? QJsonValue(QJsonValue::Null)
+                                                       : QJsonValue(MAIN.fileName())}});
 }
 
 QJsonObject saveProject(const QJsonObject &arguments)
@@ -193,7 +197,8 @@ Mlt::Producer *timeline()
 // seekTimeline() switches the player to the multitrack, so clamp against its length then.
 int lastFrame()
 {
-    Mlt::Producer *producer = timeline() ? timeline() : MLT.producer();
+    Mlt::Producer *tl = timeline();
+    Mlt::Producer *producer = tl ? tl : MLT.producer();
     return producer ? qMax(0, producer->get_playtime() - 1) : 0;
 }
 
@@ -210,8 +215,10 @@ QJsonObject playTool(const QJsonObject &arguments)
     double speed = 1.0;
     const QJsonValue v = arguments.value("speed");
     if (!v.isUndefined()) {
-        if (!v.isDouble() || v.toDouble() == 0.0) {
-            return McpTools::textResult("speed must be a non-zero number (use pause to stop).",
+        // Controller::isPaused() treats |speed| < 0.1 as paused, so such a play would not play.
+        if (!v.isDouble() || qAbs(v.toDouble()) < 0.1) {
+            return McpTools::textResult("speed must be a number with an absolute value of at least "
+                                        "0.1 (use pause to stop).",
                                         true);
         }
         speed = v.toDouble();
@@ -316,7 +323,10 @@ QJsonObject triggerAction(const QJsonObject &arguments)
     } else {
         action->trigger();
     }
-    return McpTools::jsonResult(QJsonObject{{"key", key}, {"checked", action->isChecked()}});
+    QJsonObject result{{"key", key}};
+    if (action->isCheckable())
+        result["checked"] = action->isChecked();
+    return McpTools::jsonResult(result);
 }
 
 } // namespace
@@ -337,7 +347,9 @@ QList<McpTool> McpTools::all()
     return {
         {"get_state",
          "Report the current project: file path (or null), modified flag, whether media is loaded, "
-         "whether it is playing, playhead position and duration in frames, and frame rate.",
+         "whether it is playing, playhead position and duration in frames, and frame rate. Position "
+         "and duration describe the player's current producer, which can be a source clip while a "
+         "timeline project exists.",
          schema(R"({"type":"object","properties":{}})"),
          getState},
         {"open_project",
@@ -359,9 +371,11 @@ QList<McpTool> McpTools::all()
            }})"),
          saveProject},
         {"play",
-         "Start playback. Optional speed (non-zero number, default 1.0; negative plays backwards).",
+         "Start playback. Optional speed (absolute value at least 0.1, default 1.0; negative plays "
+         "backwards). Playing from the last frame ends immediately, so seek to an earlier frame "
+         "first.",
          schema(R"({"type":"object","properties":{
-             "speed":{"type":"number","description":"Playback speed, default 1.0."}
+             "speed":{"type":"number","description":"Playback speed, absolute value at least 0.1, default 1.0."}
            }})"),
          playTool},
         {"pause",
@@ -385,7 +399,9 @@ QList<McpTool> McpTools::all()
          listActions},
         {"trigger_action",
          "Run one of the player actions listed by list_actions, e.g. playerNextFrameAction. "
-         "For checkable actions (such as playerLoopAction) pass checked to set the state.",
+         "Returns before the effect completes; call get_state to see the result. For checkable actions "
+         "(such as playerLoopAction) pass checked to set the state; omitting it toggles the action, "
+         "and the result then includes checked.",
          schema(R"({"type":"object","properties":{
              "key":{"type":"string","description":"Action key from list_actions."},
              "checked":{"type":"boolean","description":"Desired state for a checkable action."}

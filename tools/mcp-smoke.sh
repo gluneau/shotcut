@@ -42,10 +42,18 @@ raw() {
   exec 3<&- 3>&-
 }
 
-if [ "$(tool_json get_state '{}' | jq -r '.modified')" = true ] && [ "${MCP_SMOKE_FORCE:-0}" != 1 ]; then
-  echo "Refusing to run: the project in Shotcut has unsaved changes and this test replaces it."
-  echo "Use a throwaway Shotcut session, or set MCP_SMOKE_FORCE=1 to run anyway."
-  exit 2
+# Fail closed: if get_state is unreadable we cannot know whether the project has unsaved changes.
+if [ "${MCP_SMOKE_FORCE:-0}" != 1 ]; then
+  if ! STATE="$(call_tool get_state '{}' | jq -e '.result.content[0].text | fromjson')" 2>/dev/null; then
+    echo "Refusing to run: get_state did not return a parsable result, so unsaved changes cannot be ruled out."
+    echo "Check MCP_TOKEN, MCP_PORT and that the server is enabled, or set MCP_SMOKE_FORCE=1 to run anyway."
+    exit 2
+  fi
+  if [ "$(echo "$STATE" | jq -r '.modified')" = true ]; then
+    echo "Refusing to run: the project in Shotcut has unsaved changes and this test replaces it."
+    echo "Use a throwaway Shotcut session, or set MCP_SMOKE_FORCE=1 to run anyway."
+    exit 2
+  fi
 fi
 
 echo "== HTTP checks"
@@ -53,6 +61,8 @@ expect_eq "no token -> 401" 401 "$(http_status -X POST "$URL" "${JSON[@]}" -d '{
 expect_eq "wrong token -> 401" 401 "$(http_status -X POST "$URL" -H 'Authorization: Bearer nope' "${JSON[@]}" -d '{}')"
 expect_eq "Origin header -> 403" 403 "$(http_status -X POST "$URL" "${AUTH[@]}" "${JSON[@]}" -H 'Origin: http://evil.example' -d '{}')"
 expect_eq "foreign Host -> 403" 403 "$(http_status -X POST "$URL" "${AUTH[@]}" "${JSON[@]}" -H 'Host: evil.example' -d '{}')"
+expect_eq "foreign Host without a token -> 403 (Host is checked before the token)" 403 "$(http_status -X POST "$URL" "${JSON[@]}" -H 'Host: evil.example' -d '{}')"
+expect_eq "Host localhost with a token is accepted" "{}" "$(curl -s --max-time 10 -X POST "$URL" "${AUTH[@]}" "${JSON[@]}" -H "Host: localhost:${PORT}" -d '{"jsonrpc":"2.0","id":2,"method":"ping"}' | jq -c '.result')"
 expect_eq "GET -> 405" 405 "$(http_status "$URL" "${AUTH[@]}")"
 expect_eq "unknown path -> 404" 404 "$(http_status -X POST "http://127.0.0.1:${PORT}/other" "${AUTH[@]}" "${JSON[@]}" -d '{}')"
 expect_eq "wrong content type -> 415" 415 "$(http_status -X POST "$URL" "${AUTH[@]}" -H 'Content-Type: text/plain' -d '{}')"
@@ -106,6 +116,13 @@ expect_eq "tools/list has get_state" true "$(rpc '{"jsonrpc":"2.0","id":3,"metho
 expect_eq "get_state.loaded is a boolean" boolean "$(tool_json get_state '{}' | jq -r '.loaded | type')"
 expect_eq "get_state.modified is a boolean" boolean "$(tool_json get_state '{}' | jq -r '.modified | type')"
 
+if [ "$(tool_json get_state '{}' | jq -r '.loaded')" = false ]; then
+  expect_eq "play: nothing loaded is an error" true "$(tool_is_error play '{}')"
+  expect_eq "pause: nothing loaded is an error" true "$(tool_is_error pause '{}')"
+else
+  echo "SKIP  nothing-loaded play/pause checks (something is already loaded)"
+fi
+
 expect_eq "open_project: relative path is an error" true "$(tool_is_error open_project '{"path":"clip.mp4"}')"
 expect_eq "open_project: missing file is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP/missing.mp4\"}")"
 expect_eq "open_project: directory is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP\"}")"
@@ -122,7 +139,15 @@ expect_eq "save_project: unwritable folder is an error" true "$(tool_is_error sa
 expect_eq "save_project: numeric path is an error" true "$(tool_is_error save_project '{"path":5}')"
 
 if [ "$HAVE_CLIP" = 1 ]; then
-  expect_eq "open_project: opens a media file" false "$(tool_is_error open_project "{\"path\":\"$TMP/clip.mp4\"}")"
+  # A media file opened with no project loaded has no project file name; only a fresh session can show that.
+  FRESH="$(tool_json get_state '{}' | jq -r '.project')"
+  OPENED="$(call_tool open_project "{\"path\":\"$TMP/clip.mp4\"}")"
+  expect_eq "open_project: opens a media file" false "$(echo "$OPENED" | jq -r '.result.isError')"
+  if [ "$FRESH" = null ]; then
+    expect_eq "open_project: a media file reports project null" null "$(echo "$OPENED" | jq -c '.result.content[0].text | fromjson | .project')"
+  else
+    echo "SKIP  open_project project-null check (a project file is already loaded)"
+  fi
   sleep 1.5
   expect_eq "get_state: loaded after open" true "$(tool_json get_state '{}' | jq -r '.loaded')"
   expect_eq "get_state: duration is 100 frames" 100 "$(tool_json get_state '{}' | jq -r '.duration')"
@@ -137,16 +162,20 @@ if [ "$HAVE_CLIP" = 1 ]; then
   expect_eq "open_project: invalid .mlt with discard_changes leaves state unchanged" "$BEFORE" "$(tool_json get_state '{}' | jq -c '[.project,.loaded,.modified]')"
   REALCOPY="$(realpath "$TMP/copy.mlt")"
   expect_eq "open_project: opens a saved .mlt project" false "$(tool_is_error open_project "{\"path\":\"$TMP/copy.mlt\"}")"
-  expect_eq "get_state: project is the opened .mlt" "$REALCOPY" "$(wait_state .project "$REALCOPY")"
+  wait_state '.project != null' true >/dev/null
+  expect_eq "get_state: project is the opened .mlt" "$REALCOPY" "$(realpath "$(tool_json get_state '{}' | jq -r '.project')")"
   expect_eq "open_project: opens the same .mlt again" false "$(tool_is_error open_project "{\"path\":\"$TMP/copy.mlt\"}")"
-  expect_eq "get_state: project is still the .mlt" "$REALCOPY" "$(wait_state .project "$REALCOPY")"
+  wait_state '.project != null' true >/dev/null
+  expect_eq "get_state: project is still the .mlt" "$REALCOPY" "$(realpath "$(tool_json get_state '{}' | jq -r '.project')")"
   tool_is_error open_project "{\"path\":\"$TMP/clip.mp4\"}" >/dev/null
   sleep 1.5
   cp "$TMP/copy.mlt" "$TMP/ro.mlt"; chmod a-w "$TMP/ro.mlt"
   if [ -w "$TMP/ro.mlt" ]; then
     echo "SKIP  read-only save check (file still writable, running as root?)"
   else
-    expect_eq "save_project: read-only existing file is an error" true "$(tool_is_error save_project "{\"path\":\"$TMP/ro.mlt\"}")"
+    RO_RESULT="$(call_tool save_project "{\"path\":\"$TMP/ro.mlt\"}")"
+    expect_eq "save_project: read-only existing file is an error" true "$(echo "$RO_RESULT" | jq -r '.result.isError')"
+    expect_eq "save_project: read-only file error says Cannot write to" true "$(echo "$RO_RESULT" | jq -r '.result.content[0].text | contains("Cannot write to")')"
   fi
 else
   echo "SKIP  media checks (ffmpeg not available)"
@@ -170,6 +199,7 @@ if [ "$HAVE_CLIP" = 1 ]; then
   expect_eq "seek: negative position is an error" true "$(tool_is_error seek '{"position":-1}')"
   expect_eq "pause: negative position is an error" true "$(tool_is_error pause '{"position":-5}')"
   expect_eq "play: zero speed is an error" true "$(tool_is_error play '{"speed":0}')"
+  expect_eq "play: speed below 0.1 is an error" true "$(tool_is_error play '{"speed":0.05}')"
   expect_eq "play: string speed is an error" true "$(tool_is_error play '{"speed":"fast"}')"
 
   tool_is_error seek '{"position":0}' >/dev/null
@@ -199,6 +229,9 @@ if [ "$HAVE_CLIP" = 1 ]; then
   wait_state .position 20 >/dev/null
   expect_eq "trigger_action: next frame is ok" false "$(tool_is_error trigger_action '{"key":"playerNextFrameAction"}')"
   expect_eq "trigger_action: moved one frame" 21 "$(wait_state .position 21)"
+  expect_eq "trigger_action: non-checkable result has no checked key" false "$(tool_json trigger_action '{"key":"playerNextFrameAction"}' | jq -r 'has("checked")')"
+  expect_eq "trigger_action: checkable result reports checked true" true "$(tool_json trigger_action '{"key":"playerLoopAction","checked":true}' | jq -r '.checked')"
+  tool_is_error trigger_action '{"key":"playerLoopAction","checked":false}' >/dev/null
 fi
 
 # MANUAL CHECKS (need a modified project in the GUI; a modified project cannot be made through the tools)

@@ -1223,11 +1223,6 @@ int ShotcutSettings::mcpServerPort() const
     return (port >= 1024 && port <= 65535) ? port : 7468;
 }
 
-void ShotcutSettings::setMcpServerPort(int port)
-{
-    settings.setValue("mcpServer/port", port);
-}
-
 QString ShotcutSettings::mcpServerToken()
 {
     QString token = settings.value("mcpServer/token").toString();

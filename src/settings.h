@@ -253,7 +253,6 @@ public:
     bool mcpServerEnabled() const;
     void setMcpServerEnabled(bool);
     int mcpServerPort() const;
-    void setMcpServerPort(int);
     QString mcpServerToken();
     void regenerateMcpServerToken();
     bool timelineFramebufferWaveform() const;

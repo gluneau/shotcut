@@ -327,8 +327,10 @@ QByteArray McpServer::callTool(const QJsonValue &id, const QJsonObject &params)
     const QString name = params.value("name").toString();
     std::function<QJsonObject(const QJsonObject &)> handler;
     for (const McpTool &tool : m_tools) {
-        if (tool.name == name)
+        if (tool.name == name) {
             handler = tool.handler;
+            break;
+        }
     }
     if (!handler)
         return rpcError(id, -32602, "Unknown tool: " + name);

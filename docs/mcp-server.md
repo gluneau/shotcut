@@ -17,6 +17,10 @@ the server starts, so toggle Enable off and on after changing it. An invalid val
 back to 7468. "Regenerate Token" invalidates
 the old token immediately.
 
+If the port is busy at startup or when you tick Enable, Shotcut shows a status message, unchecks
+the menu item and keeps the saved setting, so it retries on the next launch. To stop retrying, free
+the port or change `mcpServer/port`.
+
 The server speaks MCP over HTTP with a handshake: `initialize` is required first. Supported
 protocol versions are 2025-11-25, 2025-06-18, 2025-03-26 and 2024-11-05. The stateless 2026-07-28
 revision is not supported.
@@ -61,6 +65,10 @@ stops playback.
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
 header or a foreign `Host` header are rejected, which blocks web pages and DNS rebinding. The token
 is stored unencrypted in the settings file.
+
+There is no connection cap and no idle timeout after a reply, so each pending connection can hold
+up to about 1 MB for up to 10 s. That is acceptable because the server is loopback only and
+token-gated.
 
 ## Testing
 
