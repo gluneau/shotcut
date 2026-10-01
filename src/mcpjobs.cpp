@@ -244,7 +244,9 @@ std::shared_ptr<Record> run(const QString &kind,
     timer->setSingleShot(true);
     runner->timer = timer;
     QObject::connect(timer, &QTimer::timeout, timer, [runner, timeoutMs] {
-        finish(runner, "failed", QStringLiteral("timed out after %1 s").arg(timeoutMs / 1000));
+        finish(runner,
+               "failed",
+               QStringLiteral("timed out after %1 s").arg(timeoutMs / 1000.0, 0, 'f', 1));
     });
     timer->start(timeoutMs);
     startStep(runner);
@@ -262,8 +264,10 @@ std::shared_ptr<Record> find(int id)
 
 bool cached(const QString &cacheKey, QJsonObject &result)
 {
+    if (cacheKey.isEmpty())
+        return false;
     const auto it = cache().results.constFind(cacheKey);
-    if (cacheKey.isEmpty() || it == cache().results.constEnd())
+    if (it == cache().results.constEnd())
         return false;
     result = it.value();
     result["cached"] = true;

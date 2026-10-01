@@ -57,14 +57,20 @@ void movePlayhead(int position);
 // A timeline track as get_timeline reports it.
 QJsonObject trackJson(MultitrackModel &model, int track);
 
-// Validates a track index (range, not locked); with needVideo the track must be a video track.
-bool validTrack(MultitrackModel &model, int track, QString &error, bool needVideo = false);
+// Validates a track index (range, not locked unless allowLocked); with needVideo the track must
+// be a video track. Read-only tools pass allowLocked.
+bool validTrack(MultitrackModel &model,
+                int track,
+                QString &error,
+                bool needVideo = false,
+                bool allowLocked = false);
 
 // Resolves (track, clip) to a plain clip; null with a message otherwise.
 std::unique_ptr<Mlt::ClipInfo> plainClip(MultitrackModel &model,
                                          int track,
                                          int clip,
-                                         QString &error);
+                                         QString &error,
+                                         bool allowLocked = false);
 
 // "clip", "blank" or "transition".
 QString kindOf(MultitrackModel &model, int track, int clip);

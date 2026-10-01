@@ -140,7 +140,8 @@ QJsonObject trackJson(MultitrackModel &model, int track)
         {"clips", clips}};
 }
 
-bool validTrack(MultitrackModel &model, int track, QString &error, bool needVideo)
+bool validTrack(
+    MultitrackModel &model, int track, QString &error, bool needVideo, bool allowLocked)
 {
     if (track < 0 || track >= model.trackList().size()) {
         error = QStringLiteral("There is no track %1; call get_timeline.").arg(track);
@@ -150,7 +151,7 @@ bool validTrack(MultitrackModel &model, int track, QString &error, bool needVide
         error = QStringLiteral("Track %1 is not a video track.").arg(track);
         return false;
     }
-    if (MAIN.timelineDock()->isTrackLocked(track)) {
+    if (!allowLocked && MAIN.timelineDock()->isTrackLocked(track)) {
         error = QStringLiteral("Track %1 is locked.").arg(track);
         return false;
     }
@@ -160,9 +161,10 @@ bool validTrack(MultitrackModel &model, int track, QString &error, bool needVide
 std::unique_ptr<Mlt::ClipInfo> plainClip(MultitrackModel &model,
                                          int track,
                                          int clip,
-                                         QString &error)
+                                         QString &error,
+                                         bool allowLocked)
 {
-    if (!validTrack(model, track, error))
+    if (!validTrack(model, track, error, false, allowLocked))
         return nullptr;
     if (clip < 0 || clip >= model.rowCount(model.index(track))) {
         error = QStringLiteral("Track %1 has no clip %2; call get_timeline.").arg(track).arg(clip);
@@ -234,7 +236,8 @@ bool resolveSource(const QJsonObject &arguments, SourceRef &ref, QString &error)
     std::unique_ptr<Mlt::ClipInfo> info = plainClip(*MAIN.timelineDock()->model(),
                                                     track,
                                                     clip,
-                                                    error);
+                                                    error,
+                                                    true);
     if (!info)
         return false;
     const QString path = clipSourcePath(*info);
