@@ -60,6 +60,102 @@ stops playback.
 `playerForwardTenSecondsAction`, `playerBackwardTenSecondsAction`, `playerSkipNextAction`,
 `playerSkipPreviousAction`, `playerLoopAction`.
 
+## Stage 2: seeing, editing and exporting
+
+Stage 2 adds 15 tools (23 in all) so a client can build a playlist, edit the timeline, look at the
+result and render it.
+
+| Tool | What it does | Key arguments |
+|------|--------------|---------------|
+| `get_frame` | Returns an image of a frame | `position?`, `max_width?` (64-1920, default 640), `format?` (`jpeg` default, `png`) |
+| `get_playlist` | Lists playlist items | none |
+| `get_timeline` | Lists tracks and their clips, blanks and transitions | none |
+| `playlist_add` | Appends a media file to the playlist | `path` |
+| `timeline_add_playlist` | Appends all playlist items to a video track | `track?` (default V1) |
+| `timeline_split` | Splits a clip | `track`, `position` (strictly inside the clip) |
+| `timeline_remove` | Removes a clip (ripple) or lifts it (leaves a blank) | `track`, `clip`, `ripple?` (default true) |
+| `timeline_trim` | Moves a clip's in or out edge | `track`, `clip`, `edge`, one of `frame` or `delta`, `ripple?` (default false) |
+| `timeline_move` | Moves a clip to a start frame, optionally to another track | `track`, `clip`, `to_start`, `to_track?` |
+| `timeline_add_transition` | Adds Shotcut's default dissolve between two touching clips | `track`, `clip` (the incoming, later clip), `duration` |
+| `timeline_fade` | Sets a clip's fade-in and/or fade-out length (0 removes) | `track`, `clip`, `fade_in?`, `fade_out?` |
+| `undo`, `redo` | Undo or redo the last edit in Shotcut's history | none |
+| `export_video` | Renders the project to a video file as a background job | `path`, `preset?`, `overwrite?` |
+| `get_export_status` | Progress and result of an export | `job_id?` (default: the latest) |
+
+Positions and `to_start` are absolute timeline frames; `frame` in `timeline_trim` is the absolute
+timeline frame the edge moves to. Tool arguments are validated strictly and no tool opens a dialog.
+
+### Editing rules
+
+- Every edit is undoable with Shotcut's own Edit > Undo and with the `undo`/`redo` tools. These
+  also undo and redo edits made in the Shotcut window.
+- Indexes shift after a split, remove or transition. Every edit returns the updated track (same
+  shape as one `tracks[]` entry of `get_timeline`), so use that instead of guessing.
+- Track 0 is the TOPMOST video track; `get_timeline` reports each track's `name` ("V1", "A1").
+- These are refused with an error and change nothing: locked tracks; blank or transition items
+  where a clip is needed; invalid trims (including an extension longer than the neighbouring
+  gap); overlapping moves; moving a clip that is joined to a transition; a transition whose
+  incoming clip follows a blank, a transition or nothing, or already has a transition after it.
+- `playlist_add` accepts media files and still images (added with Shotcut's default image
+  duration), not project files (use `open_project`) or generators. With nothing loaded, the first
+  file also becomes the loaded clip, as in Shotcut's Add Files. When the window has unsaved
+  changes and nothing is loaded it returns an error instead of asking in a dialog.
+- `timeline_add_playlist` appends all playlist items after the existing clips of the track in one
+  undo step. The default track is V1, and the timeline is created if there is none.
+- Each `timeline_trim` is one undo step.
+- `timeline_add_transition` uses Shotcut's default dissolve with an audio cross-fade, with
+  ripple: the clips overlap by `duration`, so later clips on the track move earlier by `duration`
+  and the timeline gets shorter. Other tracks ripple according to Shotcut's own ripple setting.
+- `timeline_fade` sets both fades in one undo step; a fade cannot be longer than the clip.
+
+### get_frame
+
+Returns an image content item (JPEG, 640 px wide by default, or PNG) plus a text item with
+`position`, `width`, `height`, `format` and `proxy`. Images are never upscaled. Without `position`
+it returns the frame shown now. With `position` it pauses, moves the playhead like `seek` (clamped
+to the last frame) and waits for the displayed frame at that timeline frame, up to 3 s; on timeout
+it returns an error rather than a wrong picture.
+
+The width and height follow the player: with the player's preview scale or in GPU mode the frame
+can be smaller than the project resolution, and `width`/`height` report what you got. Known limit:
+the settling rule waits for a few displayed frames (more when Player > Realtime is off), so a stale
+picture is theoretically possible with Realtime off or a very loaded GUI.
+
+### Export
+
+`export_video` renders the timeline (else the playlist, else the loaded clip) as a background
+job that shows as a row in the Jobs dock, and returns `{job_id, output, preset}` at once. The
+preset defaults to `x264-medium` (H.264 + AAC, `.mp4`, the project's resolution and frame rate).
+It can be any stock preset name, or a custom preset by plain file name from
+`<appdata>/presets/encode`; paths are not accepted. Preconditions, each a tool error:
+
+- something is loaded and no export is already running (one at a time);
+- `path` is absolute, normalized (no `./`, `../`, doubled slashes) and not a symbolic link or
+  directory, and its extension matches the preset's;
+- the folder exists and is writable, with at least 1 GiB free;
+- the file does not exist, unless `overwrite: true`;
+- `melt-7` exists next to the Shotcut binary. In a dev tree link it in (adjust to your MLT prefix):
+
+      ln -s <mlt prefix>/bin/melt-7 build/cc-debug-linux/src/melt-7
+
+Safety: an export never overwrites media used by the project: timeline clips, playlist items, the
+loaded clip and the project file, checked by path and by file identity. A hard-linked target and
+anything in the autosave folder are also refused. The guard has a blind spot: files referenced only
+inside filters or nested project clips are not seen, so do not pass `overwrite: true` for a file
+you did not create.
+
+Side effects: the preset overwrites the Export panel's settings and its "export from" choice
+(the panel's hardware-encoder and proxy/preview-scale choices may still apply). The export skips
+the missing-files check and the analysis prompts, so analysis filters are not run. Dual-pass
+presets are not honored (the render is single pass). Parallel processing follows the Export
+panel's setting.
+
+`get_export_status` returns `{job_id, state, percent, output, output_exists, output_bytes,
+exit_code, elapsed_ms, error}`. `state` is one of `pending`, `running`, `paused`, `succeeded`,
+`failed`, `stopped`, `removed` (taken out of the Jobs dock before it finished) or `idle` (no
+export started yet). `exit_code` is the raw process code; a render that reached 99% or more counts
+as succeeded. `error` is the end of the render log when it failed.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -69,6 +165,11 @@ is stored unencrypted in the settings file.
 There is no connection cap and no idle timeout after a reply, so each pending connection can hold
 up to about 1 MB for up to 10 s. That is acceptable because the server is loopback only and
 token-gated.
+
+Stage 2 widens what the token allows. It can now edit the open project (every edit is undoable)
+and write one video file to any folder the user can write, never over media used by the project
+(see Export). `export_video`'s `preset` can only name a stock preset or a plain custom preset
+file, not a path.
 
 ## Testing
 
@@ -81,6 +182,21 @@ Shotcut can be run
 headless for it: pre-seed `<scratch dir>/shotcut.ini` with a `[mcpServer]` section containing
 `enabled=true` and a `token=` value, then start
 `xvfb-run -a build/cc-debug-linux/src/shotcut --appdata <scratch dir>`.
+To avoid the default port also add `port=<test port>` (for example 18999) and pass
+`MCP_PORT=<test port>` to the scripts.
+
+Stage 2 has its own script:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] [MCP_APPDATA=<scratch dir>] tools/mcp-smoke-edit.sh
+
+It needs bash, curl, jq, ffmpeg, ffprobe, xxd, md5sum and base64, and a FRESH throwaway Shotcut:
+it adds clips, edits the timeline, exports a video, and creates symlinks and hard links in its
+temp dir. It aborts unless the session is fresh (nothing loaded, not modified), or
+`MCP_SMOKE_FORCE=1` is set. The export checks need `melt-7` (see Export). Set `MCP_APPDATA` to the
+`--appdata` directory of the Shotcut under test: the script then writes a deliberately slow custom
+preset there and uses it for deterministic checks of "a second export is refused while one runs"
+and "a custom preset is applied". Without it those two checks race the fast render and can flake.
+Both scripts must pass: at the time of writing stage 1 prints 91 PASS lines and the edit script 211.
 
 Manual checks (they need a modified project, which the tools cannot create):
 
@@ -89,3 +205,21 @@ Manual checks (they need a modified project, which the tools cannot create):
   It must error, the project must stay modified, and its file under `<appdata>/autosave` must still
   exist and keep being updated.
 - Open a media file into a loaded timeline: no discard is needed and the modified flag is unchanged.
+
+Manual checks for stage 2 (GUI only; the headless script cannot cover them):
+
+- Play the exported file, and compare it visually with Shotcut's own export of the same project.
+- Lock a track in the GUI, then call each edit tool on it: all must refuse.
+- Open a project with proxies, then call `get_frame` and `export_video`.
+- The Jobs dock shows a sensible row for an MCP export.
+- Edit > Undo shows sensible names for the tool-made edits.
+- The GUI export dialog still works unchanged.
+- GPU mode: `get_frame` and `export_video` (not tested headless).
+- A timeline with several video tracks: index 0 is the topmost.
+- `get_frame` while playing, and with a reduced preview scale.
+
+## Known limits
+
+Not covered by the tools or not tested headless: locked tracks (refused, tested by hand only), GPU
+mode, proxies, generators and titles, filters other than fades, markers, subtitles, two-pass
+encoding and export ranges.
