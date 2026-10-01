@@ -122,9 +122,11 @@ start small.
 ## 6. Lifecycle
 
 - Constructed by `MainWindow`, parented to it; started when the setting is
-  enabled, stopped when it is disabled or the window closes.
+  enabled, stopped when it is disabled or when the MainWindow is destroyed
+  (the destructor stops it).
 - Bind failure (port in use): show a status message and turn the setting off.
-- Changing the port while running restarts the listener.
+- The port is read from the settings file when the server starts; changing it
+  requires toggling Enable off and on.
 
 ## 7. Verification
 

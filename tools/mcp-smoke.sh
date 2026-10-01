@@ -54,6 +54,7 @@ BASE="POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${PORT}\r\nAuthorization: Bearer ${T
 expect_eq "missing Content-Length -> 411" "HTTP/1.1 411 Length Required" "$(raw "${BASE}\r\n")"
 expect_eq "non-numeric Content-Length -> 400" "HTTP/1.1 400 Bad Request" "$(raw "${BASE}Content-Length: abc\r\n\r\n")"
 expect_eq "garbage request line -> 400" "HTTP/1.1 400 Bad Request" "$(raw 'NOT HTTP\r\n\r\n')"
+expect_eq "HTTP/1.0 -> 505" "HTTP/1.1 505 HTTP Version Not Supported" "$(raw 'POST /mcp HTTP/1.0\r\nHost: 127.0.0.1:'"${PORT}"'\r\n\r\n')"
 echo "(waiting ~12 s for the slow-request check)"
 expect_eq "stalled request -> 408" "HTTP/1.1 408 Request Timeout" "$(raw "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${PORT}\r\n")"
 # Hang up right after sending a full request, then make sure the server still answers.

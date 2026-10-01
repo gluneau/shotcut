@@ -40,6 +40,7 @@ struct Request
 {
     QByteArray method;
     QByteArray path;
+    QByteArray version;
     QHash<QByteArray, QByteArray> headers; // names lower-cased
 };
 
@@ -49,10 +50,11 @@ bool parseHead(const QByteArray &head, Request &out)
     if (lines.isEmpty())
         return false;
     const QList<QByteArray> parts = lines.first().trimmed().split(' ');
-    if (parts.size() != 3 || !parts.at(2).startsWith("HTTP/1."))
+    if (parts.size() != 3 || !parts.at(2).startsWith("HTTP/"))
         return false;
     out.method = parts.at(0);
     out.path = parts.at(1);
+    out.version = parts.at(2);
     for (int i = 1; i < lines.size(); ++i) {
         const QByteArray line = lines.at(i).trimmed();
         const int colon = line.indexOf(':');
@@ -88,6 +90,7 @@ QByteArray reasonPhrase(int status)
     case 413: return "Payload Too Large";
     case 415: return "Unsupported Media Type";
     case 431: return "Request Header Fields Too Large";
+    case 505: return "HTTP Version Not Supported";
     default: return "Error";
     }
 }
@@ -207,6 +210,11 @@ void McpServer::processRequest(QTcpSocket *socket)
     Request request;
     if (!parseHead(buffer.left(headEnd), request)) {
         replyError(socket, 400, "Malformed request");
+        return;
+    }
+
+    if (request.version != "HTTP/1.1") {
+        replyError(socket, 505, "Only HTTP/1.1 is supported");
         return;
     }
 

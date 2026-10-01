@@ -1126,7 +1126,9 @@ void MainWindow::setupMcpServer()
             showStatusMessage(tr("MCP server listening on 127.0.0.1:%1").arg(Settings.mcpServerPort()));
         } else {
             showStatusMessage(tr("MCP server failed to start: %1").arg(m_mcpServer->errorString()));
-            enable->setChecked(false); // re-enters this lambda with on == false
+            Settings.setMcpServerEnabled(false);
+            QSignalBlocker blocker(enable); // keep the failure message visible
+            enable->setChecked(false);
         }
     });
     connect(copyToken, &QAction::triggered, this, [this]() {

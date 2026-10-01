@@ -39,6 +39,7 @@ class McpServer : public QObject
 
 public:
     explicit McpServer(QObject *parent = nullptr);
+    ~McpServer() override { stop(); }
 
     bool start(quint16 port, const QString &token);
     void stop();
@@ -60,8 +61,8 @@ private:
     QByteArray handleJsonRpc(const QByteArray &body);
     QByteArray callTool(const QJsonValue &id, const QJsonObject &params);
 
-    QTcpServer m_server;
     QHash<QTcpSocket *, QByteArray> m_buffers;
+    QTcpServer m_server;
     QList<McpTool> m_tools;
     QString m_token;
     bool m_busy = false;
