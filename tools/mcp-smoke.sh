@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Smoke test for the Shotcut MCP server.
-# Usage: MCP_TOKEN=<token> [MCP_PORT=8765] tools/mcp-smoke.sh
+# Usage: MCP_TOKEN=<token> [MCP_PORT=7468] tools/mcp-smoke.sh
 # Needs: bash, curl, jq (and ffmpeg for the media checks). Shotcut must be running
 # with Settings > MCP Server > Enable checked. The slow-request check takes ~12 s.
 # WARNING: this opens and replaces whatever is loaded in the target Shotcut. Run it against a
@@ -8,7 +8,7 @@
 # unsaved changes, unless MCP_SMOKE_FORCE=1 is set.
 set -u
 
-PORT="${MCP_PORT:-8765}"
+PORT="${MCP_PORT:-7468}"
 TOKEN="${MCP_TOKEN:?set MCP_TOKEN to the token from Settings > MCP Server}"
 URL="http://127.0.0.1:${PORT}/mcp"
 AUTH=(-H "Authorization: Bearer ${TOKEN}")
@@ -202,11 +202,11 @@ if [ "$HAVE_CLIP" = 1 ]; then
 fi
 
 # MANUAL CHECKS (need a modified project in the GUI; a modified project cannot be made through the tools)
-#  1. Edit a loaded project (the title shows the modified marker), then call open_project with
+#  1. Edit a loaded project (the title shows the modified marker) and wait for the first autosave
+#     tick, since <appdata>/autosave only has the project's file after it, then call open_project with
 #     discard_changes true on a broken .mlt. It must return an error, the project must stay
 #     modified, and its autosave must keep working (the file under <appdata>/autosave still
 #     exists and is updated).
 #  2. Open a media file into a loaded timeline: no discard is needed and the modified flag is unchanged.
-
 
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

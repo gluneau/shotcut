@@ -1219,8 +1219,8 @@ void ShotcutSettings::setMcpServerEnabled(bool b)
 
 int ShotcutSettings::mcpServerPort() const
 {
-    const int port = settings.value("mcpServer/port", 8765).toInt();
-    return (port >= 1024 && port <= 65535) ? port : 8765;
+    const int port = settings.value("mcpServer/port", 7468).toInt();
+    return (port >= 1024 && port <= 65535) ? port : 7468;
 }
 
 void ShotcutSettings::setMcpServerPort(int port)

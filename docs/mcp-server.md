@@ -5,16 +5,16 @@ MCP client (for example Claude Code) can control it. It is off by default.
 
 ## Enable
 
-1. Settings > MCP Server > Enable. The server listens on `127.0.0.1:8765` only.
+1. Settings > MCP Server > Enable. The server listens on `127.0.0.1:7468` only.
 2. Settings > MCP Server > Copy Token to Clipboard.
 3. Connect a client, for example:
 
-       claude mcp add --transport http shotcut http://127.0.0.1:8765/mcp \
+       claude mcp add --transport http shotcut http://127.0.0.1:7468/mcp \
          --header "Authorization: Bearer <token>"
 
-The port is read from `mcpServer/port` (1024-65535, default 8765) in Shotcut's settings file when
+The port is read from `mcpServer/port` (1024-65535, default 7468) in Shotcut's settings file when
 the server starts, so toggle Enable off and on after changing it. An invalid value silently falls
-back to 8765. "Regenerate Token" invalidates
+back to 7468. "Regenerate Token" invalidates
 the old token immediately.
 
 The server speaks MCP over HTTP with a handshake: `initialize` is required first. Supported
@@ -76,7 +76,8 @@ headless for it: pre-seed `<scratch dir>/shotcut.ini` with a `[mcpServer]` secti
 
 Manual checks (they need a modified project, which the tools cannot create):
 
-- With an edited project loaded, call `open_project` with `discard_changes: true` on a broken `.mlt`.
+- With an edited project loaded, wait for the first autosave tick (the file under
+  `<appdata>/autosave` only exists after it), then call `open_project` with `discard_changes: true` on a broken `.mlt`.
   It must error, the project must stay modified, and its file under `<appdata>/autosave` must still
   exist and keep being updated.
 - Open a media file into a loaded timeline: no discard is needed and the modified flag is unchanged.

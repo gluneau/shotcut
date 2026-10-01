@@ -1126,7 +1126,7 @@ void MainWindow::setupMcpServer()
             showStatusMessage(tr("MCP server listening on 127.0.0.1:%1").arg(Settings.mcpServerPort()));
         } else {
             showStatusMessage(tr("MCP server failed to start: %1").arg(m_mcpServer->errorString()));
-            Settings.setMcpServerEnabled(false);
+            // Not persisted as disabled, so the next launch retries after a transient port clash.
             QSignalBlocker blocker(enable); // keep the failure message visible
             enable->setChecked(false);
         }
@@ -3855,16 +3855,15 @@ QSharedPointer<AutoSaveFile> MainWindow::discardModified()
 
 void MainWindow::restoreDiscardedModified(QSharedPointer<AutoSaveFile> autosave)
 {
-    setWindowModified(true);
-    QMutexLocker locker(&m_autosaveMutex);
-    // open() may have installed a handle for the target; if it manages the same recovery file as
-    // the old one, detach it so its destructor does not delete the file the old project needs.
-    if (m_autosaveFile && autosave && !m_autosaveFile->fileName().isEmpty()
-        && m_autosaveFile->fileName() == autosave->fileName()) {
-        m_autosaveFile->close();
-        m_autosaveFile->setFileName(QString());
+    {
+        QMutexLocker locker(&m_autosaveMutex);
+        // A non-null handle means open() already installed its own for the new project, which
+        // must keep it; the old handle then just goes out of scope like the GUI's "No" branch.
+        if (m_autosaveFile)
+            return;
+        m_autosaveFile = autosave;
     }
-    m_autosaveFile = autosave;
+    setWindowModified(true);
 }
 
 bool MainWindow::continueJobsRunning()

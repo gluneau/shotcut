@@ -44,7 +44,7 @@ alphabetical `foo.cpp foo.h` convention):
 
 Small hooks in existing files:
 
-- `src/settings.h/.cpp`: `mcpServerEnabled` (default false), `mcpServerPort` (default 8765), `mcpServerToken`.
+- `src/settings.h/.cpp`: `mcpServerEnabled` (default false), `mcpServerPort` (default 7468), `mcpServerToken`.
 - `src/mainwindow.ui/.cpp`: a checkable "MCP Server" item in the Settings menu, plus a way to view/copy/regenerate the token.
 - `src/CMakeLists.txt`: the new source files. `Qt6::Network` is already linked; no CMake dependency changes.
 
@@ -124,7 +124,8 @@ start small.
 - Constructed by `MainWindow`, parented to it; started when the setting is
   enabled, stopped when it is disabled or when the MainWindow is destroyed
   (the destructor stops it).
-- Bind failure (port in use): show a status message and turn the setting off.
+- Bind failure (port in use): show a status message and uncheck the menu entry. The saved Enable
+  setting is not changed, so the next launch retries.
 - The port is read from the settings file when the server starts; changing it
   requires toggling Enable off and on.
 
