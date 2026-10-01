@@ -30,6 +30,7 @@
 #include <QFile>
 #include <QLocale>
 #include <QMediaDevices>
+#include <QRandomGenerator>
 #include <QStandardPaths>
 #include <qdesktopservices.h>
 
@@ -1204,6 +1205,45 @@ void ShotcutSettings::setTimelineScrollZoom(bool b)
 {
     settings.setValue("timeline/scrollZoom", b);
     emit timelineScrollZoomChanged();
+}
+
+bool ShotcutSettings::mcpServerEnabled() const
+{
+    return settings.value("mcpServer/enabled", false).toBool();
+}
+
+void ShotcutSettings::setMcpServerEnabled(bool b)
+{
+    settings.setValue("mcpServer/enabled", b);
+}
+
+int ShotcutSettings::mcpServerPort() const
+{
+    const int port = settings.value("mcpServer/port", 8765).toInt();
+    return (port >= 1024 && port <= 65535) ? port : 8765;
+}
+
+void ShotcutSettings::setMcpServerPort(int port)
+{
+    settings.setValue("mcpServer/port", port);
+}
+
+QString ShotcutSettings::mcpServerToken()
+{
+    QString token = settings.value("mcpServer/token").toString();
+    if (token.isEmpty()) {
+        regenerateMcpServerToken();
+        token = settings.value("mcpServer/token").toString();
+    }
+    return token;
+}
+
+void ShotcutSettings::regenerateMcpServerToken()
+{
+    quint32 words[8];
+    QRandomGenerator::system()->fillRange(words);
+    const QByteArray bytes(reinterpret_cast<const char *>(words), sizeof words);
+    settings.setValue("mcpServer/token", QString::fromLatin1(bytes.toHex()));
 }
 
 /*!

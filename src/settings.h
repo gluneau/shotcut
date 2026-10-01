@@ -250,6 +250,12 @@ public:
     void setTimelineTrackHeight(int);
     bool timelineScrollZoom() const;
     void setTimelineScrollZoom(bool);
+    bool mcpServerEnabled() const;
+    void setMcpServerEnabled(bool);
+    int mcpServerPort() const;
+    void setMcpServerPort(int);
+    QString mcpServerToken();
+    void regenerateMcpServerToken();
     bool timelineFramebufferWaveform() const;
     void setTimelineFramebufferWaveform(bool);
     int audioReferenceTrack() const;
