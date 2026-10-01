@@ -131,6 +131,8 @@ wait_state() {
 if [ "$HAVE_CLIP" = 1 ]; then
   tool_is_error open_project "{\"path\":\"$TMP/clip.mp4\",\"discard_changes\":true}" >/dev/null
   sleep 1.5
+  tool_is_error play '{}' >/dev/null
+  expect_eq "play before pause: playing" true "$(wait_state .playing true)"
   expect_eq "pause: ok" false "$(tool_is_error pause '{}')"
   expect_eq "pause: not playing" false "$(wait_state .playing false)"
 
@@ -147,10 +149,13 @@ if [ "$HAVE_CLIP" = 1 ]; then
   expect_eq "play: string speed is an error" true "$(tool_is_error play '{"speed":"fast"}')"
 
   tool_is_error seek '{"position":0}' >/dev/null
+  wait_state .position 0 >/dev/null
   expect_eq "play: ok" false "$(tool_is_error play '{}')"
   expect_eq "play: playing" true "$(wait_state .playing true)"
   tool_is_error pause '{"position":10}' >/dev/null
   expect_eq "pause with position: stopped at 10" 10 "$(wait_state .position 10)"
+  expect_eq "pause with position while paused: ok" false "$(tool_is_error pause '{"position":30}')"
+  expect_eq "pause with position while paused: moved to 30" 30 "$(wait_state .position 30)"
 else
   echo "SKIP  transport checks (no clip loaded)"
 fi

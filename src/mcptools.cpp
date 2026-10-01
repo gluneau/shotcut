@@ -176,14 +176,22 @@ FrameArg readFrame(const QJsonObject &arguments, const char *key, int &value)
     return FrameArg::Ok;
 }
 
+// The multitrack when a timeline is open, otherwise null.
+Mlt::Producer *timeline()
+{
+    return MAIN.isMultitrackValid() ? MAIN.multitrack() : nullptr;
+}
+
+// seekTimeline() switches the player to the multitrack, so clamp against its length then.
 int lastFrame()
 {
-    return qMax(0, MLT.producer()->get_playtime() - 1);
+    Mlt::Producer *producer = timeline() ? timeline() : MLT.producer();
+    return producer ? qMax(0, producer->get_playtime() - 1) : 0;
 }
 
 void movePlayhead(int position)
 {
-    if (MAIN.isMultitrackValid())
+    if (timeline())
         MAIN.seekTimeline(position);
     else
         MLT.seek(position);
@@ -285,7 +293,10 @@ QList<McpTool> McpTools::all()
            }})"),
          pauseTool},
         {"seek",
-         "Move the playhead to a frame number (clamped to the last frame).",
+         "Move the playhead to a frame number and return the frame it moved to, clamped to the "
+         "last frame; use get_state to see where the player is. Whether playback continues after "
+         "the seek follows Shotcut's 'pause after seek' player setting; call pause first for a "
+         "guaranteed stop.",
          schema(R"({"type":"object","properties":{
              "position":{"type":"integer","minimum":0,"description":"Frame number."}
            },"required":["position"]})"),
