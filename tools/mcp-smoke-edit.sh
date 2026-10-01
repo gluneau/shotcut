@@ -346,5 +346,50 @@ expect_eq "get_frame stress: four positions give four different images" 4 "$DIST
 frame_to_file "{\"position\":90}" "$TMP/same1.jpg"; frame_to_file "{\"position\":90}" "$TMP/same2.jpg"
 expect_eq "get_frame: the same position twice in a row is identical" true "$([ "$(md5sum < "$TMP/same1.jpg")" = "$(md5sum < "$TMP/same2.jpg")" ] && echo true || echo false)"
 
+echo "== export"
+OUT="$TMP/out.mp4"
+TLDUR="$(tool_json get_timeline '{}' | jq '.duration')"
+
+expect_eq "export: relative path is an error" true "$(tool_is_error export_video '{"path":"out.mp4"}')"
+expect_eq "export: wrong extension is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/out.mkv\"}")"
+expect_eq "export: unknown preset is an error" true "$(tool_is_error export_video "{\"path\":\"$OUT\",\"preset\":\"no-such-preset\"}")"
+expect_eq "export: unwritable folder is an error" true "$(tool_is_error export_video '{"path":"/proc/out.mp4"}')"
+expect_eq "export: missing folder is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/nodir/out.mp4\"}")"
+echo existing > "$TMP/exists.mp4"
+expect_eq "export: existing file without overwrite is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/exists.mp4\"}")"
+expect_eq "export: bad overwrite type is an error" true "$(tool_is_error export_video "{\"path\":\"$OUT\",\"overwrite\":\"yes\"}")"
+expect_eq "export: nothing started yet" idle "$(tool_json get_export_status '{}' | jq -r '.state')"
+expect_eq "export: unknown job_id is an error" true "$(tool_is_error get_export_status '{"job_id":999}')"
+
+for BADPRESET in '/etc/passwd' '../x' '..\x' '.hidden' 'a/../../etc/passwd'; do
+  ARGS="$(jq -nc --arg p "$OUT" --arg preset "$BADPRESET" '{path: $p, preset: $preset}')"
+  expect_eq "export: preset '$BADPRESET' is refused" true "$(tool_is_error export_video "$ARGS")"
+done
+expect_eq "export: refused presets started no job" idle "$(tool_json get_export_status '{}' | jq -r '.state')"
+
+START="$(tool_json export_video "{\"path\":\"$OUT\"}")"
+JOB="$(echo "$START" | jq '.job_id')"
+expect_eq "export: returns a job id and the output path" "$OUT" "$(echo "$START" | jq -r '.output')"
+expect_eq "export: a second export while one runs is an error" true "$(tool_is_error export_video "{\"path\":\"$TMP/second.mp4\"}")"
+expect_eq "export: a repeat with overwrite while running is an error (no dialog)" true "$(tool_is_error export_video "{\"path\":\"$OUT\",\"overwrite\":true}")"
+STATE=""
+for _ in $(seq 1 300); do
+  STATE="$(tool_json get_export_status "{\"job_id\":$JOB}" | jq -r '.state')"
+  case "$STATE" in succeeded|failed|stopped) break ;; esac
+  sleep 1
+done
+expect_eq "export: finished successfully" succeeded "$STATE"
+S="$(tool_json get_export_status "{\"job_id\":$JOB}")"
+expect_eq "export: percent is 100" 100 "$(echo "$S" | jq '.percent')"
+expect_eq "export: output exists" true "$(echo "$S" | jq '.output_exists')"
+expect_eq "export: output is not empty" true "$(echo "$S" | jq '.output_bytes > 0')"
+expect_eq "export: exit code 0" 0 "$(echo "$S" | jq '.exit_code')"
+expect_eq "export: latest job is the default" "$JOB" "$(tool_json get_export_status '{}' | jq '.job_id')"
+expect_eq "ffprobe: video codec h264" h264 "$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$OUT")"
+expect_eq "ffprobe: audio codec aac" aac "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$OUT")"
+DUR="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$OUT")"
+expect_eq "ffprobe: duration matches the timeline (+-0.5 s)" true "$(awk -v d="$DUR" -v f="$TLDUR" 'BEGIN { e = f / 25.0; print (d > e - 0.5 && d < e + 0.5) ? "true" : "false" }')"
+expect_eq "export: existing output without overwrite is now refused" true "$(tool_is_error export_video "{\"path\":\"$OUT\"}")"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

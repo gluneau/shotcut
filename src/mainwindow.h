@@ -43,6 +43,7 @@ class JobsDock;
 class PlaylistDock;
 class QUndoStack;
 class McpServer;
+class AbstractJob;
 class QActionGroup;
 class FilterController;
 class ScopeController;
@@ -81,6 +82,7 @@ public:
     FilterController *filterController() const { return m_filterController; }
     Mlt::Playlist *playlist() const;
     bool isPlaylistValid() const;
+    AbstractJob *exportToFile(const QString &presetName, const QString &path, QString &error);
     Mlt::Producer *multitrack() const;
     bool isMultitrackValid() const;
     void doAutosave();

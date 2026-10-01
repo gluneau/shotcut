@@ -56,6 +56,9 @@ public:
 
     void loadPresetFromProperties(Mlt::Properties &);
     bool isExportInProgress() const;
+    // Renders the current project to `path` with a stock or custom preset without any dialog.
+    // Returns the queued job, or nullptr with `error` set.
+    AbstractJob *exportToFile(const QString &presetName, const QString &path, QString &error);
 
 signals:
     void captureStateChanged(bool);
@@ -192,7 +195,8 @@ private:
                            const QString &target,
                            int realtime,
                            int pass = 0,
-                           const QThread::Priority priority = Settings.jobPriority());
+                           const QThread::Priority priority = Settings.jobPriority(),
+                           QString *error = nullptr);
     void runMelt(const QString &target, int realtime = -1);
     void enqueueAnalysis();
     void enqueueMelt(const QStringList &targets, int realtime);

@@ -4408,6 +4408,13 @@ bool MainWindow::isPlaylistValid() const
     return m_playlistDock->model()->playlist() && m_playlistDock->model()->rowCount() > 0;
 }
 
+AbstractJob *MainWindow::exportToFile(const QString &presetName,
+                                      const QString &path,
+                                      QString &error)
+{
+    return m_encodeDock->exportToFile(presetName, path, error);
+}
+
 Mlt::Producer *MainWindow::multitrack() const
 {
     return m_timelineDock->model()->tractor();

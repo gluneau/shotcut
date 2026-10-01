@@ -1528,13 +1528,31 @@ MeltJob *EncodeDock::createMeltJob(Mlt::Producer *service,
                                    const QString &target,
                                    int realtime,
                                    int pass,
-                                   const QThread::Priority priority)
+                                   const QThread::Priority priority,
+                                   QString *error)
 {
     QString caption = tr("Export Video/Audio");
-    if (Util::warnIfNotWritable(target, this, caption))
+    if (error) {
+        // Quiet mode (no dialogs): same writability test as Util::warnIfNotWritable().
+        if (!target.isEmpty() && !target.contains("://")) {
+            QFileInfo info(target);
+            if (!info.isDir())
+                info = QFileInfo(info.dir().path());
+            if (!info.isWritable()) {
+                *error = tr("Unable to write file %1. Perhaps you do not have permission.")
+                             .arg(QFileInfo(target).fileName());
+                return nullptr;
+            }
+        }
+    } else if (Util::warnIfNotWritable(target, this, caption)) {
         return nullptr;
+    }
 
     if (JOBS.targetIsInProgress(target)) {
+        if (error) {
+            *error = tr("A job already exists for %1").arg(target);
+            return nullptr;
+        }
         QMessageBox::warning(this,
                              windowTitle(),
                              QObject::tr("A job already exists for %1").arg(target));
@@ -1602,6 +1620,10 @@ MeltJob *EncodeDock::createMeltJob(Mlt::Producer *service,
     // Check if the target file is a member of the project.
     QString xml = dom.toString(0);
     if (xml.contains(QDir::fromNativeSeparators(target))) {
+        if (error) {
+            *error = tr("You cannot write to a file that is in your project.");
+            return nullptr;
+        }
         QMessageBox::warning(this,
                              caption,
                              tr("You cannot write to a file that is in your project.\n"
@@ -1648,6 +1670,85 @@ MeltJob *EncodeDock::createMeltJob(Mlt::Producer *service,
         }
     }
     return job;
+}
+
+AbstractJob *EncodeDock::exportToFile(const QString &presetName,
+                                      const QString &path,
+                                      QString &error)
+{
+    if (!MLT.producer() || !MLT.producer()->is_valid()) {
+        error = tr("Nothing is loaded.");
+        return nullptr;
+    }
+    if (isExportInProgress()) {
+        error = tr("An export is already in progress.");
+        return nullptr;
+    }
+
+    // Stock presets come from the MLT repository, custom ones from the app data folder.
+    Mlt::Properties *preset = nullptr;
+    const QByteArray stockKey = ("consumer/avformat/" + presetName).toLatin1();
+    if (m_presets->get_data(stockKey.constData())) {
+        preset = new Mlt::Properties((mlt_properties) m_presets->get_data(stockKey.constData()));
+    } else {
+        // A custom preset is a plain file name inside <appdata>/presets/encode, never a path.
+        QDir dir(Settings.appDataLocation());
+        if (!presetName.contains('/') && !presetName.contains('\\') && !presetName.startsWith('.')
+            && QFileInfo(presetName).fileName() == presetName && dir.cd("presets")
+            && dir.cd("encode")) {
+            const QString file = QFileInfo(dir.absoluteFilePath(presetName)).canonicalFilePath();
+            if (!file.isEmpty() && file.startsWith(dir.canonicalPath() + "/")) {
+                preset = new Mlt::Properties();
+                preset->load(file.toLatin1().constData());
+            }
+        }
+    }
+    if (!preset || !preset->is_valid()) {
+        delete preset;
+        error = tr("Unknown preset: %1").arg(presetName);
+        return nullptr;
+    }
+    const QString extension = QString::fromLatin1(preset->get("meta.preset.extension"));
+    if (!extension.isEmpty() && !path.endsWith("." + extension, Qt::CaseInsensitive)) {
+        delete preset;
+        error = tr("The preset %1 produces .%2 files; the path must end in .%2.")
+                    .arg(presetName, extension);
+        return nullptr;
+    }
+
+    resetOptions();
+    loadPresetFromProperties(*preset);
+    delete preset;
+
+    // Same source choice as a person would make: the timeline, else the playlist, else the clip.
+    const QString wanted = MAIN.isMultitrackValid() ? "timeline"
+                           : MAIN.isPlaylistValid() ? "playlist"
+                                                    : "clip";
+    const int index = ui->fromCombo->findData(wanted);
+    if (index < 0) {
+        error = tr("Cannot export from the %1 right now.").arg(wanted);
+        return nullptr;
+    }
+    ui->fromCombo->setCurrentIndex(index);
+    Mlt::Producer *service = fromProducer(true);
+    if (!service || !service->is_valid()) {
+        error = tr("There is nothing to export.");
+        return nullptr;
+    }
+
+    const int threads = qBound(1, QThread::idealThreadCount() - 1, 4);
+    MeltJob *job = createMeltJob(service,
+                                 path,
+                                 Settings.playerGPU() ? -1 : -threads,
+                                 0,
+                                 Settings.jobPriority(),
+                                 &error);
+    if (!job) {
+        if (error.isEmpty())
+            error = tr("Shotcut could not prepare the export.");
+        return nullptr;
+    }
+    return JOBS.add(job);
 }
 
 void EncodeDock::runMelt(const QString &target, int realtime)
