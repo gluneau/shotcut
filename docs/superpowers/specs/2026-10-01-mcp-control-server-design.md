@@ -19,7 +19,7 @@ Scope is staged:
 2. Each stage 1 tool behaves as specified in section 5 against a running Shotcut.
 3. Requests without a valid token, with an `Origin` header, or with a foreign `Host` header are rejected and never reach a tool.
 4. The server is off by default and adds no new Qt dependencies.
-5. No modal dialog can be opened, and so block the event loop, by any stage 1 tool.
+5. No stage 1 tool opens a dialog in the common cases. `open_project` pre-checks the two common causes (modified project, stale auto-save) and fails instead. Residual: `MainWindow::open()` can still show project-repair, processing-mode or incompatible-version dialogs for unusual project files. Those block the request until the user answers; the server reports "busy" meanwhile. This cannot be removed without refactoring `open()`, which is out of scope.
 
 ### Non-goals (stage 1)
 
@@ -71,7 +71,7 @@ Threat model: other local processes, and web pages in the user's browser
   (403 otherwise).
 - **Off by default.** Enabling is an explicit user action.
 - **Path rules.** `open_project` and `save_project` accept absolute paths only.
-- **Dialog safety.** No stage 1 tool may open a modal dialog (section 5).
+- **Dialog safety.** Stage 1 tools avoid modal dialogs where the code allows it (success criterion 5, section 5).
 
 ## 4. HTTP and MCP surface
 
@@ -110,8 +110,8 @@ All handlers run on the GUI thread and must not block on a dialog.
 | `play` | `speed?` (number, default 1.0) | `MLT.play(speed)`. Error if nothing is loaded. |
 | `pause` | `position?` (int frame) | `MLT.pause(position)`. |
 | `seek` | `position` (int frame, required) | Clamped to valid range; uses the timeline-aware seek when a timeline project is open. |
-| `open_project` | `path` (absolute), `discard_changes?` (bool, default false) | Fails with a clear message if the project is modified and `discard_changes` is not true, so the unsaved-changes prompt never appears. Fails if the file does not exist. |
-| `save_project` | `path?` (absolute) | Saves to the current file. If the project is untitled and no `path` is given, fails rather than opening Save As. |
+| `open_project` | `path` (absolute), `discard_changes?` (bool, default false) | Fails with a clear message if the file does not exist, if the project is modified and `discard_changes` is not true, or if a stale auto-save file exists for `path`. With `discard_changes: true` the modified flag is cleared before opening so the unsaved-changes prompt does not appear. |
+| `save_project` | `path?` (absolute) | Without `path`: saves to the current file via `MAIN.on_actionSave_triggered()`; fails if the project is untitled or the target is not writable (checked first, so the "unable to write" dialog never appears). With `path`: `path` must be absolute and end in `.mlt` (so a client cannot overwrite arbitrary files); writes a copy with `MAIN.saveXML(path)`; the current file name and modified flag are unchanged. |
 | `list_actions` | none | Returns the allowed `Actions` keys with display name, enabled and checked state. |
 | `trigger_action` | `key`, `checked?` (bool, for checkable actions) | Only keys on a fixed allowlist in `mcptools.cpp`. Unknown or non-allowlisted keys return an error. |
 
@@ -143,10 +143,22 @@ Build notes for this machine: MLT 7.36.1 is installed at `~/mlt-install`
 with `PKG_CONFIG_PATH=$HOME/mlt-install/lib/pkgconfig cmake --preset cc-debug-linux`.
 ClangFormat 14 is not installed, so formatting is matched by hand.
 
-## 8. Open questions (resolve in the implementation plan)
+## 8. Resolved decisions
 
-1. `save_project` to a new `path`: whether to use `MAIN.saveXML()` (does not
-   change the current file) or set the current file name. Needs a read of the
-   save path in `mainwindow.cpp` before deciding.
-2. The initial `trigger_action` allowlist contents.
-3. The supported MCP protocol versions list.
+1. `save_project` with a `path` writes a copy via `MAIN.saveXML(path)` and does
+   not change the current file or modified flag (section 5).
+2. Initial `trigger_action` allowlist, all player navigation actions whose
+   slots open no dialog: `playerPlayPauseAction`, `playerPauseAction`,
+   `playerRewindAction`, `playerFastForwardAction`, `playerSeekStartAction`,
+   `playerSeekEndAction`, `playerNextFrameAction`, `playerPreviousFrameAction`,
+   `playerForwardOneSecondAction`, `playerBackwardOneSecondAction`,
+   `playerForwardFiveSecondsAction`, `playerBackwardFiveSecondsAction`,
+   `playerForwardTenSecondsAction`, `playerBackwardTenSecondsAction`,
+   `playerSkipNextAction`, `playerSkipPreviousAction`, `playerLoopAction`.
+   Excluded: `playerSetJumpAction` and `playerSetPositionAction` (may open
+   input dialogs) and `playerSetInAction`/`playerSetOutAction` (edits).
+3. Supported MCP protocol versions: `2025-06-18`, `2025-03-26`, `2024-11-05`,
+   plus any newer version found when the plan's verification step checks the
+   current MCP specification.
+4. The port is configurable through the settings file only (no UI field).
+   The Settings menu offers: enable toggle, copy token, regenerate token.
