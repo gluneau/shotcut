@@ -3842,11 +3842,29 @@ bool MainWindow::continueModified()
     return true;
 }
 
-void MainWindow::discardModified()
+QSharedPointer<AutoSaveFile> MainWindow::discardModified()
 {
     setWindowModified(false);
+    // Hand the handle back instead of resetting it so the recovery file survives until the caller
+    // knows the new project really opened.
     QMutexLocker locker(&m_autosaveMutex);
-    m_autosaveFile.reset();
+    QSharedPointer<AutoSaveFile> old;
+    old.swap(m_autosaveFile);
+    return old;
+}
+
+void MainWindow::restoreDiscardedModified(QSharedPointer<AutoSaveFile> autosave)
+{
+    setWindowModified(true);
+    QMutexLocker locker(&m_autosaveMutex);
+    // open() may have installed a handle for the target; if it manages the same recovery file as
+    // the old one, detach it so its destructor does not delete the file the old project needs.
+    if (m_autosaveFile && autosave && !m_autosaveFile->fileName().isEmpty()
+        && m_autosaveFile->fileName() == autosave->fileName()) {
+        m_autosaveFile->close();
+        m_autosaveFile->setFileName(QString());
+    }
+    m_autosaveFile = autosave;
 }
 
 bool MainWindow::continueJobsRunning()

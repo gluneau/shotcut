@@ -73,3 +73,10 @@ Shotcut can be run
 headless for it: pre-seed `<scratch dir>/shotcut.ini` with a `[mcpServer]` section containing
 `enabled=true` and a `token=` value, then start
 `xvfb-run -a build/cc-debug-linux/src/shotcut --appdata <scratch dir>`.
+
+Manual checks (they need a modified project, which the tools cannot create):
+
+- With an edited project loaded, call `open_project` with `discard_changes: true` on a broken `.mlt`.
+  It must error, the project must stay modified, and its file under `<appdata>/autosave` must still
+  exist and keep being updated.
+- Open a media file into a loaded timeline: no discard is needed and the modified flag is unchanged.

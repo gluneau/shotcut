@@ -1,6 +1,4 @@
 /*
- * Copyright (c) 2026 Meltytech, LLC
- *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
@@ -109,13 +107,15 @@ QJsonObject openProject(const QJsonObject &arguments)
     // project is loaded. Otherwise the project stays open and its changes must not be touched.
     const bool wouldPrompt = isProjectFile || (!MAIN.playlist() && !MAIN.multitrack());
     const bool hadChanges = wouldPrompt && MAIN.isWindowModified();
+    QSharedPointer<AutoSaveFile> oldAutosave;
     if (hadChanges) {
         if (!discard.toBool(false)) {
             return McpTools::textResult("The current project has unsaved changes. Save it first "
                                         "or pass discard_changes: true.",
                                         true);
         }
-        MAIN.discardModified(); // so open() does not ask what to do with the changes
+        // so open() does not ask; keep the handle so a failed open can put it back
+        oldAutosave = MAIN.discardModified();
     }
 
     // open() reports some failures only through the status bar, so clients should call
@@ -123,7 +123,7 @@ QJsonObject openProject(const QJsonObject &arguments)
     if (!MAIN.open(path, nullptr, false) || !isCurrentFile(path, isProjectFile)) {
         // open() can return without opening anything; the old project is then still loaded.
         if (hadChanges)
-            MAIN.setWindowModified(true);
+            MAIN.restoreDiscardedModified(oldAutosave);
         return McpTools::textResult("Shotcut did not open " + path
                                         + "; see the status bar or call get_state.",
                                     true);

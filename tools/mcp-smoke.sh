@@ -132,6 +132,9 @@ if [ "$HAVE_CLIP" = 1 ]; then
   printf '<mlt' > "$TMP/broken.mlt"
   expect_eq "open_project: invalid .mlt is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP/broken.mlt\"}")"
   expect_eq "open_project: invalid .mlt leaves state unchanged" "$BEFORE" "$(tool_json get_state '{}' | jq -c '[.project,.loaded]')"
+  BEFORE="$(tool_json get_state '{}' | jq -c '[.project,.loaded,.modified]')"
+  expect_eq "open_project: invalid .mlt with discard_changes is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP/broken.mlt\",\"discard_changes\":true}")"
+  expect_eq "open_project: invalid .mlt with discard_changes leaves state unchanged" "$BEFORE" "$(tool_json get_state '{}' | jq -c '[.project,.loaded,.modified]')"
   REALCOPY="$(realpath "$TMP/copy.mlt")"
   expect_eq "open_project: opens a saved .mlt project" false "$(tool_is_error open_project "{\"path\":\"$TMP/copy.mlt\"}")"
   expect_eq "get_state: project is the opened .mlt" "$REALCOPY" "$(wait_state .project "$REALCOPY")"
@@ -198,6 +201,12 @@ if [ "$HAVE_CLIP" = 1 ]; then
   expect_eq "trigger_action: moved one frame" 21 "$(wait_state .position 21)"
 fi
 
-# --- tool checks are added below by later tasks ---
+# MANUAL CHECKS (need a modified project in the GUI; a modified project cannot be made through the tools)
+#  1. Edit a loaded project (the title shows the modified marker), then call open_project with
+#     discard_changes true on a broken .mlt. It must return an error, the project must stay
+#     modified, and its autosave must keep working (the file under <appdata>/autosave still
+#     exists and is updated).
+#  2. Open a media file into a loaded timeline: no discard is needed and the modified flag is unchanged.
+
 
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

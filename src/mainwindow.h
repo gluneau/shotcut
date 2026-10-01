@@ -70,7 +70,8 @@ public:
     ~MainWindow();
     void open(Mlt::Producer *producer, bool play = true);
     bool continueModified();
-    void discardModified();
+    QSharedPointer<AutoSaveFile> discardModified();
+    void restoreDiscardedModified(QSharedPointer<AutoSaveFile> autosave);
     bool continueJobsRunning();
     QUndoStack *undoStack() const;
     bool saveXML(const QString &filename, bool withRelativePaths = true);
