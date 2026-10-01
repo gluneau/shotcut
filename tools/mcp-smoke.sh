@@ -91,7 +91,10 @@ expect_eq "open_project: relative path is an error" true "$(tool_is_error open_p
 expect_eq "open_project: missing file is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP/missing.mp4\"}")"
 expect_eq "open_project: directory is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP\"}")"
 expect_eq "open_project: no path is an error" true "$(tool_is_error open_project '{}')"
-expect_eq "open_project: non-boolean discard_changes is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP\",\"discard_changes\":\"yes\"}")"
+touch "$TMP/x.mp4"
+expect_eq "open_project: resource path is an error" true "$(tool_is_error open_project '{"path":":/x.mlt"}')"
+expect_eq "save_project: resource path is an error" true "$(tool_is_error save_project '{"path":":/x.mlt"}')"
+expect_eq "open_project: non-boolean discard_changes is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP/x.mp4\",\"discard_changes\":\"yes\"}")"
 
 expect_eq "save_project: relative path is an error" true "$(tool_is_error save_project '{"path":"copy.mlt"}')"
 expect_eq "save_project: non-.mlt path is an error" true "$(tool_is_error save_project "{\"path\":\"$TMP/copy.txt\"}")"
@@ -106,6 +109,10 @@ if [ "$HAVE_CLIP" = 1 ]; then
   expect_eq "get_state: duration is 100 frames" 100 "$(tool_json get_state '{}' | jq -r '.duration')"
   expect_eq "save_project: writes a copy" false "$(tool_is_error save_project "{\"path\":\"$TMP/copy.mlt\"}")"
   expect_eq "save_project: the copy is a non-empty file" true "$([ -s "$TMP/copy.mlt" ] && echo true || echo false)"
+  BEFORE="$(tool_json get_state '{}' | jq -c '[.project,.loaded]')"
+  printf '<mlt' > "$TMP/broken.mlt"
+  expect_eq "open_project: invalid .mlt is an error" true "$(tool_is_error open_project "{\"path\":\"$TMP/broken.mlt\"}")"
+  expect_eq "open_project: invalid .mlt leaves state unchanged" "$BEFORE" "$(tool_json get_state '{}' | jq -c '[.project,.loaded]')"
 else
   echo "SKIP  media checks (ffmpeg not available)"
 fi

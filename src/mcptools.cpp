@@ -21,6 +21,7 @@
 #include "mainwindow.h"
 #include "mltcontroller.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -31,6 +32,20 @@ namespace {
 QJsonObject schema(const char *json)
 {
     return QJsonDocument::fromJson(json).object();
+}
+
+bool isResourcePath(const QString &path)
+{
+    return path.startsWith(':');
+}
+
+// True if the requested file is what Shotcut now has open: the project file for .mlt/.xml,
+// otherwise the producer's resource.
+bool isCurrentFile(const QString &path, const QString &suffix)
+{
+    const QString wanted = QFileInfo(path).canonicalFilePath();
+    const QString current = (suffix == "mlt" || suffix == "xml") ? MAIN.fileName() : MLT.resource();
+    return !wanted.isEmpty() && QFileInfo(current).canonicalFilePath() == wanted;
 }
 
 bool isLoaded()
@@ -66,7 +81,7 @@ QJsonObject getState(const QJsonObject &)
 QJsonObject openProject(const QJsonObject &arguments)
 {
     const QString path = arguments.value("path").toString();
-    if (path.isEmpty() || !QDir::isAbsolutePath(path))
+    if (path.isEmpty() || isResourcePath(path) || !QDir::isAbsolutePath(path))
         return McpTools::textResult("path must be an absolute file path.", true);
     const QFileInfo info(path);
     if (!info.exists() || !info.isFile())
@@ -82,7 +97,8 @@ QJsonObject openProject(const QJsonObject &arguments)
                                     "once in the Shotcut window to choose whether to recover it.",
                                     true);
     }
-    if (MAIN.isWindowModified()) {
+    const bool hadChanges = MAIN.isWindowModified();
+    if (hadChanges) {
         if (!discard.toBool(false)) {
             return McpTools::textResult("The current project has unsaved changes. Save it first "
                                         "or pass discard_changes: true.",
@@ -93,8 +109,14 @@ QJsonObject openProject(const QJsonObject &arguments)
 
     // open() reports some failures only through the status bar, so clients should call
     // get_state afterwards to confirm what is loaded.
-    if (!MAIN.open(path, nullptr, false))
-        return McpTools::textResult("Shotcut could not open " + path, true);
+    if (!MAIN.open(path, nullptr, false) || !isCurrentFile(path, suffix)) {
+        // open() can return without opening anything; the old project is then still loaded.
+        if (hadChanges)
+            MAIN.setWindowModified(true);
+        return McpTools::textResult("Shotcut did not open " + path
+                                        + "; see the status bar or call get_state.",
+                                    true);
+    }
     return McpTools::jsonResult(QJsonObject{{"requested", path}, {"project", MAIN.fileName()}});
 }
 
@@ -110,13 +132,18 @@ QJsonObject saveProject(const QJsonObject &arguments)
         }
         if (!isWritableTarget(current))
             return McpTools::textResult("Cannot write to " + current, true);
-        if (!MAIN.on_actionSave_triggered())
-            return McpTools::textResult("Saving failed.", true);
+        // on_actionSave_triggered() returns true even when the write fails (it shows its own
+        // error dialog), so check the file on disk. Timestamps may be coarse; allow 2 s.
+        const QDateTime started = QDateTime::currentDateTime().addSecs(-2);
+        MAIN.on_actionSave_triggered();
+        const QFileInfo saved(current);
+        if (!saved.exists() || saved.size() <= 0 || saved.lastModified() < started)
+            return McpTools::textResult("Saving failed: " + current + " was not updated.", true);
         return McpTools::jsonResult(QJsonObject{{"saved", current}});
     }
 
     const QString path = pathValue.toString();
-    if (path.isEmpty() || !QDir::isAbsolutePath(path)
+    if (path.isEmpty() || isResourcePath(path) || !QDir::isAbsolutePath(path)
         || !path.endsWith(".mlt", Qt::CaseInsensitive)) {
         return McpTools::textResult("path must be an absolute path ending in .mlt.", true);
     }
@@ -159,7 +186,8 @@ QList<McpTool> McpTools::all()
            },"required":["path"]})"),
          openProject},
         {"save_project",
-         "Save the project. Without path: saves to the current file. With path (absolute, ending "
+         "Save the project. Without path: saves to the current file (if the write itself fails, "
+         "Shotcut may show its own save-error dialog). With path (absolute, ending "
          "in .mlt): writes a copy and leaves the current file unchanged.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute .mlt path for a copy."}
