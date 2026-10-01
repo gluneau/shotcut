@@ -138,7 +138,6 @@ if [ "$HAVE_CLIP" = 1 ]; then
 
   expect_eq "seek 50: ok" false "$(tool_is_error seek '{"position":50}')"
   expect_eq "seek 50: position is 50" 50 "$(wait_state .position 50)"
-  expect_eq "seek past the end is clamped to the last frame" 99 "$(tool_json seek '{"position":99999}' | jq -r '.position')"
 
   expect_eq "seek: missing position is an error" true "$(tool_is_error seek '{}')"
   expect_eq "seek: string position is an error" true "$(tool_is_error seek '{"position":"abc"}')"
@@ -156,6 +155,7 @@ if [ "$HAVE_CLIP" = 1 ]; then
   expect_eq "pause with position: stopped at 10" 10 "$(wait_state .position 10)"
   expect_eq "pause with position while paused: ok" false "$(tool_is_error pause '{"position":30}')"
   expect_eq "pause with position while paused: moved to 30" 30 "$(wait_state .position 30)"
+  expect_eq "seek past the end is clamped to the last frame" 99 "$(tool_json seek '{"position":99999}' | jq -r '.position')"
 else
   echo "SKIP  transport checks (no clip loaded)"
 fi
