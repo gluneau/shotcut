@@ -117,6 +117,44 @@ else
   echo "SKIP  media checks (ffmpeg not available)"
 fi
 
+echo "== transport tools"
+# Polls get_state (up to ~5 s) until the jq field equals the expected value; prints the last value.
+wait_state() {
+  local field="$1" want="$2" got="" i
+  for i in $(seq 1 25); do
+    got="$(tool_json get_state '{}' | jq -r "$field")"
+    [ "$got" = "$want" ] && break
+    sleep 0.2
+  done
+  echo "$got"
+}
+if [ "$HAVE_CLIP" = 1 ]; then
+  tool_is_error open_project "{\"path\":\"$TMP/clip.mp4\",\"discard_changes\":true}" >/dev/null
+  sleep 1.5
+  expect_eq "pause: ok" false "$(tool_is_error pause '{}')"
+  expect_eq "pause: not playing" false "$(wait_state .playing false)"
+
+  expect_eq "seek 50: ok" false "$(tool_is_error seek '{"position":50}')"
+  expect_eq "seek 50: position is 50" 50 "$(wait_state .position 50)"
+  expect_eq "seek past the end is clamped to the last frame" 99 "$(tool_json seek '{"position":99999}' | jq -r '.position')"
+
+  expect_eq "seek: missing position is an error" true "$(tool_is_error seek '{}')"
+  expect_eq "seek: string position is an error" true "$(tool_is_error seek '{"position":"abc"}')"
+  expect_eq "seek: float position is an error" true "$(tool_is_error seek '{"position":1.5}')"
+  expect_eq "seek: negative position is an error" true "$(tool_is_error seek '{"position":-1}')"
+  expect_eq "pause: negative position is an error" true "$(tool_is_error pause '{"position":-5}')"
+  expect_eq "play: zero speed is an error" true "$(tool_is_error play '{"speed":0}')"
+  expect_eq "play: string speed is an error" true "$(tool_is_error play '{"speed":"fast"}')"
+
+  tool_is_error seek '{"position":0}' >/dev/null
+  expect_eq "play: ok" false "$(tool_is_error play '{}')"
+  expect_eq "play: playing" true "$(wait_state .playing true)"
+  tool_is_error pause '{"position":10}' >/dev/null
+  expect_eq "pause with position: stopped at 10" 10 "$(wait_state .position 10)"
+else
+  echo "SKIP  transport checks (no clip loaded)"
+fi
+
 # --- tool checks are added below by later tasks ---
 
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

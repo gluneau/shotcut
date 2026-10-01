@@ -27,6 +27,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 
+#include <cmath>
+#include <limits>
+
 namespace {
 
 QJsonObject schema(const char *json)
@@ -156,6 +159,82 @@ QJsonObject saveProject(const QJsonObject &arguments)
     return McpTools::jsonResult(QJsonObject{{"savedCopy", path}});
 }
 
+enum class FrameArg { Missing, Ok, Invalid };
+
+// Reads a non-negative integer frame number from `arguments[key]`.
+FrameArg readFrame(const QJsonObject &arguments, const char *key, int &value)
+{
+    const QJsonValue v = arguments.value(key);
+    if (v.isUndefined())
+        return FrameArg::Missing;
+    const double d = v.toDouble();
+    if (!v.isDouble() || d != std::floor(d) || d < 0
+        || d > std::numeric_limits<int>::max()) {
+        return FrameArg::Invalid;
+    }
+    value = static_cast<int>(d);
+    return FrameArg::Ok;
+}
+
+int lastFrame()
+{
+    return qMax(0, MLT.producer()->get_playtime() - 1);
+}
+
+void movePlayhead(int position)
+{
+    if (MAIN.isMultitrackValid())
+        MAIN.seekTimeline(position);
+    else
+        MLT.seek(position);
+}
+
+QJsonObject playTool(const QJsonObject &arguments)
+{
+    double speed = 1.0;
+    const QJsonValue v = arguments.value("speed");
+    if (!v.isUndefined()) {
+        if (!v.isDouble() || v.toDouble() == 0.0) {
+            return McpTools::textResult("speed must be a non-zero number (use pause to stop).",
+                                        true);
+        }
+        speed = v.toDouble();
+    }
+    if (!isLoaded())
+        return McpTools::textResult("Nothing is loaded.", true);
+    MLT.play(speed);
+    return McpTools::textResult("Playing.");
+}
+
+QJsonObject pauseTool(const QJsonObject &arguments)
+{
+    int position = 0;
+    const FrameArg result = readFrame(arguments, "position", position);
+    if (result == FrameArg::Invalid)
+        return McpTools::textResult("position must be a non-negative integer frame number.", true);
+    if (!isLoaded())
+        return McpTools::textResult("Nothing is loaded.", true);
+    if (result == FrameArg::Ok)
+        position = qMin(position, lastFrame());
+    MLT.pause();
+    // VideoWidget::pause() ignores its position argument, so move the playhead explicitly.
+    if (result == FrameArg::Ok)
+        movePlayhead(position);
+    return McpTools::textResult("Paused.");
+}
+
+QJsonObject seekTool(const QJsonObject &arguments)
+{
+    int position = 0;
+    if (readFrame(arguments, "position", position) != FrameArg::Ok)
+        return McpTools::textResult("position must be a non-negative integer frame number.", true);
+    if (!isLoaded())
+        return McpTools::textResult("Nothing is loaded.", true);
+    position = qMin(position, lastFrame());
+    movePlayhead(position);
+    return McpTools::jsonResult(QJsonObject{{"position", position}});
+}
+
 } // namespace
 
 QJsonObject McpTools::textResult(const QString &text, bool isError)
@@ -193,5 +272,23 @@ QList<McpTool> McpTools::all()
              "path":{"type":"string","description":"Absolute .mlt path for a copy."}
            }})"),
          saveProject},
+        {"play",
+         "Start playback. Optional speed (non-zero number, default 1.0; negative plays backwards).",
+         schema(R"({"type":"object","properties":{
+             "speed":{"type":"number","description":"Playback speed, default 1.0."}
+           }})"),
+         playTool},
+        {"pause",
+         "Pause playback. Optional position (frame number) to move the playhead to.",
+         schema(R"({"type":"object","properties":{
+             "position":{"type":"integer","minimum":0,"description":"Frame to move to."}
+           }})"),
+         pauseTool},
+        {"seek",
+         "Move the playhead to a frame number (clamped to the last frame).",
+         schema(R"({"type":"object","properties":{
+             "position":{"type":"integer","minimum":0,"description":"Frame number."}
+           },"required":["position"]})"),
+         seekTool},
     };
 }
