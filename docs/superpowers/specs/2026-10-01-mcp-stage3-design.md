@@ -219,3 +219,34 @@ exported-frame spot checks, hardware encoders, Windows path handling.
 
 Each answer is recorded in the plan's ledger and may change a tool's behaviour; a tool that cannot be made
 undoable and dialog-free is dropped and the drop is recorded.
+
+## 11. Pre-flight rulings (read-only code research, done before the plan)
+
+These settle section 10 and correct three statements above. Where they differ from sections 4 to 7, this section wins.
+
+1. **Filter engine does not use Shotcut's filter commands.** `Filter::AddCommand`/`UndoParameterCommand` depend on the
+   Filters panel's selected clip (a temporary model would dangle after undo, and `UndoParameterCommand` merges
+   repeated edits). The engine uses small new undo commands that address the target by `(track, clip)` through
+   `MultitrackModel::getClipInfo` (the pattern of Shotcut's own fade commands), attach/detach/inherit on the clip's
+   parent producer, copy the QML `objectName` into `shotcut:filter`, never set `_shotcut:newFilter`, and notify the
+   model. The same commands can target the multitrack output (used for the caption burn-in filter, section 7).
+2. **No track pan.** Shotcut has no track pan command; `track_set` offers `gain_db` and mute/hide/lock/composite/name only.
+3. **Captions use a subtitle track plus the burn-in output filter**, not one text clip per caption: one undoable import
+   (`SubtitlesModel::importSubtitlesToNewTrack`) plus one `subtitle` output filter that burns into the export. Text
+   clips remain for titles and lower-thirds only.
+4. **`project_set_format` is allowed only when nothing is loaded and no timeline exists** (a profile change on a loaded
+   project shows a dialog, reloads and clears undo). It sets the profile through `MLT.profile()` setters like the
+   Custom Video Mode dialog and does NOT write the user's saved Video Mode setting. It must be called before the
+   first `playlist_add`.
+5. **Insert/overwrite push `Timeline::InsertCommand`/`OverwriteCommand` directly** with XML built the `playlist_add`
+   way; `TimelineDock::insert/overwrite` are never called (clipboard, Source player and duration-dialog hazards).
+6. **`timeline_remove_ranges` takes `tracks` (an array)**, cutting the same ranges on every listed track in one macro so
+   audio and video stay in sync. Ripple of other tracks is NOT left to the user's "ripple all tracks" setting:
+   the tool controls it explicitly.
+7. **Speed** is feasible through a recreated `timewarp:` producer pushed as one undo step, but keyframes are not
+   rescaled; it is the last 3B task and is dropped (and recorded) if it cannot be made exact and undoable.
+8. **`ffmpeg`/`ffprobe`:** the new tools use their own lookup (application directory, then `PATH`); Shotcut's
+   `FfmpegJob`/`FfprobeJob` are not modified.
+9. **Whisper:** `whisper-cli -ojf` gives per-token times in milliseconds; words are regrouped from tokens. Verified
+   against the built program's `--help` and `jfk.wav` in the plan's first task. A whisper.cpp source tree is at
+   `~/GitHub/whisper.cpp`; the plan builds it in a scratch directory for tests only.
