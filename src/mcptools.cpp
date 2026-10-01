@@ -17,10 +17,12 @@
 
 #include "mcptools.h"
 
+#include "actions.h"
 #include "autosavefile.h"
 #include "mainwindow.h"
 #include "mltcontroller.h"
 
+#include <QAction>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -243,6 +245,74 @@ QJsonObject seekTool(const QJsonObject &arguments)
     return McpTools::jsonResult(QJsonObject{{"position", position}});
 }
 
+// Player actions whose slots open no dialog. Anything else is refused.
+const QStringList &allowedActions()
+{
+    static const QStringList keys = {
+        "playerPlayPauseAction",
+        "playerPauseAction",
+        "playerRewindAction",
+        "playerFastForwardAction",
+        "playerSeekStartAction",
+        "playerSeekEndAction",
+        "playerNextFrameAction",
+        "playerPreviousFrameAction",
+        "playerForwardOneSecondAction",
+        "playerBackwardOneSecondAction",
+        "playerForwardFiveSecondsAction",
+        "playerBackwardFiveSecondsAction",
+        "playerForwardTenSecondsAction",
+        "playerBackwardTenSecondsAction",
+        "playerSkipNextAction",
+        "playerSkipPreviousAction",
+        "playerLoopAction",
+    };
+    return keys;
+}
+
+QJsonObject listActions(const QJsonObject &)
+{
+    QJsonArray list;
+    for (const QString &key : allowedActions()) {
+        QAction *action = Actions[key];
+        if (!action)
+            continue;
+        list.append(QJsonObject{{"key", key},
+                                {"text", action->iconText()},
+                                {"enabled", action->isEnabled()},
+                                {"checkable", action->isCheckable()},
+                                {"checked", action->isChecked()}});
+    }
+    return McpTools::jsonResult(QJsonObject{{"actions", list}});
+}
+
+QJsonObject triggerAction(const QJsonObject &arguments)
+{
+    const QString key = arguments.value("key").toString();
+    if (!allowedActions().contains(key)) {
+        return McpTools::textResult("Action not available: '" + key
+                                        + "'. Use list_actions for the available keys.",
+                                    true);
+    }
+    const QJsonValue checked = arguments.value("checked");
+    if (!checked.isUndefined() && !checked.isBool())
+        return McpTools::textResult("checked must be a boolean.", true);
+    QAction *action = Actions[key];
+    if (!action)
+        return McpTools::textResult("Action is not registered: " + key, true);
+    if (!action->isEnabled())
+        return McpTools::textResult("Action is currently disabled: " + key, true);
+
+    // Triggering a checkable action toggles it, so only trigger when the state must change.
+    if (action->isCheckable() && checked.isBool()) {
+        if (action->isChecked() != checked.toBool())
+            action->trigger();
+    } else {
+        action->trigger();
+    }
+    return McpTools::jsonResult(QJsonObject{{"key", key}, {"checked", action->isChecked()}});
+}
+
 } // namespace
 
 QJsonObject McpTools::textResult(const QString &text, bool isError)
@@ -301,5 +371,17 @@ QList<McpTool> McpTools::all()
              "position":{"type":"integer","minimum":0,"description":"Frame number."}
            },"required":["position"]})"),
          seekTool},
+        {"list_actions",
+         "List the player actions that trigger_action can run (key, text, enabled, checkable, checked).",
+         schema(R"({"type":"object","properties":{}})"),
+         listActions},
+        {"trigger_action",
+         "Run one of the player actions listed by list_actions, e.g. playerNextFrameAction. "
+         "For checkable actions (such as playerLoopAction) pass checked to set the state.",
+         schema(R"({"type":"object","properties":{
+             "key":{"type":"string","description":"Action key from list_actions."},
+             "checked":{"type":"boolean","description":"Desired state for a checkable action."}
+           },"required":["key"]})"),
+         triggerAction},
     };
 }

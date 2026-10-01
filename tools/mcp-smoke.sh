@@ -160,6 +160,22 @@ else
   echo "SKIP  transport checks (no clip loaded)"
 fi
 
+echo "== action tools"
+expect_eq "list_actions includes playerPlayPauseAction" true "$(tool_json list_actions '{}' | jq -r '[.actions[].key] | contains(["playerPlayPauseAction"])')"
+expect_eq "list_actions excludes dialog-opening actions" false "$(tool_json list_actions '{}' | jq -r '[.actions[].key] | contains(["playerSetPositionAction"])')"
+expect_eq "trigger_action: non-allowlisted key is an error" true "$(tool_is_error trigger_action '{"key":"playerSetPositionAction"}')"
+expect_eq "trigger_action: unknown key is an error" true "$(tool_is_error trigger_action '{"key":"nope"}')"
+expect_eq "trigger_action: missing key is an error" true "$(tool_is_error trigger_action '{}')"
+expect_eq "trigger_action: non-boolean checked is an error" true "$(tool_is_error trigger_action '{"key":"playerLoopAction","checked":"yes"}')"
+if [ "$HAVE_CLIP" = 1 ]; then
+  tool_is_error open_project "{\"path\":\"$TMP/clip.mp4\",\"discard_changes\":true}" >/dev/null
+  wait_state .loaded true >/dev/null
+  tool_is_error pause '{"position":20}' >/dev/null
+  wait_state .position 20 >/dev/null
+  expect_eq "trigger_action: next frame is ok" false "$(tool_is_error trigger_action '{"key":"playerNextFrameAction"}')"
+  expect_eq "trigger_action: moved one frame" 21 "$(wait_state .position 21)"
+fi
+
 # --- tool checks are added below by later tasks ---
 
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
