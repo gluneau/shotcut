@@ -78,8 +78,10 @@ QJsonObject getFrameTool(const QJsonObject &arguments)
         movePlayhead(position);
         widget->requestImage();
         MLT.refreshConsumer();
-        timeout.start(2000);
-        loop.exec();
+        if (!ready) {
+            timeout.start(2000);
+            loop.exec();
+        }
         if (!ready)
             return textResult("The frame was not ready in time; try again.", true);
     }
