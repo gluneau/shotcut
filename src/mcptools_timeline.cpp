@@ -686,8 +686,9 @@ QList<McpTool> McpTools::timelineTools()
          "one track (track 0 is the TOPMOST video track). clip is the INCOMING (later) clip; "
          "duration frames of overlap, shorter than both clips. The clips overlap, so the timeline "
          "gets shorter by duration: later clips move earlier by duration (with Shotcut's ripple-all-"
-         "tracks setting on, duration frames are also removed from the other unlocked tracks). The incoming clip must "
-         "not already have a transition after it. Returns the updated track and transition_index.",
+         "tracks setting on, duration frames are also removed from the other unlocked tracks). "
+         "The incoming clip must not already have a transition after it. Returns the updated "
+         "track and transition_index.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":1,"description":"Index of the incoming clip."},
