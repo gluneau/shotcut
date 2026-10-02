@@ -780,6 +780,69 @@ expect_eq "insert_range playlist_index with in_s/out_s" "[0,25,25,49]" "$(echo "
 tool_json undo '{}' >/dev/null
 expect_eq "insert_range playlist_index: only in_s is an error" true "$(ierr '{"playlist_index":0,"in_s":1,"track":0,"position":0}')"
 expect_eq "insert_range playlist_index: index 1 is out of range" true "$(ierr '{"playlist_index":1,"track":0,"position":0}')"
+expect_eq "get_timeline settings report ripple_markers" false "$(tool_json get_timeline '{}' | jq -r '.settings.ripple_markers')"
+R="$(ins "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":1,\"track\":0,\"position\":0}")"
+expect_eq "insert_range: result reports ripple (insert, default settings)" '{"all_tracks":false,"markers":false}' "$(echo "$R" | jq -c '.ripple')"
+tool_json undo '{}' >/dev/null
+R="$(ins "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":1,\"track\":0,\"position\":0,\"mode\":\"overwrite\"}")"
+expect_eq "insert_range: result reports ripple (overwrite never ripples)" '{"all_tracks":false,"markers":false}' "$(echo "$R" | jq -c '.ripple')"
+tool_json undo '{}' >/dev/null
+expect_eq "insert_range: a range shorter than one frame is an error" true "$(ierr "$(with '.in_s=1 | .out_s=1.01')")"
+expect_eq "insert_range: position more than an hour after the track end is an error" true "$(ierr "$(with '.position=100000000')")"
+expect_eq "insert_range: the new errors changed nothing" "$UTL" "$(tool_json get_timeline '{}')"
+# UTL track 0: clips 0-9, 10-24, 25-74, 75-84, 85-124 (duration 125)
+R="$(ins "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":1,\"track\":0,\"position\":124}")"
+expect_eq "insert_range on the track's last frame lands one frame later (appended)" "125 25" "$(echo "$R" | jq -r '"\(.inserted.start) \(.inserted.duration)"')"
+expect_eq "insert_range on the last frame: last clip untouched" "[85,40,110,149]" "$(echo "$R" | jq -c '.track' | clipf | jq -c '.[-2]')"
+tool_json undo '{}' >/dev/null
+R="$(ins "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":1,\"track\":0,\"position\":200}")"
+expect_eq "insert_range beyond the end: starts at position" "200 25" "$(echo "$R" | jq -r '"\(.inserted.start) \(.inserted.duration)"')"
+expect_eq "insert_range beyond the end: a 75-frame gap before it" "blank 125 75" "$(echo "$R" | jq -r '.track.clips[-2] | "\(.kind) \(.start) \(.duration)"')"
+tool_json undo '{}' >/dev/null
+R="$(ins "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":1,\"track\":0,\"position\":75,\"mode\":\"overwrite\"}")"
+expect_eq "overwrite at a clip boundary: covers from the boundary on" "[[0,10,75,84],[10,15,0,14],[25,50,0,49],[75,25,0,24],[100,25,125,149]]" "$(echo "$R" | jq -c '.track' | clipf)"
+tool_json undo '{}' >/dev/null
+expect_eq "insert_range: undo of the edge cases restores the timeline" "$UTL" "$(tool_json get_timeline '{}')"
+
+# A transition joins clip 0 (0-9) and clip 1 (10-24): 5 frames.
+tool_json timeline_add_transition '{"track":0,"clip":1,"duration":5}' >/dev/null
+TR="$(tool_json get_timeline '{}' | jq -c '[.tracks[0].clips[] | select(.kind=="transition")][0]')"
+TS="$(echo "$TR" | jq '.start')"; TD="$(echo "$TR" | jq '.duration')"
+expect_eq "insert_range transition fixture: 5 frames" 5 "$TD"
+TTL="$(tool_json get_timeline '{}')"
+expect_eq "insert_range: insert inside a transition is an error" true "$(ierr "$(with ".position=$((TS + 1))")")"
+expect_eq "insert_range: insert inside a transition message" true "$(tool_text timeline_insert_range "$(with ".position=$((TS + 2))")" | grep -q 'inside a transition' && echo true || echo false)"
+expect_eq "insert_range: overwrite inside a transition is an error" true "$(ierr "$(with ".position=$((TS + 1)) | .mode=\"overwrite\"")")"
+expect_eq "insert_range: overwrite covering the start of a transition is an error" true "$(ierr "$(with ".position=$((TS - 2)) | .in_s=0 | .out_s=0.16 | .mode=\"overwrite\"")")"
+expect_eq "insert_range: the transition refusals changed nothing" "$TTL" "$(tool_json get_timeline '{}')"
+tool_json undo '{}' >/dev/null
+expect_eq "insert_range: transition fixture undone" "$UTL" "$(tool_json get_timeline '{}')"
+
+# A speed-changed playlist item (timewarp), from a hand-written project (no tool sets speed yet).
+TW="$TMP/timewarp.mlt"
+cat > "$TW" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="main_bin">
+  <profile description="320x240 25 fps" width="320" height="240" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="4" display_aspect_den="3" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <producer id="producer0" in="0" out="111">
+    <property name="length">112</property>
+    <property name="resource">2:$MEDIA/scenes.mp4</property>
+    <property name="mlt_service">timewarp</property>
+    <property name="shotcut:producer">avformat</property>
+    <property name="warp_speed">2</property>
+    <property name="warp_resource">$MEDIA/scenes.mp4</property>
+  </producer>
+  <playlist id="main_bin">
+    <property name="xml_retain">1</property>
+    <entry producer="producer0" in="0" out="111"/>
+  </playlist>
+</mlt>
+XML
+tool_json open_project "{\"path\":\"$TW\",\"discard_changes\":true}" >/dev/null
+sleep 1
+expect_eq "insert_range timewarp fixture: one playlist item" 1 "$(tool_json get_playlist '{}' | jq '.items | length')"
+expect_eq "insert_range: a speed-changed playlist item is refused" true "$(tool_text timeline_insert_range '{"playlist_index":0,"track":0,"position":0}' | grep -q 'speed change' && echo true || echo false)"
+expect_eq "insert_range: the refusal creates no timeline" 0 "$(tool_json get_timeline '{}' | jq '.tracks | length')"
 
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

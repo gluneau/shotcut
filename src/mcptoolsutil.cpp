@@ -373,20 +373,58 @@ int pushClipXml(const QString &mode,
         return -1;
     TimelineDock *dock = MAIN.timelineDock();
     MultitrackModel &model = *dock->model();
+    Mlt::Producer clip(MLT.profile(), "xml-string", xml.toUtf8().constData());
+    const int duration = clip.is_valid() ? clip.get_playtime() : 0;
+    if (duration <= 0) {
+        error = QStringLiteral("The clip is empty.");
+        return -1;
+    }
+    const bool create = !MAIN.isMultitrackValid();
+    int playtime = 0;
+    if (!create) {
+        QScopedPointer<Mlt::Producer> trackProducer(
+            model.tractor()->track(model.trackList().at(track).mlt_index));
+        if (trackProducer)
+            playtime = trackProducer->get_playtime();
+        // Splitting a transition, or overwriting part of one, breaks the clips it joins.
+        for (int c = 0; c < model.rowCount(model.index(track)); ++c) {
+            if (kindOf(model, track, c) != "transition")
+                continue;
+            std::unique_ptr<Mlt::ClipInfo> t = model.getClipInfo(track, c);
+            if (!t)
+                continue;
+            const int tStart = t->start, tEnd = t->start + t->frame_count;
+            const int end = position + duration;
+            const bool inside = position > tStart && position < tEnd;
+            const bool partial = mode == "overwrite" && position < tEnd && end > tStart
+                                 && (position > tStart || end < tEnd);
+            if (inside || partial) {
+                error = QStringLiteral("position is inside a transition (item %1, frames %2-%3); "
+                                       "choose a position outside it.")
+                            .arg(c)
+                            .arg(tStart)
+                            .arg(tEnd - 1);
+                return -1;
+            }
+        }
+    }
+    const int maxPosition = playtime + qRound(3600 * MLT.profile().fps());
+    if (position > maxPosition) {
+        error = QStringLiteral("position must be at most %1 (one hour after the end of the "
+                               "track).")
+                    .arg(maxPosition);
+        return -1;
+    }
+
     MLT.pause();
     MAIN.undoStack()->beginMacro(undoText);
-    if (!MAIN.isMultitrackValid()) {
+    if (create) {
         // The tracks timeline_add_playlist creates on an empty timeline (V1, plus A1 when
         // Shotcut's auto-add-tracks setting is on); the video track is index 0.
         MAIN.undoStack()->push(new Timeline::AddTrackCommand(model, true));
         if (Settings.timelineAutoAddTracks())
             MAIN.undoStack()->push(new Timeline::AddTrackCommand(model, false));
     }
-    int playtime = 0;
-    QScopedPointer<Mlt::Producer> trackProducer(
-        model.tractor()->track(model.trackList().at(track).mlt_index));
-    if (trackProducer)
-        playtime = trackProducer->get_playtime();
     if (mode == "insert")
         MAIN.undoStack()->push(new Timeline::InsertCommand(model,
                                                            *dock->markersModel(),
@@ -397,10 +435,25 @@ int pushClipXml(const QString &mode,
     else
         MAIN.undoStack()->push(new Timeline::OverwriteCommand(model, track, position, xml, false));
     MAIN.undoStack()->endMacro();
-    // From the track's last frame on, Shotcut appends the clip at the end of the track (after a
-    // gap when position is beyond it), so it is then the last item.
-    return position >= playtime - 1 ? model.rowCount(model.index(track)) - 1
-                                    : dock->clipIndexAtPosition(track, position);
+    // From the track's last frame on (always on a new track), Shotcut appends the clip at the end
+    // of the track (after a gap when position is beyond it), so it is then the last item.
+    const int index = position >= playtime - 1 ? model.rowCount(model.index(track)) - 1
+                                               : dock->clipIndexAtPosition(track, position);
+    std::unique_ptr<Mlt::ClipInfo> info = index >= 0 && kindOf(model, track, index) == "clip"
+                                              ? model.getClipInfo(track, index)
+                                              : nullptr;
+    if (!info || info->frame_count != duration) {
+        // Roll the whole macro back (a created track too) and drop it from the stack.
+        // QUndoStack::undo() skips the undo() of an obsolete command, so the order matters.
+        QUndoStack *stack = MAIN.undoStack();
+        auto *macro = const_cast<QUndoCommand *>(stack->command(stack->index() - 1));
+        macro->undo();
+        macro->setObsolete(true);
+        stack->undo();
+        error = QStringLiteral("Shotcut did not insert the clip; nothing was changed.");
+        return -1;
+    }
+    return index;
 }
 
 QString clipSourcePath(Mlt::ClipInfo &info)

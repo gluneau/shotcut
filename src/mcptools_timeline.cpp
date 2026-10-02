@@ -85,7 +85,8 @@ QJsonObject getTimelineTool(const QJsonObject &)
                        {"duration", 0},
                        {"settings",
                         QJsonObject{{"allow_transitions", Settings.timelineAllowTransitions()},
-                                    {"ripple_all_tracks", Settings.timelineRippleAllTracks()}}}};
+                                    {"ripple_all_tracks", Settings.timelineRippleAllTracks()},
+                                    {"ripple_markers", Settings.timelineRippleMarkers()}}}};
     QJsonArray tracks;
     if (MAIN.isMultitrackValid()) {
         MultitrackModel &model = *MAIN.timelineDock()->model();

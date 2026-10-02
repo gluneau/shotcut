@@ -20,6 +20,7 @@
 #include "mainwindow.h"
 #include "mltcontroller.h"
 #include "models/multitrackmodel.h"
+#include "settings.h"
 
 #include <MltPlaylist.h>
 
@@ -87,6 +88,14 @@ QJsonObject timelineInsertRangeTool(const QJsonObject &arguments)
             return textResult(QStringLiteral("There is no playlist item %1; call get_playlist.")
                                   .arg(index),
                               true);
+        // Rebuilt from its file at 1x, a speed-changed item would get the wrong range.
+        if (!info->producer || QString(info->producer->get("mlt_service")) == "timewarp"
+            || (info->producer->property_exists("warp_speed")
+                && info->producer->get_double("warp_speed") != 1.0))
+            return textResult(QStringLiteral("Playlist item %1 has a speed change, which is not "
+                                             "carried over; insert its file by path instead.")
+                                  .arg(index),
+                              true);
         path = clipSourcePath(*info);
         in = info->frame_in;
         out = info->frame_out;
@@ -116,7 +125,9 @@ QJsonObject timelineInsertRangeTool(const QJsonObject &arguments)
                                   .arg(length / fps),
                               true);
         in = qRound(inS * fps);
-        out = qMin(qMax(qRound(outS * fps) - 1, in), length - 1);
+        if (qRound(outS * fps) <= in)
+            return textResult("The range is shorter than one frame.", true);
+        out = qMin(qRound(outS * fps) - 1, length - 1);
     }
     if (in < 0 || out < in || out >= length)
         return textResult(QStringLiteral("The range must cover at least one frame of the file "
@@ -138,12 +149,18 @@ QJsonObject timelineInsertRangeTool(const QJsonObject &arguments)
         return textResult(error.isEmpty() ? QStringLiteral("Shotcut did not insert the clip.")
                                           : error,
                           true);
+    // InsertCommand read these in its constructor, during the push above.
+    const bool insert = mode == "insert";
+    const QJsonObject ripple{{"all_tracks", insert && Settings.timelineRippleAllTracks()},
+                             {"markers", insert && Settings.timelineRippleMarkers()}};
     MultitrackModel &model = *MAIN.timelineDock()->model();
     std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, index);
-    QJsonObject inserted;
-    if (info)
-        inserted = QJsonObject{{"start", info->start}, {"duration", info->frame_count}};
-    return jsonResult(QJsonObject{{"track", trackJson(model, track)}, {"inserted", inserted}});
+    if (!info)
+        return textResult("The clip was inserted but cannot be read back; call get_timeline.",
+                          true);
+    const QJsonObject inserted{{"start", info->start}, {"duration", info->frame_count}};
+    return jsonResult(
+        QJsonObject{{"track", trackJson(model, track)}, {"inserted", inserted}, {"ripple", ripple}});
 }
 
 } // namespace
@@ -152,20 +169,27 @@ QList<McpTool> McpTools::structureTools()
 {
     return {
         {"timeline_insert_range",
-         "Put a range of a media file on a track at an absolute timeline frame as ONE undo step, "
-         "without moving the playhead. Source: path (absolute media file) OR playlist_index (that "
-         "playlist item's file). in_s and out_s are source seconds (out_s exclusive, 0 <= in_s < "
-         "out_s <= file duration); required with path, optional with playlist_index (default: "
-         "the item's own in and out). mode insert (default) splits a clip at position and pushes "
-         "later items on the track right by the inserted duration; whether other tracks and "
-         "markers also move follows Shotcut's own ripple settings (get_timeline settings "
-         "ripple_all_tracks). mode overwrite replaces what is under the range and never ripples. "
-         "From the track's last frame on, the clip is appended at the end of the track (after a "
-         "gap when position is beyond it). Item indexes after the new clip shift; the returned "
-         "track shows them. Track 0 is the TOPMOST video track; any media may go on video or audio "
-         "tracks, as in Shotcut. With no timeline, track must be 0 and a video track is created. "
+         "Put a range of a media file on a track at an absolute timeline frame as ONE undo step. "
+         "Source: path (absolute media file) OR playlist_index (that playlist item's file; its "
+         "filters are not carried over, and an item with a speed change is refused). in_s and "
+         "out_s are source seconds (out_s exclusive, 0 <= in_s < out_s <= file duration, at least "
+         "one frame); required with path, optional with playlist_index (default: the item's own "
+         "in and out). mode insert (default) splits a clip at position and pushes later items on "
+         "the track right by the inserted duration; whether other tracks and markers also move "
+         "follows Shotcut's own ripple settings, reported in the result as ripple:{all_tracks, "
+         "markers} (also in get_timeline settings). When all_tracks is true the other unlocked "
+         "tracks gained a gap at position, so re-read get_timeline. mode overwrite replaces what "
+         "is under the range and never ripples. From the track's last frame on, the clip is "
+         "appended at the end of the track (a position on the last frame lands one frame later; "
+         "beyond the end a gap is left before it). position may be at most one hour after the end "
+         "of the track; a position inside a transition, or an overwrite covering part of one, is "
+         "refused. Item indexes after the new clip shift; the returned track shows them. Track 0 "
+         "is the TOPMOST video track; any media may go on video or audio tracks, as in Shotcut. "
+         "With no timeline, track must be 0 and a video track is created. With nothing loaded "
+         "the file is first opened as playlist_add does (the project then follows its format, "
+         "even when the range is then refused); the insert itself never moves the playhead. "
          "Locked tracks, still images, generators and project files are refused. Returns {track, "
-         "inserted:{start, duration}}.",
+         "inserted:{start, duration}, ripple:{all_tracks, markers}}.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute path of a media file."},
              "playlist_index":{"type":"integer","minimum":0,"description":"Playlist item index from get_playlist."},

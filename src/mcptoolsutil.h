@@ -99,8 +99,10 @@ bool validTargetTrack(int track, QString &error);
 // Pushes the single clip in xml (with its in and out) onto track at the absolute timeline frame
 // position as ONE undo step named undoText, without moving the playhead or using the clipboard or
 // the Source player. mode "insert" ripples per Shotcut's ripple settings; "overwrite" never
-// ripples. With no timeline the first video track is created in the same step. Returns the new
-// clip's index on the track, or -1 with a message.
+// ripples. With no timeline the first video track is created in the same step. Refuses a position
+// inside a transition (or an overwrite covering part of one) and a position more than one hour
+// after the end of the track. Returns the new clip's index on the track, or -1 with a message;
+// a push that did not produce the clip is rolled back and dropped from the undo stack.
 int pushClipXml(const QString &mode,
                 int track,
                 int position,
