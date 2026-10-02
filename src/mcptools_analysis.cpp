@@ -654,7 +654,8 @@ bool readTimedText(const QJsonValue &value,
     const QJsonValue t = o.value("text");
     if (!value.isObject() || !s.isDouble() || !e.isDouble() || s.toDouble() < 0
         || s.toDouble() >= e.toDouble() || e.toDouble() > kMaxTranscriptSeconds) {
-        error = QStringLiteral("%1 needs numbers start_s and end_s with 0 <= start_s < end_s <= %2.")
+        error = QStringLiteral("%1 needs numbers start_s and end_s with 0 <= start_s < end_s "
+                               "<= %2.")
                     .arg(where)
                     .arg(kMaxTranscriptSeconds);
         return false;
@@ -679,8 +680,8 @@ bool readTranscript(const QJsonValue &value,
     const QJsonValue list = value.toObject().value("segments");
     if (!value.isObject() || !list.isArray() || list.toArray().isEmpty()
         || list.toArray().size() > kMaxSegments) {
-        error = QStringLiteral("transcript must be {segments:[{start_s, end_s, text, words?}]} with "
-                               "1 to %1 segments.")
+        error = QStringLiteral("transcript must be {segments:[{start_s, end_s, text, words?}]} "
+                               "with 1 to %1 segments.")
                     .arg(kMaxSegments);
         return false;
     }
@@ -892,7 +893,8 @@ QJsonObject storeTranscript(const QJsonObject &arguments)
 {
     for (const char *key : {"track", "clip", "language", "wait_ms"}) {
         if (arguments.contains(QLatin1String(key))) {
-            return textResult(QStringLiteral("Pass transcript with path only, not with %1.").arg(key),
+            return textResult(QStringLiteral("Pass transcript with path only, not with %1.")
+                                  .arg(key),
                               true);
         }
     }
