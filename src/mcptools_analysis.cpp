@@ -26,6 +26,7 @@
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QTemporaryDir>
+#include <QThread>
 #include <QVector>
 
 #include <algorithm>
@@ -638,11 +639,13 @@ constexpr int kMaxSegments = 5000;
 constexpr int kMaxWordsPerSegment = 2000;
 constexpr double kMaxTranscriptSeconds = 86400;
 constexpr int kMaxTextChars = 2000;
-constexpr qint64 kMaxWhisperJson = 256 * 1024 * 1024;
+constexpr qint64 kMaxWhisperJson = 64 * 1024 * 1024;
 
-// Reads {start_s, end_s, text} of a supplied segment or word; text comes back trimmed.
+// Reads {start_s, end_s, text} of a supplied segment or word; text comes back trimmed. Words may
+// have no length (Whisper gives some words start_s == end_s).
 bool readTimedText(const QJsonValue &value,
                    const QString &where,
+                   bool isWord,
                    double &start,
                    double &end,
                    QString &text,
@@ -653,10 +656,11 @@ bool readTimedText(const QJsonValue &value,
     const QJsonValue e = o.value("end_s");
     const QJsonValue t = o.value("text");
     if (!value.isObject() || !s.isDouble() || !e.isDouble() || s.toDouble() < 0
-        || s.toDouble() >= e.toDouble() || e.toDouble() > kMaxTranscriptSeconds) {
-        error = QStringLiteral("%1 needs numbers start_s and end_s with 0 <= start_s < end_s "
-                               "<= %2.")
-                    .arg(where)
+        || s.toDouble() > e.toDouble() || (!isWord && s.toDouble() == e.toDouble())
+        || e.toDouble() > kMaxTranscriptSeconds) {
+        error = QStringLiteral("%1 needs numbers start_s and end_s with 0 <= start_s %2 end_s "
+                               "<= %3.")
+                    .arg(where, isWord ? "<=" : "<")
                     .arg(kMaxTranscriptSeconds);
         return false;
     }
@@ -693,7 +697,7 @@ bool readTranscript(const QJsonValue &value,
         const QString where = QStringLiteral("segments[%1]").arg(i);
         double start = 0, end = 0;
         QString text;
-        if (!readTimedText(input.at(i), where, start, end, text, error))
+        if (!readTimedText(input.at(i), where, false, start, end, text, error))
             return false;
         if (start < previousStart) {
             error = QStringLiteral("segments must be sorted by start_s (%1).").arg(where);
@@ -716,8 +720,15 @@ bool readTranscript(const QJsonValue &value,
                 const QString wordWhere = QStringLiteral("%1.words[%2]").arg(where).arg(j);
                 double wordStart = 0, wordEnd = 0;
                 QString wordText;
-                if (!readTimedText(wordList.at(j), wordWhere, wordStart, wordEnd, wordText, error))
+                if (!readTimedText(wordList.at(j),
+                                   wordWhere,
+                                   true,
+                                   wordStart,
+                                   wordEnd,
+                                   wordText,
+                                   error)) {
                     return false;
+                }
                 if (wordStart < start || wordEnd > end) {
                     error = QStringLiteral("%1 must lie inside its segment.").arg(wordWhere);
                     return false;
@@ -792,16 +803,47 @@ QString utf8Of(const QString &bytes)
     return QString::fromUtf8(bytes.toLatin1());
 }
 
+// whisper-cli can exit 0 without a transcript (an unknown language, for one) and then prints its
+// help after the error, so the error lines are looked for before falling back to the output tail.
+QString whisperDiagnostics(const McpJobs::StepOutput &output)
+{
+    const QString text = QString::fromUtf8(output.err + "\n" + output.out);
+    QStringList found;
+    for (const QString &line : text.split('\n')) {
+        if (line.contains("error", Qt::CaseInsensitive) || line.contains("unknown")
+            || line.contains("failed", Qt::CaseInsensitive)) {
+            found.append(line.trimmed());
+        }
+    }
+    if (!found.isEmpty())
+        return found.mid(qMax(0, int(found.size()) - 5)).join(' ');
+    return QString::fromUtf8(output.err.right(2048) + output.out.right(2048)).trimmed();
+}
+
+// A token without letters or digits (punctuation) joins the word's text but not its time.
+bool isPunctuation(const QString &bytes)
+{
+    for (const QChar c : bytes) {
+        if (c.isLetterOrNumber() || c.unicode() >= 0x80)
+            return false;
+    }
+    return true;
+}
+
 bool parseWhisper(const SourceRef &ref,
                   const AudioRange &range,
                   const QString &language,
                   const QString &jsonPath,
+                  const McpJobs::StepOutput &whisperOutput,
                   QJsonObject &result,
                   QString &error)
 {
     QFile file(jsonPath);
     if (!file.open(QIODevice::ReadOnly) || file.size() > kMaxWhisperJson) {
         error = QStringLiteral("Whisper wrote no readable transcript.");
+        const QString details = whisperDiagnostics(whisperOutput);
+        if (!details.isEmpty())
+            error += " " + details;
         return false;
     }
     QJsonParseError parseError;
@@ -845,7 +887,8 @@ bool parseWhisper(const SourceRef &ref,
             Word &word = words.last();
             word.bytes += piece;
             const QJsonObject times = token.value("offsets").toObject();
-            if (times.value("from").isDouble() && times.value("to").isDouble()) {
+            if (times.value("from").isDouble() && times.value("to").isDouble()
+                && (word.from < 0 || !isPunctuation(piece))) {
                 if (word.from < 0)
                     word.from = times.value("from").toDouble();
                 word.to = times.value("to").toDouble();
@@ -870,6 +913,9 @@ bool parseWhisper(const SourceRef &ref,
                                     {"text", text},
                                     {"words", wordList}});
     }
+    // No speech at all still has word granularity: there are no words to time.
+    if (segments.isEmpty())
+        anyTimed = true;
     if (!anyTimed) {
         for (auto it = segments.begin(); it != segments.end(); ++it) {
             QJsonObject segment = it->toObject();
@@ -919,11 +965,12 @@ QJsonObject transcribeTool(const QJsonObject &arguments)
     QString language = QStringLiteral("auto");
     const QJsonValue languageValue = arguments.value("language");
     if (!languageValue.isUndefined()) {
-        static const QRegularExpression code(QStringLiteral("^[a-z]{2,3}$"));
+        // The shape of Whisper's own codes; whisper-cli itself rejects an unknown one.
+        static const QRegularExpression code(QStringLiteral("^([a-z]{2}|auto|haw|yue)$"));
         language = languageValue.toString();
-        if (!languageValue.isString() || (language != "auto" && !code.match(language).hasMatch())) {
-            return textResult("language must be auto or a lowercase ISO 639 code such as en or "
-                              "fra.",
+        if (!languageValue.isString() || !code.match(language).hasMatch()) {
+            return textResult("language must be auto or a Whisper language code (ISO 639-1, e.g. "
+                              "en, fr).",
                               true);
         }
     }
@@ -988,6 +1035,8 @@ QJsonObject transcribeTool(const QJsonObject &arguments)
                         model,
                         "--language",
                         language,
+                        "--threads",
+                        QString::number(qMax(1, QThread::idealThreadCount() - 1)),
                         "-ojf",
                         "--output-file",
                         out};
@@ -1003,10 +1052,16 @@ QJsonObject transcribeTool(const QJsonObject &arguments)
         "transcribe",
         key,
         {{program, decode}, whisperStep},
-        [ref, range, language, dir, out](const QList<McpJobs::StepOutput> &,
+        [ref, range, language, dir, out](const QList<McpJobs::StepOutput> &outputs,
                                          QJsonObject &transcript,
                                          QString &err) {
-            return parseWhisper(ref, range, language, out + ".json", transcript, err);
+            return parseWhisper(ref,
+                                range,
+                                language,
+                                out + ".json",
+                                outputs.value(1),
+                                transcript,
+                                err);
         },
         key,
         timeoutMs);
@@ -1171,28 +1226,31 @@ QList<McpTool> McpTools::analysisTools()
          "Give path (absolute file) or track and clip (a timeline clip: only its trimmed range is "
          "transcribed; a locked track is fine). Returns {path, in_s, out_s, language, granularity, "
          "segments} where segments is [{start_s, end_s, text, words:[{start_s, end_s, text}]}], "
-         "all times in seconds in the SOURCE file (words inside their segment, in order). "
-         "granularity is \"word\", or \"segment\" (no words) when the program gave no word times. "
-         "For a clip source every segment and word also has timeline_frames, [{start, end "
-         "(exclusive)}] on the timeline, empty when it does not map (speed changed). language "
-         "(default auto) is auto or an ISO 639 code such as en; the result names the detected one. "
-         "A source without audio is an error, and so is Whisper not being configured (checked "
-         "before any job starts). wait_ms (0 to 20000, default 0) waits for the result; without "
-         "it, or when slower, {job_id, state} is returned to poll with get_job. Results are cached "
-         "(\"cached\": true). A failing run is not retried: the error has the program's last "
-         "output. Bring your own transcript instead: pass path and transcript (and nothing else) "
-         "with transcript {segments:[{start_s, end_s, text, words?}]}: 1 to 5000 segments sorted "
-         "by start_s, 0 <= start_s < end_s <= 86400, text non-empty (at most 2000 characters), "
-         "words inside their segment and in order. It is kept in memory for that file (until "
-         "Shotcut quits) with \"supplied\": true and granularity \"word\" when every segment has "
-         "words, else \"segment\"; transcribe with only that path then returns it, and "
-         "captions_from_transcript uses it.",
+         "all times in seconds in the SOURCE file (words inside their segment, in order; a word "
+         "may have start_s == end_s). granularity is \"word\", or \"segment\" (no words) when "
+         "the program gave no word times; audio without speech gives segments []. For a clip "
+         "source every segment and word also has timeline_frames, [{start, end (exclusive)}] on "
+         "the timeline, empty when it does not map (speed changed). language (default auto) is "
+         "auto or a Whisper language code (ISO 639-1, e.g. en, fr); the result names the "
+         "detected one. A source without audio is an error, and so is Whisper not being "
+         "configured (checked before any job starts). wait_ms (0 to 20000, default 0) waits for "
+         "the result; without it, or when slower, {job_id, state} is returned to poll with "
+         "get_job. Results are cached (\"cached\": true). A failing run is not retried: the "
+         "error has the program's own message. Bring your own transcript instead: pass path and "
+         "transcript (and nothing else) with transcript {segments:[{start_s, end_s, text, "
+         "words?}]}: 1 to 5000 segments sorted by start_s, 0 <= start_s < end_s <= 86400 (words "
+         "start_s <= end_s), text non-empty (at most 2000 characters), words inside their "
+         "segment and in order. It is kept in memory for that file until Shotcut quits, with "
+         "\"supplied\": true and granularity \"word\" when every segment has words, else "
+         "\"segment\"; transcribe with only that path then returns it, and "
+         "captions_from_transcript uses it. A track and clip call always runs Whisper; it does "
+         "not read a supplied transcript.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute path of the media file."},
              "track":{"type":"integer","minimum":0,"description":"Track index (with clip)."},
              "clip":{"type":"integer","minimum":0,"description":"Clip index on the track."},
              "language":{"type":"string","default":"auto",
-               "description":"auto or an ISO 639 code (2 or 3 lowercase letters)."},
+               "description":"auto or a Whisper language code (ISO 639-1, e.g. en, fr)."},
              "wait_ms":{"type":"integer","minimum":0,"maximum":20000,"default":0},
              "transcript":{"type":"object","properties":{
                "segments":{"type":"array","minItems":1,"maxItems":5000,"items":{

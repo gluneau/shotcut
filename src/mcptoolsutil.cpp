@@ -333,12 +333,16 @@ void store(const QString &path, const QJsonObject &transcript)
 {
     Store &s = transcriptStore();
     const QString key = keyOf(path);
-    const auto it = s.transcripts.constFind(key);
-    if (it != s.transcripts.constEnd()) {
-        if (it->value("supplied").toBool() && !transcript.value("supplied").toBool())
-            return;
+    // Only Whisper results are evicted; a supplied transcript stays until Shotcut quits.
+    if (transcript.value("supplied").toBool()) {
         s.order.removeOne(key);
+        s.transcripts.insert(key, transcript);
+        return;
     }
+    const auto it = s.transcripts.constFind(key);
+    if (it != s.transcripts.constEnd() && it->value("supplied").toBool())
+        return;
+    s.order.removeOne(key);
     s.order.append(key);
     if (s.order.size() > kMaxTranscripts)
         s.transcripts.remove(s.order.takeFirst());

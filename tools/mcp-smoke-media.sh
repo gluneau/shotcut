@@ -353,7 +353,7 @@ bad_transcript "text over 2000 chars" "$(jq -nc '{segments:[{start_s:0,end_s:1,t
 bad_transcript "word before the segment" '{"segments":[{"start_s":1,"end_s":2,"text":"a","words":[{"start_s":0.5,"end_s":1.5,"text":"a"}]}]}'
 bad_transcript "word after the segment" '{"segments":[{"start_s":1,"end_s":2,"text":"a","words":[{"start_s":1.5,"end_s":2.5,"text":"a"}]}]}'
 bad_transcript "words decreasing" '{"segments":[{"start_s":0,"end_s":3,"text":"a b","words":[{"start_s":1,"end_s":2,"text":"a"},{"start_s":0.5,"end_s":1,"text":"b"}]}]}'
-bad_transcript "word start_s equals end_s" '{"segments":[{"start_s":0,"end_s":3,"text":"a","words":[{"start_s":1,"end_s":1,"text":"a"}]}]}'
+bad_transcript "word start_s after end_s" '{"segments":[{"start_s":0,"end_s":3,"text":"a","words":[{"start_s":2,"end_s":1,"text":"a"}]}]}'
 bad_transcript "word with empty text" '{"segments":[{"start_s":0,"end_s":3,"text":"a","words":[{"start_s":1,"end_s":2,"text":""}]}]}'
 bad_transcript "words not an array" '{"segments":[{"start_s":0,"end_s":3,"text":"a","words":{}}]}'
 bad_transcript "unsorted segments" '{"segments":[{"start_s":2,"end_s":3,"text":"b"},{"start_s":0,"end_s":1,"text":"a"}]}'
@@ -372,6 +372,10 @@ expect_eq "transcribe supplied invalid: relative path" true "$(tool_is_error tra
 expect_eq "transcribe supplied invalid: missing file" true "$(tool_is_error transcribe "$(supply "$MEDIA/nope.wav" "$TW")")"
 expect_eq "transcribe: a rejected transcript keeps the stored one" "Hello there General Kenobi" "$(tool_json transcribe "$(jq -nc --arg p "$AOP" '{path:$p}')" | jq -r '[.segments[].words[].text] | join(" ")')"
 expect_eq "transcribe: language english is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"english"}')")"
+expect_eq "transcribe: three-letter language fra is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"fra"}')")"
+expect_eq "transcribe: one-letter language is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"e"}')")"
+expect_eq "transcribe supplied: a zero-length word is accepted" word "$(tool_json transcribe "$(supply "$TMP/note.txt" '{"segments":[{"start_s":1,"end_s":2,"text":"a b","words":[{"start_s":1,"end_s":1,"text":"a"},{"start_s":1,"end_s":2,"text":"b"}]}]}')" | jq -r '.granularity')"
+bad_transcript "zero-length segment" '{"segments":[{"start_s":1,"end_s":1,"text":"a","words":[{"start_s":1,"end_s":1,"text":"a"}]}]}'
 expect_eq "transcribe: language EN is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"EN"}')")"
 expect_eq "transcribe: numeric language is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:5}')")"
 expect_eq "transcribe: wait_ms 20001 is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,wait_ms:20001}')")"
@@ -418,12 +422,22 @@ else
     expect_eq "transcribe jfk: span within the 11 s file" true "$(echo "$W" | jq -r '(.segments[0].start_s >= 0) and (.segments[-1].end_s <= 11.05)')"
     expect_eq "transcribe jfk: path source has no timeline_frames" 0 "$(echo "$W" | jq -r '[.segments[] | select(has("timeline_frames"))] | length')"
     expect_eq "transcribe jfk: \"country\" is near 5.7 s" true "$(echo "$W" | jq -r '[.segments[].words[] | select(.text | test("^country"))][0].start_s | (. - 5.74) | fabs < 0.5')"
+    expect_eq "transcribe jfk: punctuation does not stretch a word (Americans, ends near 2.11 s)" true "$(echo "$W" | jq -r '[.segments[].words[] | select(.text | test("^Americans"))][0].end_s | (. - 2.11) | fabs < 0.3')"
+    expect_eq "transcribe jfk: no word is longer than 2 s" true "$(echo "$W" | jq -r '[.segments[].words[] | .end_s - .start_s < 2] | all')"
+    expect_eq "transcribe jfk: the result round-trips as a supplied transcript" word "$(tool_json transcribe "$(jq -c --arg p "$TMP/note.txt" '{path:$p,transcript:{segments:.segments}}' <<<"$W")" | jq -r '.granularity')"
     expect_eq "transcribe jfk: first call is not cached" null "$(echo "$W" | jq -c '.cached // null')"
     expect_eq "transcribe jfk: second call is cached" true "$(tool_json transcribe "$JF" | jq -r '.cached')"
     sleep 0.5
     expect_eq "transcribe jfk: the temporary folder is removed" "$TD0" "$(tmp_dirs)"
     COUNTRY="$(echo "$W" | jq -r '[.segments[].words[] | select(.text | test("^country"))][0].start_s')"
 
+    ZZ="$(tool_json transcribe "$(jq -c '. + {language:"zz",wait_ms:20000}' <<<"$JF")" 2>/dev/null)"
+    [ -n "$ZZ" ] && ZZ="$(wait_job "$(echo "$ZZ" | jq -r '.job_id')" 60 | jq -r '.error')"
+    [ -n "$ZZ" ] || ZZ="$(tool_text transcribe "$(jq -c '. + {language:"zz",wait_ms:20000}' <<<"$JF")")"
+    expect_eq "transcribe language zz: the error has whisper-cli's message" true "$(echo "$ZZ" | grep -q "unknown language 'zz'" && echo true || echo false)"
+    ffmpeg -v error -nostdin -y -f lavfi -i anullsrc=r=16000:cl=mono -t 3 "$MEDIA/hush.wav"
+    HU="$(job_result transcribe "$(jq -nc --arg p "$MEDIA/hush.wav" '{path:$p,wait_ms:20000}')")"
+    expect_eq "transcribe silence: no segments, word granularity" "word 0" "$(echo "$HU" | jq -r '"\(.granularity) \(.segments | length)"')"
     expect_eq "transcribe noaudio: error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/noaudio.mp4" '{path:$p}')")"
     expect_eq "transcribe noaudio: message" "$MEDIA/noaudio.mp4 has no audio stream." "$(tool_text transcribe "$(jq -nc --arg p "$MEDIA/noaudio.mp4" '{path:$p}')")"
 
