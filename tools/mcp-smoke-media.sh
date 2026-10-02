@@ -1153,35 +1153,64 @@ expect_eq "remove_ranges across a leading gap: duration 190" 190 "$(tldur)"
 tool_json undo '{}' >/dev/null
 expect_eq "remove_ranges across a leading gap: one undo restores byte for byte" "$TG0" "$(tool_json get_timeline '{}')"
 
-# Work cap: 120 cuts (ranges after merging x tracks). 60 ranges of 2 frames on 2 tracks are
-# really applied; 61 are refused before any change.
+# Work cap: CAP cuts (ranges after merging x tracks), measured as the largest load with no corrupt
+# undo snapshot in 30 runs (Shotcut's snapshot/preview race; see docs/mcp-server.md). CAP/2 ranges
+# of 2 frames on 2 tracks are really applied; one more is refused before any change.
+CAP=120
+HALF=$((CAP / 2))
 tool_json open_project "{\"path\":\"$TMP/two-equal.mlt\",\"discard_changes\":true}" >/dev/null
 sleep 1
+tool_json seek '{"position":100}' >/dev/null
 TC0="$(tool_json get_timeline '{}')"
 SHOTCUT_PID=""
 for p in $(pgrep -f -- "--appdata ${MCP_APPDATA:-/nonexistent}"); do [ "$(cat /proc/$p/comm 2>/dev/null)" = shotcut ] && SHOTCUT_PID=$p; done
 rss_mb() { if [ -n "$SHOTCUT_PID" ]; then echo $(( $(ps -o rss= -p "$SHOTCUT_PID") / 1024 )); else echo "?"; fi; }
-R60="$(jq -nc '{tracks:[0,1],ranges:[range(60) | {start:(.*4), end:(.*4+2)}]}')"
-R61="$(jq -nc '{tracks:[0,1],ranges:[range(61) | {start:(.*4), end:(.*4+2)}]}')"
-expect_eq "remove_ranges: 61 ranges on 2 tracks is over the cap" true "$(rerr "$R61")"
-expect_eq "remove_ranges: the cap error tells how to chunk" true "$(tool_text timeline_remove_ranges "$R61" | grep -q 'END of the timeline' && echo true || echo false)"
-expect_eq "remove_ranges: 121 ranges on 1 track is over the cap" true "$(rerr "$(jq -nc '{tracks:[0],ranges:[range(121) | {start:(.*2), end:(.*2+1)}]}')")"
+RCAP="$(jq -nc --argjson n "$HALF" '{tracks:[0,1],ranges:[range($n) | {start:(.*4), end:(.*4+2)}]}')"
+ROVER="$(jq -nc --argjson n "$((HALF + 1))" '{tracks:[0,1],ranges:[range($n) | {start:(.*4), end:(.*4+2)}]}')"
+expect_eq "remove_ranges: $((HALF + 1)) ranges on 2 tracks is over the cap" true "$(rerr "$ROVER")"
+expect_eq "remove_ranges: the cap error tells how to chunk" true "$(tool_text timeline_remove_ranges "$ROVER" | grep -q "at most $HALF ranges per call, in chunks from the END" && echo true || echo false)"
+expect_eq "remove_ranges: $((CAP + 1)) ranges on 1 track is over the cap" true "$(rerr "$(jq -nc --argjson n "$((CAP + 1))" '{tracks:[0],ranges:[range($n) | {start:(.*2), end:(.*2+1)}]}')")"
 expect_eq "remove_ranges: over-cap requests changed nothing" "$TC0" "$(tool_json get_timeline '{}')"
 RSS0="$(rss_mb)"; T0="$(date +%s)"
-R="$(rr "$R60")"
+R="$(rr "$RCAP")"
 T1="$(date +%s)"; RSS1="$(rss_mb)"
-echo "INFO  remove_ranges 60 ranges x 2 tracks: $((T1 - T0)) s, RSS ${RSS0} -> ${RSS1} MB"
-expect_eq "remove_ranges at the cap: removed_frames" '{"0":120,"1":120}' "$(echo "$R" | jq -c '.removed_frames')"
-expect_eq "remove_ranges at the cap: 60 ranges applied" 60 "$(echo "$R" | jq '.ranges_applied | length')"
-expect_eq "remove_ranges at the cap: duration 130" 130 "$(tldur)"
-expect_eq "remove_ranges at the cap: both tracks keep 2-frame pieces from in 2, 6, ..." true "$(echo "$R" | jq '[.tracks[] | [.clips[] | select(.kind=="clip") | [.start,.duration,.in]]] | (.[0] == .[1]) and (.[0][0] == [0,2,2]) and (.[0][59] == [118,12,238])')"
+echo "INFO  remove_ranges $HALF ranges x 2 tracks: $((T1 - T0)) s, RSS ${RSS0} -> ${RSS1} MB"
+expect_eq "remove_ranges at the cap: removed_frames" "{\"0\":$CAP,\"1\":$CAP}" "$(echo "$R" | jq -c '.removed_frames')"
+expect_eq "remove_ranges at the cap: $HALF ranges applied" "$HALF" "$(echo "$R" | jq '.ranges_applied | length')"
+expect_eq "remove_ranges at the cap: duration $((250 - CAP))" "$((250 - CAP))" "$(tldur)"
+expect_eq "remove_ranges at the cap: both tracks keep 2-frame pieces from in 2, 6, ..." true "$(echo "$R" | jq --argjson n "$HALF" '[.tracks[] | [.clips[] | select(.kind=="clip") | [.start,.duration,.in]]] | (.[0] == .[1]) and (.[0][0] == [0,2,2]) and (.[0][$n - 1] == [2 * $n - 2, 252 - 4 * $n, 4 * $n - 2])')"
+ST="$(tool_json get_state '{}')"
+expect_eq "remove_ranges at the cap: playhead put back and still paused" "100 false" "$(echo "$ST" | jq -r '"\(.position) \(.playing)"')"
 expect_eq "remove_ranges at the cap: finishes within 60 s" true "$([ $((T1 - T0)) -lt 60 ] && echo true || echo false)"
 T0="$(date +%s)"
 tool_json undo '{}' >/dev/null
 T1="$(date +%s)"
-echo "INFO  remove_ranges undo of 60 ranges x 2 tracks: $((T1 - T0)) s, RSS $(rss_mb) MB"
+echo "INFO  remove_ranges undo of $HALF ranges x 2 tracks: $((T1 - T0)) s, RSS $(rss_mb) MB"
 expect_eq "remove_ranges at the cap: one undo restores" "$TC0" "$(tool_json get_timeline '{}')"
+expect_eq "remove_ranges at the cap: undo puts the playhead back" 100 "$(tool_json get_state '{}' | jq -r '.position')"
+expect_eq "remove_ranges at the cap: undo within 60 s" true "$([ $((T1 - T0)) -lt 60 ] && echo true || echo false)"
 expect_eq "remove_ranges: the user's ripple-all-tracks setting is unchanged" false "$(tool_json get_timeline '{}' | jq -r '.settings.ripple_all_tracks')"
+
+# The tool blocks preview refreshes while it edits; they must work again afterwards (after a
+# success, an undo/redo and an error), or get_frame would time out or show a stale picture.
+tool_json open_project "{\"path\":\"$EMPTY\",\"discard_changes\":true}" >/dev/null
+sleep 1
+tool_json timeline_insert_range "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":9,\"track\":0,\"position\":0}" >/dev/null
+gf_call '{"position":10}' "$TMP/rf0.jpg"
+expect_eq "refresh after remove_ranges: fixture frame 10 is red" R "$(rgb_class "$TMP/rf0.jpg" 100 100 110 70)"
+rr '{"tracks":[0],"ranges":[{"start":0,"end":75}]}' >/dev/null
+gf_call '{"position":10}' "$TMP/rf1.jpg"
+expect_eq "refresh after remove_ranges: frame 10 is now green" G "$(rgb_class "$TMP/rf1.jpg" 100 100 110 70)"
+tool_json undo '{}' >/dev/null
+gf_call '{"position":10}' "$TMP/rf2.jpg"
+expect_eq "refresh after undo: frame 10 is red again" R "$(rgb_class "$TMP/rf2.jpg" 100 100 110 70)"
+tool_json redo '{}' >/dev/null
+gf_call '{"position":10}' "$TMP/rf3.jpg"
+expect_eq "refresh after redo: frame 10 is green again" G "$(rgb_class "$TMP/rf3.jpg" 100 100 110 70)"
+expect_eq "refresh after an error: remove_ranges past the end is refused" true "$(rerr '{"tracks":[0],"ranges":[{"start":5000,"end":5001}]}')"
+tool_json undo '{}' >/dev/null
+gf_call '{"position":10}' "$TMP/rf4.jpg"
+expect_eq "refresh after an error: the next undo still shows a fresh frame (red)" R "$(rgb_class "$TMP/rf4.jpg" 100 100 110 70)"
 
 echo "== track and marker tools"
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[].name]')"

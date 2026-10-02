@@ -344,8 +344,12 @@ QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
     if (applied.empty())
         return textResult("No range lies inside the timeline.", true);
     // Every split and remove snapshots its whole track for undo and a split opens a new producer,
-    // so the cost grows faster than the number of cuts. Measured on a debug build: 120 cuts take
-    // about 12 s (and their undo about 30 s).
+    // so the cost grows faster than the number of cuts (debug build: 120 cuts take about 12 s).
+    // Shotcut can corrupt such a snapshot when the preview renders the clip meanwhile (an
+    // upstream race, docs/mcp-server.md). Measured on a debug build, call plus undo, redo and
+    // undo: with refreshes blocked only, corrupt snapshots in about 5% of runs at every cap from
+    // 20 to 120 cuts; with RefreshBlock (refreshes blocked and the preview fed a stand-in) none
+    // in 75 runs at 120 cuts.
     const int maxCuts = 120;
     if (int(applied.size()) * tracks.size() > maxCuts)
         return textResult(QStringLiteral("Too much work for one call: %1 ranges (after merging) on "
@@ -353,7 +357,9 @@ QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
                                          "most %4 ranges per call, in chunks from the END of the "
                                          "timeline to the start (ripple shifts later material), "
                                          "or re-read get_timeline between chunks. Each call is "
-                                         "one undo step. Nothing was changed.")
+                                         "one undo step; call save_project before many cuts (long "
+                                         "edits can corrupt Shotcut's undo history). Nothing was "
+                                         "changed.")
                               .arg(applied.size())
                               .arg(tracks.size())
                               .arg(maxCuts)
@@ -396,7 +402,7 @@ QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
     }
 
     RippleSettingsGuard guard;
-    MLT.pause();
+    RefreshBlock refreshBlock;
     QUndoStack *stack = MAIN.undoStack();
     stack->beginMacro(QObject::tr("Remove %n range(s)", nullptr, int(applied.size())));
     // Each listed track is cut by itself, so other tracks must not ripple.
@@ -569,7 +575,7 @@ QJsonObject trackRemoveTool(const QJsonObject &arguments)
     }
     const QString name = model.data(model.index(track), MultitrackModel::NameRole).toString();
     const int before = model.trackList().size();
-    MLT.pause();
+    RefreshBlock refreshBlock;
     QUndoStack *stack = MAIN.undoStack();
     stack->beginMacro(video ? QObject::tr("Remove video track")
                             : QObject::tr("Remove audio track"));
@@ -857,10 +863,11 @@ QList<McpTool> McpTools::structureTools()
          "the clips and leaves gaps of the same length (Shotcut drops a gap at the end of a "
          "track). Item indexes change; use the returned tracks. Locked tracks are refused. At "
          "most 120 cuts per call (ranges after merging times listed tracks, e.g. 60 ranges on 2 "
-         "tracks); for more, send chunks from the END of the timeline to the start (ripple "
-         "shifts later material) or re-read get_timeline between chunks; each call is one undo "
-         "step. Returns {tracks:[...] in the listed order, removed_frames:{\"<track>\": frames "
-         "of the applied ranges inside that track up to its last clip, gaps included (with "
+         "tracks): long edits can make Shotcut corrupt its undo history, so call save_project "
+         "before many cuts; for more, send chunks from the END of the timeline to the start "
+         "(ripple shifts later material) or re-read get_timeline between chunks; each call is "
+         "one undo step. Returns {tracks:[...] in the listed order, removed_frames:{\"<track>\": "
+         "frames of the applied ranges inside that track up to its last clip, gaps included (with "
          "ripple false also the frames of gaps that stay gaps)}, ranges_applied:[{start, end}], "
          "ripple:{all_tracks, markers}}.",
          schema(R"({"type":"object","properties":{

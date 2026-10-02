@@ -143,6 +143,43 @@ int lastFrame()
     return producer ? qMax(0, producer->get_playtime() - 1) : 0;
 }
 
+RefreshBlock::RefreshBlock()
+{
+    MLT.pause();
+    MLT.blockRefresh(true);
+    // Shotcut still seeks the player after every duration change (Player::onDurationChanged),
+    // which makes the preview fetch the frame under the playhead from the clips being edited.
+    // Feed the preview a black producer at the same position instead, so it renders no clip.
+    Mlt::Consumer *consumer = MLT.consumer();
+    if (MLT.isMultitrack() && consumer && consumer->is_valid() && !consumer->is_stopped()) {
+        const int position = MLT.producer()->position();
+        m_standIn = std::make_unique<Mlt::Producer>(MLT.profile(), "color:black");
+        if (m_standIn->is_valid()) {
+            m_standIn->set("length", position + 1000);
+            m_standIn->set_in_and_out(0, position + 999);
+            m_standIn->set_speed(0); // producers play at speed 1 by default
+            m_standIn->seek(position);
+            consumer->stop();
+            consumer->connect(*m_standIn);
+            consumer->start();
+        } else {
+            m_standIn.reset();
+        }
+    }
+}
+
+RefreshBlock::~RefreshBlock()
+{
+    MLT.blockRefresh(false);
+    Mlt::Consumer *consumer = MLT.consumer();
+    if (m_standIn && consumer && consumer->is_valid() && MLT.producer()) {
+        consumer->stop();
+        consumer->connect(*MLT.producer());
+        consumer->start();
+    }
+    MLT.refreshConsumer();
+}
+
 void movePlayhead(int position)
 {
     if (timeline())
@@ -421,7 +458,7 @@ int pushClipXml(const QString &mode,
         return -1;
     }
 
-    MLT.pause();
+    RefreshBlock refreshBlock;
     MAIN.undoStack()->beginMacro(undoText);
     if (create) {
         // The tracks timeline_add_playlist creates on an empty timeline (V1, plus A1 when

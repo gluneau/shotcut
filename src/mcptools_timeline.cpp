@@ -380,7 +380,8 @@ QJsonObject historyTool(bool undo)
     if (undo ? !stack->canUndo() : !stack->canRedo())
         return textResult(undo ? "There is nothing to undo." : "There is nothing to redo.", true);
     const QString text = undo ? stack->undoText() : stack->redoText();
-    MLT.pause();
+    // Undo/redo of a long macro (timeline_remove_ranges) runs all its commands at once.
+    RefreshBlock refreshBlock;
     if (undo)
         stack->undo();
     else

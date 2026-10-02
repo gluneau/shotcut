@@ -55,6 +55,26 @@ int lastFrame();
 // Moves the playhead the same way for a plain clip and for a timeline.
 void movePlayhead(int position);
 
+// While it lives: pauses playback, blocks the preview refresh Shotcut issues after every edit and
+// feeds the preview a black stand-in producer (at the same position) instead of the timeline;
+// when it goes out of scope (on every exit path) it reconnects the timeline and refreshes once.
+// Shotcut serializes clips for undo on the GUI thread while the preview thread may render them,
+// which rewrites their meta.media.* properties; that race can corrupt the undo snapshot so that
+// undo aborts (debug) or drops the clip (release). Blocking the refreshes alone is not enough,
+// because Shotcut also seeks the player after every duration change. Use it around every
+// multi-command edit and undo/redo. Not reentrant.
+class RefreshBlock
+{
+public:
+    RefreshBlock();
+    ~RefreshBlock();
+    RefreshBlock(const RefreshBlock &) = delete;
+    RefreshBlock &operator=(const RefreshBlock &) = delete;
+
+private:
+    std::unique_ptr<Mlt::Producer> m_standIn;
+};
+
 // Pauses, moves the playhead to `position` (a valid frame) and returns that frame as the player
 // displays it, taken only after refreshes issued by this call so it is never a stale picture.
 // A null image and `error` when there is no video widget or the frame is not ready in time.
