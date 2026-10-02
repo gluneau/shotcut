@@ -205,9 +205,10 @@ void AddCommand::redo()
 
 void AddCommand::undo()
 {
+    // m_attached is cleared only once the filter is detached: after a failed undo the next redo
+    // must be a no-op, not attach a second copy.
     if (!m_attached)
         return;
-    m_attached = false;
     Mlt::Producer producer = resolve(m_model, m_target);
     if (!producer.is_valid()) {
         LOG_ERROR() << text() << "target not found:" << describe(m_target);
@@ -224,6 +225,7 @@ void AddCommand::undo()
         LOG_ERROR() << text() << "could not detach the filter from" << describe(m_target);
         return;
     }
+    m_attached = false;
     notifyAddedOrRemoved(m_model, producer);
 }
 
@@ -313,22 +315,27 @@ void RemoveCommand::redo()
 
 void RemoveCommand::undo()
 {
+    // m_removed and m_filter are cleared only once the filter is back: after a failed undo the
+    // next redo is a no-op and the detached filter is still held.
     if (!m_removed || !m_filter.is_valid())
         return;
-    m_removed = false;
     Mlt::Producer producer = resolve(m_model, m_target);
     if (!producer.is_valid()) {
         LOG_ERROR() << text() << "target not found:" << describe(m_target);
         return;
     }
-    // Redo finds the filter by index again; no handle is kept while it is attached.
     const int attached = attachAt(producer, m_filter, m_userIndex);
-    m_filter = Mlt::Filter();
+    if (attached < 0) {
+        LOG_ERROR() << text() << "could not re-attach the filter to" << describe(m_target);
+        return;
+    }
     if (attached != m_userIndex)
         LOG_ERROR() << text() << "re-attached the filter to" << describe(m_target) << "at"
                     << attached << "not" << m_userIndex;
-    if (attached >= 0)
-        notifyAddedOrRemoved(m_model, producer);
+    // Redo finds the filter by index again; no handle is kept while it is attached.
+    m_filter = Mlt::Filter();
+    m_removed = false;
+    notifyAddedOrRemoved(m_model, producer);
 }
 
 } // namespace McpFilter

@@ -287,6 +287,16 @@ expect_eq "add + split: back to the start" "$S0" "$(state)"
 roundtrip "add + trim" "add '$GAIN6'" "tool_json timeline_trim '{\"track\":0,\"clip\":1,\"edge\":\"in\",\"delta\":10}'"
 undo_text >/dev/null; undo_text >/dev/null
 expect_eq "add + trim: back to the start" "$S0" "$(state)"
+roundtrip "remove + ripple remove" "tool_json filter_remove '{\"track\":0,\"clip\":0,\"index\":0}'" "tool_json timeline_remove '{\"track\":0,\"clip\":0,\"ripple\":true}'"
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "remove + ripple remove: the gain is back at index 0 with its properties" "$FA0" "$(fa 0 0)"
+expect_eq "remove + ripple remove: back to the start" "$S0" "$(state)"
+roundtrip "set + split" "tool_json filter_set '{\"track\":0,\"clip\":0,\"index\":0,\"params\":{\"level\":2}}'" "tool_json timeline_split '{\"track\":0,\"position\":50}'"
+expect_eq "set + split: after redo x2 both halves have gain 2" "2 2" "$(echo "$(fa 0 0 | jq '.filters[0].params.level') $(fa 0 1 | jq '.filters[0].params.level')")"
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "set + split: the value is restored" "$FA0" "$(fa 0 0)"
+expect_eq "set + split: back to the start" "$S0" "$(state)"
+
 
 echo "== fit rect on a clip whose shape differs from the video mode; keyframes"
 ffmpeg -loglevel error -y -f lavfi -i "testsrc=size=480x240:rate=25:duration=2" -pix_fmt yuv420p -c:v libx264 "$TMP/wide.mp4"

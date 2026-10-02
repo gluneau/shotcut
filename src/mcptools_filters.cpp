@@ -501,7 +501,8 @@ void setDefaults(const FilterSpec &spec, Mlt::Producer *clip, Mlt::Properties &p
             props.set(property.constData(), param.defText.toUtf8().constData());
             break;
         case FilterParam::Rect:
-            props.set(property.constData(), rectText(fitRect(clip, param.fit)).toUtf8().constData());
+            props.set(property.constData(),
+                      rectText(fitRect(clip, param.fit)).toUtf8().constData());
             break;
         default:
             props.set(property.constData(), num(param.def * param.scale).toUtf8().constData());
@@ -977,8 +978,9 @@ QList<McpTool> McpTools::filterTools()
         {"filter_add",
          "Add an allowlisted filter (see filter_list_available) to a timeline clip as ONE undo "
          "step, after its existing filters, in call order (Shotcut's panel puts video before "
-         "audio filters; they act on different streams, so the result is the same); the clip's parent producer gets it, as in Shotcut, "
-         "so it follows the clip when it is moved or trimmed. Missing params take Shotcut's "
+         "audio filters; they act on different streams, so the result is the same); the clip's "
+         "parent producer gets it, as in Shotcut, so it follows the clip when it is moved or "
+         "trimmed. Missing params take Shotcut's "
          "defaults; unknown names, wrong types and out-of-range values are errors. Refused: a "
          "locked track, a blank or transition, an audio filter on a clip with no audio, a "
          "picture filter on an audio-only clip or on an audio track, and a second filter of a "
