@@ -54,6 +54,8 @@ QList<McpTool> frameTools();
 QList<McpTool> timelineTools();
 QList<McpTool> exportTools();
 QList<McpTool> analysisTools();
+QList<McpTool> transcribeTools();
+QList<McpTool> overviewTools();
 QList<McpTool> structureTools();
 
 } // namespace McpTools

@@ -19,11 +19,49 @@
 #include "mcpjobs.h"
 #include "mcptoolsutil.h"
 
+#include <QJsonObject>
 #include <QString>
+#include <QStringList>
 
 #include <memory>
 
+// Helpers shared by the analysis tools (mcptools_analysis.cpp, mcptools_transcribe.cpp).
 namespace McpTools {
+
+// The part of a source to analyse in source seconds, and the ffmpeg input options selecting it.
+struct AudioRange
+{
+    double in = 0, out = 0;
+    QStringList seek;
+};
+
+// A number of seconds with 6 decimals, for ffmpeg arguments.
+QString seconds(double value);
+
+double round3(double value);
+
+// Starts the analyze_media probe (ffprobe at program) of path; its result is cached under
+// cacheKey. Null with an error when McpJobs refuses another running job.
+std::shared_ptr<McpJobs::Record> startProbe(const QString &path,
+                                            const QString &cacheKey,
+                                            const QString &program,
+                                            QString &error);
+
+// The probe of a source, from the cache or waited on for up to 10 s even when wait_ms is 0.
+bool probeInfo(const SourceRef &ref, QJsonObject &info, QString &error);
+
+// The range of a source with an audio (video) stream: a clip's trimmed range, else the file.
+bool audioRange(const SourceRef &ref, AudioRange &range, QString &error);
+bool videoRange(const SourceRef &ref, AudioRange &range, QString &error);
+
+// The part of a cache key that depends on the range and, for a clip, its place on the timeline.
+QString rangeParams(const SourceRef &ref, const AudioRange &range);
+
+// wait_ms: an integer from 0 to 20000, 0 when missing.
+bool readWaitMs(const QJsonObject &arguments, int &waitMs, QString &error);
+
+// The tool result of a job: its result or error when done within waitMs, else its status.
+QJsonObject jobResult(const std::shared_ptr<McpJobs::Record> &record, int waitMs);
 
 // Starts the loudness and level measurement of a source (the audio_levels tool): the result is
 // {path, in_s, out_s, integrated_lufs, loudness_range_lu, true_peak_dbtp,
