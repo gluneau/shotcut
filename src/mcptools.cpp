@@ -366,6 +366,7 @@ QList<McpTool> McpTools::all()
     tools += transcribeTools();
     tools += overviewTools();
     tools += structureTools();
+    tools += filterTools();
     return tools;
 }
 

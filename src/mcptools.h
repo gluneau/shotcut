@@ -57,6 +57,7 @@ QList<McpTool> analysisTools();
 QList<McpTool> transcribeTools();
 QList<McpTool> overviewTools();
 QList<McpTool> structureTools();
+QList<McpTool> filterTools();
 
 } // namespace McpTools
 

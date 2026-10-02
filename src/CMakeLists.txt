@@ -90,11 +90,14 @@ add_executable(shotcut WIN32 MACOSX_BUNDLE
   mainwindow.cpp mainwindow.h
   mainwindow.ui
   mcpanalysis.cpp mcpanalysis.h
+  mcpfiltercommands.cpp mcpfiltercommands.h
+  mcpfilters.h
   mcpjobs.cpp mcpjobs.h
   mcpserver.cpp mcpserver.h
   mcptools.cpp mcptools.h
   mcptools_analysis.cpp
   mcptools_export.cpp
+  mcptools_filters.cpp
   mcptools_frame.cpp
   mcptools_overview.cpp
   mcptools_structure.cpp
