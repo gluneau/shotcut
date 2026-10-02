@@ -33,24 +33,13 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 
 using namespace McpTools;
 
 namespace {
-
-// A finite number from arguments[key].
-FrameArg readSeconds(const QJsonObject &arguments, const char *key, double &value)
-{
-    const QJsonValue v = arguments.value(key);
-    if (v.isUndefined())
-        return FrameArg::Missing;
-    if (!v.isDouble() || !std::isfinite(v.toDouble()))
-        return FrameArg::Invalid;
-    value = v.toDouble();
-    return FrameArg::Ok;
-}
 
 QJsonObject timelineInsertRangeTool(const QJsonObject &arguments)
 {
@@ -64,9 +53,12 @@ QJsonObject timelineInsertRangeTool(const QJsonObject &arguments)
     const QString mode = modeValue.isUndefined() ? QStringLiteral("insert") : modeValue.toString();
     if (mode != "insert" && mode != "overwrite")
         return textResult("mode must be \"insert\" or \"overwrite\".", true);
+    // Any finite number here; the range is checked below with its own messages.
+    constexpr double kAny = std::numeric_limits<double>::max();
     double inS = 0, outS = 0;
-    const FrameArg inArg = readSeconds(arguments, "in_s", inS);
-    const FrameArg outArg = readSeconds(arguments, "out_s", outS);
+    QString error;
+    const FrameArg inArg = readNumberArg(arguments, "in_s", -kAny, kAny, inS, error);
+    const FrameArg outArg = readNumberArg(arguments, "out_s", -kAny, kAny, outS, error);
     if (inArg == FrameArg::Invalid || outArg == FrameArg::Invalid)
         return textResult("in_s and out_s must be numbers (seconds).", true);
     const bool hasPath = !arguments.value("path").isUndefined();
@@ -109,7 +101,6 @@ QJsonObject timelineInsertRangeTool(const QJsonObject &arguments)
     } else {
         path = arguments.value("path").toString();
     }
-    QString error;
     if (!checkMediaPath(path, error))
         return textResult(error, true);
     if (path.endsWith(".mlt", Qt::CaseInsensitive) || path.endsWith(".xml", Qt::CaseInsensitive))
@@ -431,14 +422,9 @@ QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
         }
     }
     stack->endMacro();
-    auto *macro = const_cast<QUndoCommand *>(stack->command(stack->index() - 1));
-    if (!ok || macro->childCount() == 0) {
-        // Roll the whole macro back and drop it from the stack (nothing to undo when it is
-        // empty). QUndoStack::undo() skips the undo() of an obsolete command, so the order
-        // matters.
-        macro->undo();
-        macro->setObsolete(true);
-        stack->undo();
+    if (!ok || stack->command(stack->index() - 1)->childCount() == 0) {
+        // Also drops an empty macro (nothing to undo then).
+        rollbackLastMacro(stack);
         if (!ok)
             return textResult("Shotcut did not remove a range; nothing was changed.", true);
     }
@@ -463,20 +449,6 @@ QJsonArray allTracksJson(MultitrackModel &model)
     for (int t = 0; t < model.trackList().size(); ++t)
         tracks.append(trackJson(model, t));
     return tracks;
-}
-
-// Ends the caller's macro. When ok is false the macro is rolled back and dropped from the stack
-// (QUndoStack::undo() skips the undo() of an obsolete command, so the order matters).
-bool finishMacro(QUndoStack *stack, bool ok)
-{
-    stack->endMacro();
-    if (!ok) {
-        auto *macro = const_cast<QUndoCommand *>(stack->command(stack->index() - 1));
-        macro->undo();
-        macro->setObsolete(true);
-        stack->undo();
-    }
-    return ok;
 }
 
 // A string of 1 to max characters (Unicode code points, so an emoji counts once) that is not only
@@ -621,12 +593,12 @@ QJsonObject trackSetTool(const QJsonObject &arguments)
             return textResult(QStringLiteral("%1 must be a boolean.").arg(key), true);
         flags[key] = v;
     }
-    const QJsonValue gainValue = arguments.value("gain_db");
-    const double gain = gainValue.toDouble();
-    if (!gainValue.isUndefined()
-        && (!gainValue.isDouble() || !std::isfinite(gain) || gain < -70 || gain > 24))
-        return textResult("gain_db must be a number from -70 to 24.", true);
-    if (name.isNull() && flags.isEmpty() && gainValue.isUndefined())
+    double gain = 0;
+    const FrameArg gainArg = readNumberArg(arguments, "gain_db", -70, 24, gain, error);
+    if (gainArg == FrameArg::Invalid)
+        return textResult(error, true);
+    const bool hasGain = gainArg == FrameArg::Ok;
+    if (name.isNull() && flags.isEmpty() && !hasGain)
         return textResult("Pass at least one of name, mute, lock, hide, composite, gain_db.", true);
     if (!MAIN.isMultitrackValid())
         return textResult("There is no timeline.", true);
@@ -645,14 +617,14 @@ QJsonObject trackSetTool(const QJsonObject &arguments)
                                          "below it to composite onto.")
                               .arg(track),
                           true);
-    if (!gainValue.isUndefined() && !model.data(index, MultitrackModel::GainEnabledRole).toBool())
+    if (hasGain && !model.data(index, MultitrackModel::GainEnabledRole).toBool())
         return textResult(QStringLiteral("Track %1's gain has keyframes; gain_db cannot set it.")
                               .arg(track),
                           true);
     const bool locked = model.data(index, MultitrackModel::IsLockedRole).toBool();
     const bool unlock = flags.contains("lock") && !flags.value("lock").toBool();
     if (locked && !unlock
-        && (!name.isNull() || flags.size() > flags.contains("lock") || !gainValue.isUndefined()))
+        && (!name.isNull() || flags.size() > flags.contains("lock") || hasGain))
         return textResult(QStringLiteral("Track %1 is locked; only lock:false is allowed (it may "
                                          "be combined with other properties, which are applied "
                                          "after unlocking).")
@@ -686,8 +658,7 @@ QJsonObject trackSetTool(const QJsonObject &arguments)
                                return new Timeline::CompositeTrackCommand(
                                    model, track, flags.value("composite").toBool());
                            }});
-    if (!gainValue.isUndefined()
-        && std::abs(gain - model.data(index, MultitrackModel::GainRole).toDouble()) > 1e-9)
+    if (hasGain && std::abs(gain - model.data(index, MultitrackModel::GainRole).toDouble()) > 1e-9)
         changes.push_back({"gain_db", [&] {
                                return new Timeline::ChangeTrackGainCommand(model, track, gain);
                            }});
@@ -720,7 +691,7 @@ QJsonObject trackSetTool(const QJsonObject &arguments)
               && (!flags.contains("lock")
                   || model.data(index, MultitrackModel::IsLockedRole).toBool()
                          == flags.value("lock").toBool())
-              && (gainValue.isUndefined()
+              && (!hasGain
                   || std::abs(model.data(index, MultitrackModel::GainRole).toDouble() - gain)
                          < 1e-6);
         if (!finishMacro(stack, ok))
@@ -835,7 +806,9 @@ QList<McpTool> McpTools::structureTools()
          "clip; inserting exactly at its end puts the new clip between the transition and the "
          "next clip. Item indexes after the new clip shift; the returned track shows them. Track 0 "
          "is the TOPMOST video track; any media may go on video or audio tracks, as in Shotcut. "
-         "With no timeline, track must be 0 and a video track is created. With nothing loaded "
+         "With no timeline, track must be 0 and a video track is created (plus an audio track A1 "
+         "when Shotcut's auto-add-tracks setting is on, as timeline_add_playlist does). With "
+         "nothing loaded "
          "the file is first opened as playlist_add does (the project then follows its format, "
          "even when the range is then refused); the insert itself never moves the playhead. "
          "Locked tracks, still images, generators and project files are refused. Returns {track, "

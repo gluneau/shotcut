@@ -24,6 +24,7 @@
 #include <memory>
 
 class MultitrackModel;
+class QUndoStack;
 
 namespace Mlt {
 class ClipInfo;
@@ -45,6 +46,15 @@ enum class FrameArg { Missing, Ok, Invalid };
 
 // Reads a non-negative integer from arguments[key]; also used for track and clip indexes.
 FrameArg readFrame(const QJsonObject &arguments, const char *key, int &value);
+
+// Reads a finite number from min to max from arguments[key]; value is left alone when it is
+// missing. Invalid sets error to "<key> must be a number from <min> to <max>.".
+FrameArg readNumberArg(const QJsonObject &arguments,
+                       const char *key,
+                       double min,
+                       double max,
+                       double &value,
+                       QString &error);
 
 // The multitrack when a timeline is open, otherwise null.
 Mlt::Producer *timeline();
@@ -128,7 +138,8 @@ bool validTargetTrack(int track, QString &error);
 // Pushes the single clip in xml (with its in and out) onto track at the absolute timeline frame
 // position as ONE undo step named undoText, without moving the playhead or using the clipboard or
 // the Source player. mode "insert" ripples per Shotcut's ripple settings; "overwrite" never
-// ripples. With no timeline the first video track is created in the same step. Refuses a position
+// ripples. With no timeline the first video track (and A1 when Shotcut's auto-add-tracks setting
+// is on) is created in the same step. Refuses a position
 // inside a transition (or an overwrite covering part of one) and a position more than one hour
 // after the end of the track. Returns the new clip's index on the track, or -1 with a message;
 // a push that did not produce the clip is rolled back and dropped from the undo stack.
@@ -138,6 +149,13 @@ int pushClipXml(const QString &mode,
                 const QString &xml,
                 const QString &undoText,
                 QString &error);
+
+// Undoes the command on top of the stack (usually a macro the caller just ended) and drops it,
+// so it is neither applied nor left on the redo stack.
+void rollbackLastMacro(QUndoStack *stack);
+
+// Ends the caller's macro; when ok is false the macro is rolled back and dropped. Returns ok.
+bool finishMacro(QUndoStack *stack, bool ok);
 
 // "clip", "blank" or "transition".
 QString kindOf(MultitrackModel &model, int track, int clip);

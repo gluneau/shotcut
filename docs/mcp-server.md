@@ -198,7 +198,8 @@ returns `{job_id, state}` at once. Poll it with `get_job {job_id}`, which return
 state, percent?, result?, error?, elapsed_ms}`; `state` is `running`, `succeeded`, `failed` or
 `cancelled`, `result` is present once it succeeded and `error` (with the end of the program's
 output) once it failed. An identical call while the first still runs returns the same job. Jobs
-live in memory (the newest 200) until Shotcut quits, also after the project is closed. A job is
+live in memory until Shotcut quits, also after the project is closed; beyond 200 jobs the
+oldest FINISHED ones are dropped (running jobs are never dropped, and at most 4 run). A job is
 killed after 600 s (`transcribe`: 600 s plus the length of the audio, at most 4 h).
 `analyze_media` always waits up to 5 s. The other analysis tools probe the source with ffprobe
 first (the same probe as `analyze_media`, cached per file), so the first call on a file may take
@@ -276,11 +277,12 @@ the analysed range is dropped. Audio without speech gives `segments: []`.
 Bring your own transcript instead: `transcribe {path, transcript}` (nothing else) stores
 `transcript` = `{segments:[{start_s, end_s, text, words?}]}` for that file: 1 to 5000 segments
 sorted by `start_s`, `0 <= start_s < end_s <= 86400`, non-empty text of at most 2000
-characters, words (at most 2000 per segment) inside their segment and in order. It is returned
-with `"supplied": true` by later `transcribe {path}` calls and wins over Whisper results. A track
-and clip call always runs Whisper. Supplied transcripts are never evicted, but at most 200 files
-may hold one: storing for a 201st file is an error, replacing the transcript of a file that has
-one is allowed. The last 50 Whisper results are also kept per file for later tools.
+characters (Unicode code points, so an emoji counts once), words (at most 2000 per segment)
+inside their segment and in order. It is returned with `"supplied": true` by later `transcribe
+{path}` calls and wins over Whisper results. A track and clip call always runs Whisper. Supplied
+transcripts are never evicted, but at most 200 files may hold one: storing for a 201st file is an
+error, replacing the transcript of a file that has one is allowed. The last 50 Whisper results
+are also kept per file for later tools.
 
 ### Structure tools
 
@@ -291,7 +293,9 @@ one is allowed. The last 50 Whisper results are also kept per file for later too
   `mode` `insert` (default) splits a clip at `position` and pushes later items right; whether
   other tracks and markers also move follows Shotcut's own ripple settings, reported in
   `ripple` and in `get_timeline`'s `settings`. `overwrite` replaces what is under the range and
-  never ripples. With no timeline, `track` must be 0 and a video track is created. Refused:
+  never ripples. With no timeline, `track` must be 0 and the first video track is created, plus
+  an audio track A1 when Shotcut's Timeline > Automatically Add Tracks setting is on, as
+  `timeline_add_playlist` does; both are part of the same undo step. Refused:
   locked tracks, still images, generators, project files, a range beyond the file or shorter
   than one frame, a position more than one hour after the end of the track, a position inside a
   transition and an overwrite covering part of one. Inserting exactly at a transition's start

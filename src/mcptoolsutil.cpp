@@ -129,6 +129,24 @@ FrameArg readFrame(const QJsonObject &arguments, const char *key, int &value)
     return FrameArg::Ok;
 }
 
+FrameArg readNumberArg(const QJsonObject &arguments,
+                       const char *key,
+                       double min,
+                       double max,
+                       double &value,
+                       QString &error)
+{
+    const QJsonValue v = arguments.value(key);
+    if (v.isUndefined())
+        return FrameArg::Missing;
+    if (!v.isDouble() || !std::isfinite(v.toDouble()) || v.toDouble() < min || v.toDouble() > max) {
+        error = QStringLiteral("%1 must be a number from %2 to %3.").arg(key).arg(min).arg(max);
+        return FrameArg::Invalid;
+    }
+    value = v.toDouble();
+    return FrameArg::Ok;
+}
+
 // The multitrack when a timeline is open, otherwise null.
 Mlt::Producer *timeline()
 {
@@ -500,17 +518,30 @@ int pushClipXml(const QString &mode,
                                               ? model.getClipInfo(track, index)
                                               : nullptr;
     if (!info || info->frame_count != duration) {
-        // Roll the whole macro back (a created track too) and drop it from the stack.
-        // QUndoStack::undo() skips the undo() of an obsolete command, so the order matters.
-        QUndoStack *stack = MAIN.undoStack();
-        auto *macro = const_cast<QUndoCommand *>(stack->command(stack->index() - 1));
-        macro->undo();
-        macro->setObsolete(true);
-        stack->undo();
+        rollbackLastMacro(MAIN.undoStack()); // a created track too
         error = QStringLiteral("Shotcut did not insert the clip; nothing was changed.");
         return -1;
     }
     return index;
+}
+
+void rollbackLastMacro(QUndoStack *stack)
+{
+    // Qt 6.10 QUndoStack::undo() calls undo() only on a command that is not obsolete, then deletes
+    // the command if it is obsolete. So undo it by hand first, then mark it obsolete so that
+    // stack->undo() only removes it (marking it first would leave its changes applied).
+    auto *command = const_cast<QUndoCommand *>(stack->command(stack->index() - 1));
+    command->undo();
+    command->setObsolete(true);
+    stack->undo();
+}
+
+bool finishMacro(QUndoStack *stack, bool ok)
+{
+    stack->endMacro();
+    if (!ok)
+        rollbackLastMacro(stack);
+    return ok;
 }
 
 QString clipSourcePath(Mlt::ClipInfo &info)
@@ -533,17 +564,10 @@ bool resolveSource(const QJsonObject &arguments, SourceRef &ref, QString &error)
         return false;
     }
     if (!pathValue.isUndefined()) {
+        // A non-string path reads as empty, which checkMediaPath refuses.
         const QString path = pathValue.toString();
-        if (!pathValue.isString() || path.isEmpty() || isResourcePath(path)
-            || !QDir::isAbsolutePath(path)) {
-            error = QStringLiteral("path must be an absolute file path.");
+        if (!checkMediaPath(path, error))
             return false;
-        }
-        const QFileInfo info(path);
-        if (!info.exists() || !info.isFile()) {
-            error = "No such file: " + path;
-            return false;
-        }
         ref = SourceRef();
         ref.path = path;
         return true;

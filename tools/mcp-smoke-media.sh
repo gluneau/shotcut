@@ -11,6 +11,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+: > "$TMP/start"
 
 fresh_guard
 
@@ -411,6 +412,13 @@ bad_transcript "empty text" '{"segments":[{"start_s":0,"end_s":1,"text":""}]}'
 bad_transcript "blank text" '{"segments":[{"start_s":0,"end_s":1,"text":"   "}]}'
 bad_transcript "missing text" '{"segments":[{"start_s":0,"end_s":1}]}'
 bad_transcript "text over 2000 chars" "$(jq -nc '{segments:[{start_s:0,end_s:1,text:("a" * 2001)}]}')"
+# The cap counts Unicode code points: an emoji (two UTF-16 units) counts once.
+emoji_text() { jq -nc --arg t "$1" '{segments:[{start_s:0,end_s:1,text:$t}]}'; }
+E2000="$(printf '😀%.0s' $(seq 1 2000))"
+expect_eq "transcribe supplied: 2000 emoji (4000 UTF-16 units) accepted" 2000 "$(tool_json transcribe "$(supply "$TMP/note.txt" "$(emoji_text "$E2000")")" | jq -r '.segments[0].text | length')"
+expect_eq "transcribe supplied: 1999 letters and an emoji accepted" false "$(tool_is_error transcribe "$(supply "$TMP/note.txt" "$(emoji_text "$(printf 'a%.0s' $(seq 1 1999))😀")")")"
+bad_transcript "2000 letters and an emoji" "$(emoji_text "$(printf 'a%.0s' $(seq 1 2000))😀")"
+bad_transcript "2001 emoji" "$(emoji_text "${E2000}😀")"
 bad_transcript "word before the segment" '{"segments":[{"start_s":1,"end_s":2,"text":"a","words":[{"start_s":0.5,"end_s":1.5,"text":"a"}]}]}'
 bad_transcript "word after the segment" '{"segments":[{"start_s":1,"end_s":2,"text":"a","words":[{"start_s":1.5,"end_s":2.5,"text":"a"}]}]}'
 bad_transcript "words decreasing" '{"segments":[{"start_s":0,"end_s":3,"text":"a b","words":[{"start_s":1,"end_s":2,"text":"a"},{"start_s":0.5,"end_s":1,"text":"b"}]}]}'
@@ -466,7 +474,17 @@ echo "== transcribe: Whisper"
 TONE="$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p}')"
 # A job id from a new, uncached detect_silence call (to prove that no job was created in between).
 new_job_id() { tool_json detect_silence "$(jq -c ". + {noise_db:$1}" <<<"$SIL")" | jq -r '.job_id'; }
-tmp_dirs() { ls -d "${TMPDIR:-/tmp}"/shotcut-transcribe-* 2>/dev/null | wc -l; }
+# transcribe's temporary folders made since this script started. Shotcut makes them in its own
+# TMPDIR, assumed to be ours (the controller harness gives each instance its own); another Shotcut
+# transcribing in the same folder could still change the count.
+tmp_dirs() { find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'shotcut-transcribe-*' -newer "$TMP/start" 2>/dev/null | wc -l; }
+# wait_tmp_dirs WANT: polls up to 5 s (the job lets go of its folder just after it ends) until
+# tmp_dirs is WANT; prints the last count.
+wait_tmp_dirs() {
+  local n=""
+  for _ in $(seq 1 25); do n="$(tmp_dirs)"; [ "$n" = "$1" ] && break; sleep 0.2; done
+  echo "$n"
+}
 TD0="$(tmp_dirs)"
 J1="$(new_job_id -41)"
 NC="$(tool_text transcribe "$TONE")"
@@ -522,8 +540,7 @@ else
     TJ="$(tool_json transcribe "$(jq -c '. + {language:"en"}' <<<"$JF")" | jq -r '.job_id // empty')"
     expect_eq "transcribe cap: a second transcription is refused while one runs" "A transcription is already running; wait for it with get_job." "$(tool_text transcribe "$(jq -c '. + {language:"fr"}' <<<"$TONE")")"
     expect_eq "transcribe cap: the running one succeeds" succeeded "$(wait_job "${TJ:-0}" 120 | jq -r '.state')"
-    sleep 0.5
-    expect_eq "transcribe jfk: the temporary folder is removed" "$TD0" "$(tmp_dirs)"
+    expect_eq "transcribe jfk: the temporary folder is removed" "$TD0" "$(wait_tmp_dirs "$TD0")"
     COUNTRY="$(echo "$W" | jq -r '[.segments[].words[] | select(.text | test("^country"))][0].start_s')"
 
     ZZ="$(tool_json transcribe "$(jq -c '. + {language:"zz",wait_ms:20000}' <<<"$JF")" 2>/dev/null)"
@@ -559,8 +576,7 @@ else
     expect_eq "transcribe trimmed clip: every segment and word has timeline_frames" true "$(echo "$WT" | jq -r '[.segments[] | has("timeline_frames"), (.words[] | has("timeline_frames"))] | all')"
     expect_eq "transcribe trimmed clip: word timeline frames = clip start + (start_s - 2) * 25" true "$(echo "$WT" | jq -r "[.segments[].words[] | select(.timeline_frames | length > 0) | (.timeline_frames[0].start - ($J0 + (.start_s * 25 | round) - 50)) | fabs <= 1] | (length > 10) and all")"
     expect_eq "transcribe trimmed clip: segment timeline frames start at the clip" true "$(echo "$WT" | jq -r "(.segments[0].timeline_frames[0].start - ($J0 + (.segments[0].start_s * 25 | round) - 50)) | fabs <= 1")"
-    sleep 0.5
-    expect_eq "transcribe trimmed clip: the temporary folder is removed" "$TD0" "$(tmp_dirs)"
+    expect_eq "transcribe trimmed clip: the temporary folder is removed" "$TD0" "$(wait_tmp_dirs "$TD0")"
 
     LOCKED3="$TMP/locked3.mlt"
     tool_json save_project "{\"path\":\"$LOCKED3\"}" >/dev/null

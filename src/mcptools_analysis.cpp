@@ -282,24 +282,6 @@ QString rangeParams(const SourceRef &ref, const AudioRange &range)
     return params;
 }
 
-bool readNumber(const QJsonObject &arguments,
-                const char *key,
-                double min,
-                double max,
-                double &value,
-                QString &error)
-{
-    const QJsonValue v = arguments.value(key);
-    if (v.isUndefined())
-        return true;
-    if (!v.isDouble() || !std::isfinite(v.toDouble()) || v.toDouble() < min || v.toDouble() > max) {
-        error = QStringLiteral("%1 must be a number from %2 to %3.").arg(key).arg(min).arg(max);
-        return false;
-    }
-    value = v.toDouble();
-    return true;
-}
-
 bool readWaitMs(const QJsonObject &arguments, int &waitMs, QString &error)
 {
     waitMs = 0;
@@ -401,8 +383,8 @@ QJsonObject detectSilenceTool(const QJsonObject &arguments)
     double noise = -35;
     double minimum = 0.4;
     int waitMs = 0;
-    if (!readNumber(arguments, "noise_db", -90, -10, noise, error)
-        || !readNumber(arguments, "min_s", 0.05, 30, minimum, error)
+    if (readNumberArg(arguments, "noise_db", -90, -10, noise, error) == FrameArg::Invalid
+        || readNumberArg(arguments, "min_s", 0.05, 30, minimum, error) == FrameArg::Invalid
         || !readWaitMs(arguments, waitMs, error)) {
         return textResult(error, true);
     }
@@ -494,7 +476,7 @@ QJsonObject detectScenesTool(const QJsonObject &arguments)
     QString error;
     double threshold = 0.3;
     int waitMs = 0;
-    if (!readNumber(arguments, "threshold", 0.05, 0.9, threshold, error)
+    if (readNumberArg(arguments, "threshold", 0.05, 0.9, threshold, error) == FrameArg::Invalid
         || !readWaitMs(arguments, waitMs, error)) {
         return textResult(error, true);
     }
@@ -686,8 +668,9 @@ bool readTimedText(const QJsonValue &value,
                     .arg(kMaxTranscriptSeconds);
         return false;
     }
+    // Characters are Unicode code points, as for track names and marker texts.
     text = t.toString().trimmed();
-    if (!t.isString() || text.isEmpty() || t.toString().size() > kMaxTextChars) {
+    if (!t.isString() || text.isEmpty() || t.toString().toUcs4().size() > kMaxTextChars) {
         error = QStringLiteral("%1 needs a non-empty text of at most %2 characters.")
                     .arg(where)
                     .arg(kMaxTextChars);
@@ -1394,7 +1377,8 @@ QList<McpTool> McpTools::analysisTools()
          "state (running, succeeded, failed, cancelled), percent (when known), result (once "
          "succeeded), error (once failed), elapsed_ms}. elapsed_ms is the run time so far, or "
          "the total once finished. Jobs are kept in memory until Shotcut quits, also after the "
-         "project is closed; they are not files on disk. At most 4 jobs run at once (one "
+         "project is closed (beyond 200 jobs the oldest finished ones are dropped); they are not "
+         "files on disk. At most 4 jobs run at once (one "
          "transcribe): starting another is an error until one has finished.",
          schema(R"({"type":"object","properties":{
              "job_id":{"type":"integer","minimum":0}
@@ -1506,7 +1490,8 @@ QList<McpTool> McpTools::analysisTools()
          "error has the program's own message. Bring your own transcript instead: pass path and "
          "transcript (and nothing else) with transcript {segments:[{start_s, end_s, text, "
          "words?}]}: 1 to 5000 segments sorted by start_s, 0 <= start_s < end_s <= 86400 (words "
-         "start_s <= end_s), text non-empty (at most 2000 characters), words inside their "
+         "start_s <= end_s), text non-empty (at most 2000 characters, counted as Unicode code "
+         "points), words inside their "
          "segment and in order. It is kept in memory for that file until Shotcut quits (for at "
          "most 200 files: another file is then refused, replacing one is allowed), with "
          "\"supplied\": true and granularity \"word\" when every segment has words, else "
