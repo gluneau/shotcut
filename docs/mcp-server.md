@@ -498,6 +498,103 @@ MLT service) and empty `params`; `filter_set` refuses them, `filter_remove` remo
   panel state (the selected filter) may reset when a tool adds or removes a filter of the clip it
   shows.
 
+### Audio recipes
+
+Four plain-language audio tools (47 tools in all) built on the filter engine and Shotcut's own
+timeline commands:
+
+| Tool | What it does | Key arguments |
+|------|--------------|---------------|
+| `clip_set_volume` | Sets a clip's volume with one `gain` filter | `track`, `clip`, `gain_db` |
+| `clip_normalize` | Measures a clip's loudness and sets its volume to reach a target | `track`, `clip`, `target_lufs?`, `wait_ms?` |
+| `track_set_ducking` | Shotcut's automatic track audio ducking | `track`, `threshold_db?`, `reduction_db?`, `fade_in_ms?`, `fade_out_ms?`, `enabled?` |
+| `clip_detach_audio` | Shotcut's Detach Audio | `track`, `clip` |
+
+`clip_set_volume`: `gain_db` -70 to 24. It changes the clip's first enabled `gain` filter (an
+`audioGain` volume filter; Shotcut's fade-in, fade-out and mute filters use the same MLT service
+but are never touched) or adds one; `gain_db: 0` removes it, so a volume never stacks. One undo
+step, `Set clip volume to <n> dB` or `Reset clip volume to 0 dB`. A call that would change nothing
+(the same value again, or 0 on a clip without a gain filter) pushes no undo step and returns
+`changed: false`. Result `{track, gain_db, changed, index?}`, `index` being the gain filter's
+`filter_list_applied` index while one exists. Refused: a locked track, a blank or transition, a
+clip without audio, a gain filter with keyframes.
+
+`clip_normalize`: `target_lufs` -30 to -6 (default -16), `wait_ms` 0 to 20000 (default 0). It
+measures the clip's source range with the `audio_levels` code (EBU R128 integrated loudness of the
+clip's own audio, before any filter; the measurement is cached and shared with `audio_levels` of
+the same clip) and sets the clip's volume to `target - measured`, rounded to 0.01 dB and clamped
+to -70..24, with `clip_set_volume`'s logic and the undo text `Normalize to <t> LUFS`.
+
+- When the measurement is done within `wait_ms` (or cached) the call returns `{measured_lufs,
+  applied_gain_db, target_lufs, changed, track, index?}` and the edit is already made.
+- Otherwise it returns `{job_id, state: "running", measure_job_id}` at once (`measure_job_id` is
+  the `audio_levels` job). The gain is then applied AUTOMATICALLY when the measurement ends:
+  `get_job(job_id)` shows `succeeded` with the same result object, or `failed` with the reason,
+  and the change is an ordinary undo step made at that moment (it lands on top of whatever the
+  user or other tools did meanwhile). The application waits until no tool call is running and
+  no modal dialog or popup menu is open (`McpTools::runWhenIdle`, checked every 100 ms), so it
+  never interleaves with another tool's undo macro or runs inside a waiting call's event loop.
+- Before editing, the call checks that the same project and timeline are open (a timeline that
+  was closed, reopened or replaced fails with "The project was closed or replaced while
+  measuring") and that the clip at `(track, clip)` still has the same start, in, out and source
+  file ("The clip changed while measuring"). Edits elsewhere on the timeline do not matter. In
+  both failure cases nothing is edited.
+- Refused: a locked track (also when it is locked by the time the measurement ends), a blank or
+  transition, a clip without audio, a clip with a speed change (its source range is not
+  measured correctly), and a silent source: `audio_levels` reports -70 LUFS for silence, and a
+  measurement at or below -70 LUFS is an error.
+- Not taken into account: fades, the track's gain, other filters, and Shotcut's own loudness
+  normalization filters. The smoke test exports a normalized 10 s clip of the gated tone fixture
+  (440 Hz with silent gaps; ebur128 gates the silence out of both measurements) and measures the
+  export: -16.1 LUFS for a -16 target (measured -24.2 LUFS, gain 8.2 dB).
+
+`track_set_ducking`: makes a track (usually music) dip while the tracks above it are louder than
+the threshold, through the track's audio `mix` transition, with Shotcut's
+`ChangeDuckThresholdCommand` and `ChangeTransitionPropertyCommand` (`duck_attenuation`,
+`duck_fade_in`, `duck_fade_out`) in ONE undo step (`Set track <n> audio ducking`, or `Disable
+track <n> audio ducking` with `enabled: false`). Defaults and ranges are those of Shotcut's
+Properties panel: `threshold_db` -70..0 (-12), `reduction_db` -70..0 (-12), `fade_in_ms` and
+`fade_out_ms` 0..5000 (1500 and 250). Result `{track, ducking:{enabled, threshold_db,
+reduction_db, fade_in_ms, fade_out_ms, duck_threshold}}`, `duck_threshold` read back from the
+transition (0 when disabled). Refused: track 0 (the top track, as in Shotcut), a locked track, a
+track without an audio mix transition ("Track <n> has no audio mix transition."), and an MLT
+older than 7.41. MLT's mix transition gained ducking in 7.41 and Shotcut shows the controls only
+when built against it; THIS build uses MLT 7.36.1, where the tool returns "Audio ducking needs MLT
+7.41 or newer (this is 7.36.1)." and changes nothing, so the editing path is untested here. The
+check is made at run time (`mlt_version_get_int()`), after the track checks. Shotcut's ducking
+commands look the transition up in the player's producer, so the tool switches the player to the
+timeline when it shows a source clip.
+
+`clip_detach_audio`: Shotcut's Detach Audio (`TimelineDock::detachAudio`, no dialog, explicit
+indexes) as ONE undo step `Detach audio`: the video clip keeps its place with its audio switched
+off and its audio filters removed; an audio-only copy of the same range, with the audio filters,
+goes to the first audio track that is blank over the whole range, else to a new audio track added
+at the bottom (a new, empty audio track does not count: Shotcut keeps a one-frame blank on it).
+Result `{tracks, audio_track}`: every track as `get_timeline` reports it (re-read indexes) and the
+track that got the audio. Refused: an audio track, a locked track, a locked target audio track
+(Shotcut itself does not check locks here), a blank or transition, a clip without audio (also a
+clip whose audio was already detached). Speed-changed clips work. Shotcut selects the video clip
+afterwards.
+
+### Known limits and residual risks (audio recipes)
+
+- `clip_normalize` measures the clip's source, not the mix: track gain, fades, ducking and other
+  filters are ignored. The gain is computed once: trimming the clip later does not update it.
+- A background `clip_normalize` application runs from the GUI event loop when no tool call is
+  running; a Shotcut operation that spins its own event loop without a modal dialog could, in
+  principle, see the edit land in the middle of it (none is known).
+- The timeline identity check counts timeline creations and closings, so a project reopened under
+  the same name is detected; the clip check compares start, in, out and source path, so replacing
+  the clip with another trim of the same file at the same place would be taken for the same clip.
+- `track_set_ducking` is untested end to end (MLT 7.36.1 here). Shotcut's
+  `ChangeDuckThresholdCommand::undo` reads the enabled flag after its own redo set it, so an undo
+  leaves `shotcut:duck_enabled` and `shotcut:duck_threshold` on the transition (the effective
+  `duck_threshold` is restored); `ChangeTransitionPropertyCommand::undo` writes 0 for a property
+  that was not set before. Both are upstream behaviour.
+- `clip_detach_audio` uses Shotcut's command, whose undo snapshots are subject to the upstream
+  snapshot race described in stage 3A; the tool wraps it in the same preview guard as the other
+  structural edits.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -578,7 +675,10 @@ Stage 3B has its own script, also needing a FRESH throwaway Shotcut:
 
 It needs bash, curl, jq and ffmpeg. It builds a timeline from the generated fixtures, adds,
 changes and removes filters with their undo and redo, saves and reopens a copy of the project,
-and checks the refusals.
+and checks the refusals. The audio recipe checks export a normalized clip (`x264-medium`, needs
+`melt-7` as for stage 2) and run two background `clip_normalize` jobs on a generated 2400 s file
+(about 7 s each on a debug build); if a measurement ends before the script can change the clip,
+that check prints SKIP.
 
 Manual checks (they need a modified project, which the tools cannot create):
 
