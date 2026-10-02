@@ -30,7 +30,8 @@ namespace McpTools {
 //  buckets:[{start_s, end_s, rms_db, peak_db}]} with source-time seconds. A cached result comes
 // back as an already finished record with id 0 and "cached": true; otherwise the record is the
 // running job. Returns null with an error for a source without audio, longer than 7200 s,
-// without a known duration, or when ffmpeg or ffprobe is missing. buckets is 1..600.
+// without a known duration, when ffmpeg or ffprobe is missing, or when McpJobs refuses another
+// running job. buckets is 1..600.
 std::shared_ptr<McpJobs::Record> startAudioLevels(const SourceRef &ref,
                                                   int buckets,
                                                   QString &error);

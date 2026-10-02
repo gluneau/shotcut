@@ -33,6 +33,9 @@ namespace {
 
 constexpr qsizetype kStreamCap = 8 * 1024 * 1024;
 constexpr size_t kMaxRecords = 200;
+// Each job is an ffmpeg, ffprobe or Whisper process; Whisper alone uses all cores.
+constexpr int kMaxRunning = 4;
+constexpr int kMaxRunningTranscribe = 1;
 constexpr int kMaxCached = 200;
 constexpr int kMaxWaitMs = 20000;
 
@@ -217,6 +220,7 @@ std::shared_ptr<Record> run(const QString &kind,
                             const QString &key,
                             const QList<Step> &steps,
                             Parser parse,
+                            QString &error,
                             const QString &cacheKey,
                             int timeoutMs)
 {
@@ -226,6 +230,21 @@ std::shared_ptr<Record> run(const QString &kind,
             if (!record->done && record->kind == kind && record->key == key)
                 return record;
         }
+    }
+    int running = 0, transcribing = 0;
+    for (const auto &record : list) {
+        if (!record->done) {
+            ++running;
+            transcribing += record->kind == "transcribe";
+        }
+    }
+    if (running >= kMaxRunning) {
+        error = QStringLiteral("Too many analysis jobs are running; wait for one with get_job.");
+        return nullptr;
+    }
+    if (kind == "transcribe" && transcribing >= kMaxRunningTranscribe) {
+        error = QStringLiteral("A transcription is already running; wait for it with get_job.");
+        return nullptr;
     }
     for (auto it = list.begin(); it != list.end() && list.size() >= kMaxRecords;) {
         if ((*it)->done)

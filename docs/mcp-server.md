@@ -200,7 +200,14 @@ state, percent?, result?, error?, elapsed_ms}`; `state` is `running`, `succeeded
 output) once it failed. An identical call while the first still runs returns the same job. Jobs
 live in memory (the newest 200) until Shotcut quits, also after the project is closed. A job is
 killed after 600 s (`transcribe`: 600 s plus the length of the audio, at most 4 h).
-`analyze_media` always waits up to 5 s.
+`analyze_media` always waits up to 5 s. The other analysis tools probe the source with ffprobe
+first (the same probe as `analyze_media`, cached per file), so the first call on a file may take
+up to 10 s while ffprobe runs, even with `wait_ms` 0.
+
+At most 4 jobs run at once, and at most one of them is a `transcribe`: a call that would start
+another returns the error "Too many analysis jobs are running; wait for one with get_job." (or "A
+transcription is already running; wait for it with get_job."). A cached result and a call
+identical to a running job (which returns that job) are never refused.
 
 Programs are looked up in Shotcut's application folder first, then on `PATH`: `ffmpeg` and
 `ffprobe` (both ship with Shotcut). A missing program is a tool error. Arguments are passed as a

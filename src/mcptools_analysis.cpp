@@ -125,7 +125,8 @@ bool parseProbe(const QString &path,
 
 std::shared_ptr<McpJobs::Record> startProbe(const QString &path,
                                             const QString &cacheKey,
-                                            const QString &program)
+                                            const QString &program,
+                                            QString &error)
 {
     return McpJobs::run(
         "analyze_media",
@@ -135,6 +136,7 @@ std::shared_ptr<McpJobs::Record> startProbe(const QString &path,
         [path](const QList<McpJobs::StepOutput> &outputs, QJsonObject &out, QString &err) {
             return parseProbe(path, outputs, out, err);
         },
+        error,
         cacheKey);
 }
 
@@ -156,7 +158,9 @@ QJsonObject analyzeMediaTool(const QJsonObject &arguments)
                           "install FFmpeg to analyze media.",
                           true);
     }
-    const auto record = startProbe(ref.path, cacheKey, program);
+    const auto record = startProbe(ref.path, cacheKey, program, error);
+    if (!record)
+        return textResult(error, true);
     if (McpJobs::waitFor(record, 5000)) {
         if (record->state == "succeeded")
             return jsonResult(record->result);
@@ -204,7 +208,9 @@ bool probeInfo(const SourceRef &ref, QJsonObject &info, QString &error)
                                "PATH; install FFmpeg to analyze media.");
         return false;
     }
-    const auto record = startProbe(ref.path, cacheKey, program);
+    const auto record = startProbe(ref.path, cacheKey, program, error);
+    if (!record)
+        return false;
     if (!McpJobs::waitFor(record, 10000)) {
         error = QStringLiteral("ffprobe is still probing %1; try again shortly.").arg(ref.path);
         return false;
@@ -439,7 +445,10 @@ QJsonObject detectSilenceTool(const QJsonObject &arguments)
         [ref, range](const QList<McpJobs::StepOutput> &outputs, QJsonObject &out, QString &) {
             return parseSilence(ref, range, outputs.value(0).err, out);
         },
+        error,
         key);
+    if (!record)
+        return textResult(error, true);
     return jobResult(record, waitMs);
 }
 
@@ -527,7 +536,10 @@ QJsonObject detectScenesTool(const QJsonObject &arguments)
         [ref, range](const QList<McpJobs::StepOutput> &outputs, QJsonObject &out, QString &) {
             return parseScenes(ref, range, outputs.value(0).out, out);
         },
+        error,
         key);
+    if (!record)
+        return textResult(error, true);
     return jobResult(record, waitMs);
 }
 
@@ -1086,8 +1098,11 @@ QJsonObject transcribeTool(const QJsonObject &arguments)
                                 transcript,
                                 err);
         },
+        error,
         key,
         timeoutMs);
+    if (!record)
+        return textResult(error, true);
     return jobResult(record, waitMs);
 }
 
@@ -1367,6 +1382,7 @@ std::shared_ptr<McpJobs::Record> McpTools::startAudioLevels(const SourceRef &ref
                           QString &err) {
             return parseLevels(ref, range, acc, outputs.value(0).err, out, err);
         },
+        error,
         key);
 }
 
@@ -1378,7 +1394,8 @@ QList<McpTool> McpTools::analysisTools()
          "state (running, succeeded, failed, cancelled), percent (when known), result (once "
          "succeeded), error (once failed), elapsed_ms}. elapsed_ms is the run time so far, or "
          "the total once finished. Jobs are kept in memory until Shotcut quits, also after the "
-         "project is closed; they are not files on disk.",
+         "project is closed; they are not files on disk. At most 4 jobs run at once (one "
+         "transcribe): starting another is an error until one has finished.",
          schema(R"({"type":"object","properties":{
              "job_id":{"type":"integer","minimum":0}
            },"required":["job_id"]})"),
@@ -1409,7 +1426,8 @@ QList<McpTool> McpTools::analysisTools()
          "approximate (about 0.1 s). noise_db (-90 to -10, default -35) is the level below which "
          "audio counts as silent; min_s (0.05 to 30, default 0.4) the shortest silence reported. "
          "A source without audio is an error. wait_ms (0 to 20000, default 0) waits for the "
-         "result; without it, or when slower, {job_id, state} is returned to poll with get_job. Results "
+         "result; without it, or when slower, {job_id, state} is returned to poll with get_job. The "
+         "first call on a file may take up to 10 s while ffprobe runs, even with wait_ms 0. Results "
          "are cached (\"cached\": true).",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute path of the media file."},
@@ -1431,6 +1449,7 @@ QList<McpTool> McpTools::analysisTools()
          "floor) and true_peak_dbtp is floored at -120; buckets with no decoded samples (audio "
          "shorter than the requested range) report -120. wait_ms (0 to 20000, default 0) waits for the "
          "result; without it, or when slower, {job_id, state} is returned to poll with get_job. "
+         "The first call on a file may take up to 10 s while ffprobe runs, even with wait_ms 0. "
          "Results are cached (\"cached\": true).",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute path of the media file."},
@@ -1453,7 +1472,8 @@ QList<McpTool> McpTools::analysisTools()
          "scores lower than a hard cut, so a high threshold misses soft cuts. A source without "
          "video is an error. "
          "wait_ms (0 to 20000, default 0) waits for the result; without it, or when slower, "
-         "{job_id, state} is returned to poll with get_job. Results are cached (\"cached\": true).",
+         "{job_id, state} is returned to poll with get_job. The first call on a file may take up "
+         "to 10 s while ffprobe runs, even with wait_ms 0. Results are cached (\"cached\": true).",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute path of the media file."},
              "track":{"type":"integer","minimum":0,"description":"Track index (with clip)."},
@@ -1480,7 +1500,9 @@ QList<McpTool> McpTools::analysisTools()
          "detected one. A source without audio is an error, and so is Whisper not being "
          "configured (checked before any job starts). wait_ms (0 to 20000, default 0) waits for "
          "the result; without it, or when slower, {job_id, state} is returned to poll with "
-         "get_job. Results are cached (\"cached\": true). A failing run is not retried: the "
+         "get_job. The first call on a file may take up to 10 s while ffprobe runs, even with "
+         "wait_ms 0. Only one transcription runs at a time. Results are cached (\"cached\": "
+         "true). A failing run is not retried: the "
          "error has the program's own message. Bring your own transcript instead: pass path and "
          "transcript (and nothing else) with transcript {segments:[{start_s, end_s, text, "
          "words?}]}: 1 to 5000 segments sorted by start_s, 0 <= start_s < end_s <= 86400 (words "

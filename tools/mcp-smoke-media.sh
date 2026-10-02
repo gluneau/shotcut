@@ -226,6 +226,32 @@ VL="$(job_result audio_levels "$(jq -nc --arg p "$TMP/long.wav" '{path:$p,bucket
 expect_eq "audio_levels 600 s: last bucket ends near 600" true "$(echo "$VL" | jq -r '(.buckets[-1].end_s - 600) | fabs < 0.5')"
 expect_eq "audio_levels 600 s: last bucket carries signal (sine 0.125 = -21 dB rms)" true "$(echo "$VL" | jq -r '(.buckets[-1].rms_db + 21) | fabs < 3')"
 
+echo "== running job cap"
+# audio_levels of a 7000 s file runs for about 20 s (ebur128 with true peak), so four of them
+# overlap. The probe is cached first, so starting them does not wait for ffprobe.
+ffmpeg -v error -nostdin -y -f lavfi -i "sine=frequency=440:duration=7000:sample_rate=8000" -c:a pcm_u8 "$TMP/cap.wav"
+CAP="$(jq -nc --arg p "$TMP/cap.wav" '{path:$p}')"
+expect_eq "job cap: the long file is probed" true "$(analyze "$TMP/cap.wav" | jq -r '.duration_s > 6999')"
+CAPJOBS=()
+for b in 11 12 13 14; do
+  CAPJOBS+=("$(tool_json audio_levels "$(jq -c ". + {buckets:$b}" <<<"$CAP")" | jq -r '.job_id // empty')")
+done
+expect_eq "job cap: four distinct jobs start" 4 "$(printf '%s\n' "${CAPJOBS[@]}" | grep -c '^[0-9][0-9]*$')"
+expect_eq "job cap: the four are still running" "running running running running" "$(for j in "${CAPJOBS[@]}"; do tool_json get_job "{\"job_id\":$j}" | jq -r '.state'; done | xargs)"
+FIFTH="$(jq -c '. + {buckets:15}' <<<"$CAP")"
+expect_eq "job cap: a fifth job is an error" true "$(tool_is_error audio_levels "$FIFTH")"
+expect_eq "job cap: the fifth job's message" "Too many analysis jobs are running; wait for one with get_job." "$(tool_text audio_levels "$FIFTH")"
+expect_eq "job cap: another tool is refused too" "Too many analysis jobs are running; wait for one with get_job." "$(tool_text detect_silence "$(jq -c '. + {noise_db:-33}' <<<"$CAP")")"
+expect_eq "job cap: an identical call returns its running job" "${CAPJOBS[0]}" "$(tool_json audio_levels "$(jq -c '. + {buckets:11}' <<<"$CAP")" | jq -r '.job_id')"
+expect_eq "job cap: a cached result is returned" true "$(tool_json detect_silence "$SIL" | jq -r '.cached')"
+expect_eq "job cap: the first job finishes" succeeded "$(wait_job "${CAPJOBS[0]}" 120 | jq -r '.state')"
+NEXT="$(tool_json audio_levels "$FIFTH")"
+expect_eq "job cap: a new job is accepted once one has finished" true "$(echo "$NEXT" | jq -r 'has("job_id")')"
+# Later blocks start jobs of their own: let these end first.
+for j in "${CAPJOBS[@]:1}" "$(echo "$NEXT" | jq -r '.job_id')"; do wait_job "$j" 180 >/dev/null; done
+expect_eq "job cap: all cap jobs ended" 0 "$(for j in "${CAPJOBS[@]}" "$(echo "$NEXT" | jq -r '.job_id')"; do tool_json get_job "{\"job_id\":$j}" | jq -r '.state'; done | grep -c running)"
+rm -f "$TMP/cap.wav"
+
 echo "== detect_scenes"
 expect_eq "tools/list has detect_scenes" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["detect_scenes"])')"
 SC="{\"path\":\"$MEDIA/scenes.mp4\"}"
@@ -492,6 +518,10 @@ else
     expect_eq "transcribe jfk: the result round-trips as a supplied transcript" word "$(tool_json transcribe "$(jq -c --arg p "$TMP/note.txt" '{path:$p,transcript:{segments:.segments}}' <<<"$W")" | jq -r '.granularity')"
     expect_eq "transcribe jfk: first call is not cached" null "$(echo "$W" | jq -c '.cached // null')"
     expect_eq "transcribe jfk: second call is cached" true "$(tool_json transcribe "$JF" | jq -r '.cached')"
+    # Whisper takes seconds even on jfk.wav, so the second transcription starts while it runs.
+    TJ="$(tool_json transcribe "$(jq -c '. + {language:"en"}' <<<"$JF")" | jq -r '.job_id // empty')"
+    expect_eq "transcribe cap: a second transcription is refused while one runs" "A transcription is already running; wait for it with get_job." "$(tool_text transcribe "$(jq -c '. + {language:"fr"}' <<<"$TONE")")"
+    expect_eq "transcribe cap: the running one succeeds" succeeded "$(wait_job "${TJ:-0}" 120 | jq -r '.state')"
     sleep 0.5
     expect_eq "transcribe jfk: the temporary folder is removed" "$TD0" "$(tmp_dirs)"
     COUNTRY="$(echo "$W" | jq -r '[.segments[].words[] | select(.text | test("^country"))][0].start_s')"

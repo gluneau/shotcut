@@ -72,11 +72,13 @@ using Parser = std::function<bool(const QList<StepOutput> &, QJsonObject &result
 // Starts the steps one after another in the background. A running record with the same kind and
 // key is returned instead of starting another, so key must encode everything that affects the
 // result (source, its mtime and size, parameters); reuse the cacheKeyFor() string. The result is
-// cached under cacheKey when non-empty and succeeded (see cached()).
+// cached under cacheKey when non-empty and succeeded (see cached()). A new job is refused (null
+// and an error) while 4 jobs run, or while a "transcribe" job runs when kind is "transcribe".
 std::shared_ptr<Record> run(const QString &kind,
                             const QString &key,
                             const QList<Step> &steps,
                             Parser parse,
+                            QString &error,
                             const QString &cacheKey = QString(),
                             int timeoutMs = 600000);
 
