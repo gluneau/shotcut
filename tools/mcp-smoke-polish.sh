@@ -297,7 +297,6 @@ undo_text >/dev/null; undo_text >/dev/null
 expect_eq "set + split: the value is restored" "$FA0" "$(fa 0 0)"
 expect_eq "set + split: back to the start" "$S0" "$(state)"
 
-
 echo "== fit rect on a clip whose shape differs from the video mode; keyframes"
 ffmpeg -loglevel error -y -f lavfi -i "testsrc=size=480x240:rate=25:duration=2" -pix_fmt yuv420p -c:v libx264 "$TMP/wide.mp4"
 # Video mode 320x240 with 4:3 pixels (16:9 display); clip 0 is 480x240 square pixels (2:1);
@@ -383,6 +382,234 @@ expect_eq "hidden filters: a new filter goes after the last user filter, before 
 expect_eq "hidden filters: listed as the fourth user filter" '["sepia","fadeInVolume","gain","brightness"]' "$(fa 0 0 | jq -c '[.filters[].id]')"
 undo_text >/dev/null
 expect_eq "hidden filters: undo removes only the new filter" "audiolevel sepia volume volume audiolevel " "$(order)"
+
+echo "== audio recipes: clip_set_volume"
+expect_eq "tools/list has the four audio recipes" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq '[.result.tools[].name] | contains(["clip_set_volume","clip_normalize","track_set_ducking","clip_detach_audio"])')"
+# V1: 0 tone_av [0,100) with a 10-frame fade in, 1 noaudio [100,150); A1: audio-only clip [0,50).
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+ins "$MEDIA/tone_av.mp4" 0 4 0 0
+ins "$MEDIA/noaudio.mp4" 0 2 0 100
+AT="$(tool_json track_add '{"type":"audio"}' | jq '.added.index')"
+ins "$MEDIA/audioonly.wav" 0 2 "$AT" 0
+tool_json timeline_fade '{"track":0,"clip":0,"fade_in":10}' >/dev/null
+vstate() { echo "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa 0 0)|$(fa 0 1)|$(fa "$AT" 0)"; }
+vol() { tool_json clip_set_volume "{\"track\":$1,\"clip\":$2,\"gain_db\":$3}"; }
+FADES="$(fa 0 0 | jq -c '[.filters[] | select(.id != "gain")]')"
+expect_eq "volume fixture: the fade added fade filters" true "$(echo "$FADES" | jq '[.[].id] | index("fadeInVolume") != null')"
+V0="$(vstate)"
+R="$(vol 0 0 6)"
+expect_eq "volume +6: result gain_db, changed, track" "6 true 0" "$(echo "$R" | jq -r '"\(.gain_db) \(.changed) \(.track.index)"')"
+expect_eq "volume +6: one gain filter with level 6" '[6]' "$(fa 0 0 | jq -c '[.filters[] | select(.id=="gain") | .params.level]')"
+expect_eq "volume +6: the result index is the gain filter's" "$(echo "$R" | jq '.index')" "$(fa 0 0 | jq '[.filters[] | select(.id=="gain")][0].index')"
+expect_eq "volume +6: the fade filters are untouched" "$FADES" "$(fa 0 0 | jq -c '[.filters[] | select(.id != "gain")]')"
+V1="$(vstate)"
+vol 0 0 3 >/dev/null
+expect_eq "volume 3: the same filter changes (still one)" '[3]' "$(fa 0 0 | jq -c '[.filters[] | select(.id=="gain") | .params.level]')"
+expect_eq "volume 3: the fade filters are untouched" "$FADES" "$(fa 0 0 | jq -c '[.filters[] | select(.id != "gain")]')"
+V2="$(vstate)"
+R="$(vol 0 0 3)"
+expect_eq "volume 3 again: changed false" false "$(echo "$R" | jq '.changed')"
+expect_eq "volume 3 again: no undo step (undo goes back to 6)" "Set clip volume to 3 dB" "$(undo_text)"
+expect_eq "volume 3: undo restores +6" "$V1" "$(vstate)"
+expect_eq "volume +6: undo text" "Set clip volume to 6 dB" "$(undo_text)"
+expect_eq "volume +6: undo restores the start" "$V0" "$(vstate)"
+redo_text >/dev/null; expect_eq "volume +6: redo" "$V1" "$(vstate)"
+redo_text >/dev/null; expect_eq "volume 3: redo" "$V2" "$(vstate)"
+R="$(vol 0 0 0)"
+expect_eq "volume 0: removes the gain filter" '[]' "$(fa 0 0 | jq -c '[.filters[] | select(.id=="gain")]')"
+expect_eq "volume 0: no index in the result" false "$(echo "$R" | jq 'has("index")')"
+expect_eq "volume 0: the fade filters are untouched" "$FADES" "$(fa 0 0 | jq -c '[.filters[] | select(.id != "gain")]')"
+expect_eq "volume 0: same timeline as the start" "$V0" "$(vstate)"
+R="$(vol 0 0 0)"
+expect_eq "volume 0 again: changed false" false "$(echo "$R" | jq '.changed')"
+expect_eq "volume 0: one undo step with its own text" "Reset clip volume to 0 dB" "$(undo_text)"
+expect_eq "volume 0: undo restores level 3" "$V2" "$(vstate)"
+redo_text >/dev/null; expect_eq "volume 0: redo removes it again" "$V0" "$(vstate)"
+vol "$AT" 0 -4.5 >/dev/null
+expect_eq "volume on an audio-only clip on the audio track" '[-4.5]' "$(fa "$AT" 0 | jq -c '[.filters[] | select(.id=="gain") | .params.level]')"
+undo_text >/dev/null
+V0="$(vstate)"
+expect_eq "volume: a clip without audio is an error" true "$(ferr clip_set_volume '{"track":0,"clip":1,"gain_db":3}')"
+expect_eq "volume: no audio message" true "$(tool_text clip_set_volume '{"track":0,"clip":1,"gain_db":3}' | grep -qi 'no audio' && echo true)"
+for g in 25 -71 '"6"' null; do
+  expect_eq "volume: gain_db $g is an error" true "$(ferr clip_set_volume "{\"track\":0,\"clip\":0,\"gain_db\":$g}")"
+done
+expect_eq "volume: missing gain_db is an error" true "$(ferr clip_set_volume '{"track":0,"clip":0}')"
+expect_eq "volume: a blank is an error" true "$(ferr clip_set_volume "{\"track\":$AT,\"clip\":1,\"gain_db\":3}")"
+expect_eq "volume: missing clip is an error" true "$(ferr clip_set_volume '{"track":0,"clip":9,"gain_db":3}')"
+tool_json track_set '{"track":0,"lock":true}' >/dev/null
+expect_eq "volume: a locked track is an error" true "$(ferr clip_set_volume '{"track":0,"clip":0,"gain_db":3}')"
+tool_json track_set '{"track":0,"lock":false}' >/dev/null
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "volume: errors changed nothing" "$V0" "$(vstate)"
+
+echo "== audio recipes: clip_normalize"
+ffmpeg -loglevel error -y -f lavfi -i "testsrc=size=320x240:rate=25:duration=4" -f lavfi -i "anullsrc=r=16000:cl=mono" -t 4 -pix_fmt yuv420p -c:v libx264 -c:a aac -shortest "$TMP/silent_av.mp4"
+ins "$TMP/silent_av.mp4" 0 2 0 150
+expect_eq "normalize fixture: the silent clip is V1 item 2" '["clip",150,50]' "$(tool_json get_timeline '{}' | jq -c '.tracks[0].clips[2] | [.kind,.start,.duration]')"
+V0="$(vstate)|$(fa 0 2)"
+expect_eq "normalize: a silent source is an error" true "$(ferr clip_normalize '{"track":0,"clip":2,"wait_ms":20000}')"
+expect_eq "normalize: silent message" true "$(tool_text clip_normalize '{"track":0,"clip":2,"wait_ms":20000}' | grep -qi 'silent' && echo true)"
+expect_eq "normalize: a clip without audio is an error" true "$(ferr clip_normalize '{"track":0,"clip":1,"wait_ms":20000}')"
+for t in -5 -31 '"x"'; do
+  expect_eq "normalize: target_lufs $t is an error" true "$(ferr clip_normalize "{\"track\":0,\"clip\":0,\"target_lufs\":$t}")"
+done
+expect_eq "normalize: wait_ms 20001 is an error" true "$(ferr clip_normalize '{"track":0,"clip":0,"wait_ms":20001}')"
+expect_eq "normalize: errors changed nothing" "$V0" "$(vstate)|$(fa 0 2)"
+N="$(tool_json clip_normalize '{"track":0,"clip":0,"wait_ms":20000}')"
+expect_eq "normalize: measured_lufs is a finite number" true "$(echo "$N" | jq '(.measured_lufs | type) == "number" and .measured_lufs > -70 and .measured_lufs < 0')"
+expect_eq "normalize: target_lufs defaults to -16" -16 "$(echo "$N" | jq '.target_lufs')"
+expect_eq "normalize: applied_gain_db = target - measured (within 0.1)" true "$(echo "$N" | jq '((.target_lufs - .measured_lufs) - .applied_gain_db) | fabs < 0.1')"
+expect_eq "normalize: the gain filter has the applied gain" "$(echo "$N" | jq -c '[.applied_gain_db]')" "$(fa 0 0 | jq -c '[.filters[] | select(.id=="gain") | .params.level]')"
+expect_eq "normalize: the fade filters are untouched" "$FADES" "$(fa 0 0 | jq -c '[.filters[] | select(.id != "gain")]')"
+expect_eq "normalize: one undo step named after the target" "Normalize to -16 LUFS" "$(undo_text)"
+expect_eq "normalize: undo restores" "$V0" "$(vstate)|$(fa 0 2)"
+N2="$(tool_json clip_normalize '{"track":0,"clip":0,"target_lufs":-20}')"
+expect_eq "normalize again (cached measurement, wait_ms 0): finished at once" true "$(echo "$N2" | jq 'has("applied_gain_db") and (has("job_id") | not)')"
+expect_eq "normalize -20: 4 dB less gain than -16" true "$(jq -n --argjson a "$N" --argjson b "$N2" '($a.applied_gain_db - $b.applied_gain_db - 4) | fabs < 0.02')"
+expect_eq "normalize -20: undo text" "Normalize to -20 LUFS" "$(undo_text)"
+
+echo "== clip_normalize: loudness of an export"
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+ins "$MEDIA/tone_av.mp4" 0 10 0 0
+N="$(tool_json clip_normalize '{"track":0,"clip":0,"wait_ms":20000}')"
+expect_eq "export normalize: applied" true "$(echo "$N" | jq 'has("applied_gain_db")')"
+OUTN="$TMP/normalized.mp4"
+EJ="$(tool_json export_video "$(jq -nc --arg p "$OUTN" '{path:$p,preset:"x264-medium"}')" | jq -r '.job_id')"
+EST=""
+for _ in $(seq 1 300); do
+  EST="$(tool_json get_export_status "{\"job_id\":$EJ}" | jq -r '.state')"
+  case "$EST" in succeeded|failed|stopped|removed) break ;; esac
+  sleep 1
+done
+expect_eq "export normalize: the export succeeded" succeeded "$EST"
+EL="$(tool_json audio_levels "$(jq -nc --arg p "$OUTN" '{path:$p,wait_ms:20000}')")"
+echo "INFO  normalize: measured $(echo "$N" | jq .measured_lufs) LUFS, gain $(echo "$N" | jq .applied_gain_db) dB, export $(echo "$EL" | jq .integrated_lufs) LUFS"
+expect_eq "export normalize: the export's integrated loudness is within 1.5 LU of -16" true "$(echo "$EL" | jq '(.integrated_lufs + 16) | fabs <= 1.5')"
+
+echo "== clip_normalize: the clip changes while measuring"
+# 8 kHz 8-bit audio measures at about 350 s of audio per second (job cap test): 2400 s ~ 7 s.
+ffmpeg -v error -nostdin -y -f lavfi -i "sine=frequency=440:duration=2400:sample_rate=8000" -c:a pcm_u8 "$TMP/long_norm.wav"
+AT2="$(tool_json track_add '{"type":"audio"}' | jq '.added.index')"
+ins "$TMP/long_norm.wav" 0 2400 "$AT2" 0
+NS0="$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa "$AT2" 0)"
+J="$(tool_json clip_normalize "{\"track\":$AT2,\"clip\":0}")"
+JID="$(echo "$J" | jq -r '.job_id // empty')"
+if [ -z "$JID" ]; then
+  echo "SKIP: changed-while-measuring: the measurement finished at once ($J)"
+else
+  expect_eq "changing: wait_ms 0 returns a running job" running "$(echo "$J" | jq -r '.state')"
+  tool_json timeline_move "{\"track\":$AT2,\"clip\":0,\"to_start\":100}" >/dev/null
+  MS="$(tool_json get_job "{\"job_id\":$(echo "$J" | jq '.measure_job_id')}" | jq -r '.state')"
+  if [ "$MS" != running ]; then
+    echo "SKIP: changed-while-measuring: the measurement ended before the move ($MS)"
+  else
+    F="$(wait_job "$JID" 120)"
+    expect_eq "changing: the job failed" failed "$(echo "$F" | jq -r '.state')"
+    expect_eq "changing: the job's error" "The clip changed while measuring; nothing was changed." "$(echo "$F" | jq -r '.error')"
+    expect_eq "changing: no gain filter was added" '{"filters":[]}' "$(fa "$AT2" 1)"
+    expect_eq "changing: the last undo step is the move" "Move timeline clip" "$(undo_text)"
+    expect_eq "changing: undo of the move gives the start" "$NS0" "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa "$AT2" 0)"
+    redo_text >/dev/null
+  fi
+fi
+echo "== clip_normalize: applied in the background"
+# The clip now starts at frame 100 (or 0 after a SKIP): a range not measured yet either way.
+NC="$(tool_json get_timeline '{}' | jq "[.tracks[$AT2].clips[] | .kind == \"clip\"] | index(true)")"
+tool_json timeline_move "{\"track\":$AT2,\"clip\":$NC,\"to_start\":200}" >/dev/null
+NC="$(tool_json get_timeline '{}' | jq "[.tracks[$AT2].clips[] | .kind == \"clip\"] | index(true)")"
+NB0="$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa "$AT2" "$NC")"
+J="$(tool_json clip_normalize "{\"track\":$AT2,\"clip\":$NC,\"target_lufs\":-18}")"
+JID="$(echo "$J" | jq -r '.job_id // empty')"
+if [ -z "$JID" ]; then
+  echo "SKIP: background normalize: the measurement finished at once ($J)"
+else
+  F="$(wait_job "$JID" 120)"
+  expect_eq "background: the job succeeded" succeeded "$(echo "$F" | jq -r '.state')"
+  expect_eq "background: the job result has the applied gain" true "$(echo "$F" | jq '.result | (.target_lufs == -18) and ((.target_lufs - .measured_lufs - .applied_gain_db) | fabs < 0.1)')"
+  expect_eq "background: the gain filter is on the clip" "$(echo "$F" | jq -c '[.result.applied_gain_db]')" "$(fa "$AT2" "$NC" | jq -c '[.filters[] | select(.id=="gain") | .params.level]')"
+  expect_eq "background: it is an ordinary undo step" "Normalize to -18 LUFS" "$(undo_text)"
+  expect_eq "background: undo restores" "$NB0" "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa "$AT2" "$NC")"
+fi
+
+echo "== track_set_ducking"
+DS0="$(tool_json get_timeline '{}' | jq -c 'del(.position)')"
+DUCK="$(call_tool track_set_ducking "{\"track\":$AT2}")"
+if echo "$DUCK" | jq -r '.result.content[0].text' | grep -q 'needs MLT 7.41'; then
+  expect_eq "ducking: this MLT has no ducking: error" true "$(echo "$DUCK" | jq -r '.result.isError')"
+  echo "INFO  ducking: $(echo "$DUCK" | jq -r '.result.content[0].text')"
+  expect_eq "ducking: the version error changed nothing" "$DS0" "$(tool_json get_timeline '{}' | jq -c 'del(.position)')"
+else
+  expect_eq "ducking: succeeds" false "$(echo "$DUCK" | jq -r '.result.isError')"
+  expect_eq "ducking: duck_threshold reads back -12" -12 "$(echo "$DUCK" | jq -r '.result.content[0].text | fromjson | .ducking.duck_threshold')"
+  expect_eq "ducking: one undo step" "Set track $AT2 audio ducking" "$(undo_text)"
+fi
+expect_eq "ducking: the top track is an error" true "$(ferr track_set_ducking '{"track":0}')"
+expect_eq "ducking: top track message" true "$(tool_text track_set_ducking '{"track":0}' | grep -q 'top track' && echo true)"
+expect_eq "ducking: a missing track is an error" true "$(ferr track_set_ducking '{"track":99}')"
+for a in '"threshold_db":1' '"reduction_db":-71' '"fade_in_ms":5001' '"fade_out_ms":-1' '"enabled":"yes"'; do
+  expect_eq "ducking: {$a} is an error" true "$(ferr track_set_ducking "{\"track\":$AT2,$a}")"
+done
+
+echo "== clip_normalize: the project is replaced while measuring"
+NC="$(tool_json get_timeline '{}' | jq "[.tracks[$AT2].clips[] | .kind == \"clip\"] | index(true)")"
+tool_json timeline_move "{\"track\":$AT2,\"clip\":$NC,\"to_start\":300}" >/dev/null
+NC="$(tool_json get_timeline '{}' | jq "[.tracks[$AT2].clips[] | .kind == \"clip\"] | index(true)")"
+J="$(tool_json clip_normalize "{\"track\":$AT2,\"clip\":$NC}")"
+JID="$(echo "$J" | jq -r '.job_id // empty')"
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+if [ -z "$JID" ] || [ "$(tool_json get_job "{\"job_id\":$(echo "$J" | jq '.measure_job_id')}" | jq -r '.state')" != running ]; then
+  echo "SKIP: project replaced while measuring: the measurement was not running ($J)"
+else
+  F="$(wait_job "$JID" 120)"
+  expect_eq "replaced: the job failed" failed "$(echo "$F" | jq -r '.state')"
+  expect_eq "replaced: the job's error" "The project was closed or replaced while measuring; nothing was changed." "$(echo "$F" | jq -r '.error')"
+  expect_eq "replaced: the new project is not modified" false "$(tool_json get_state '{}' | jq '.modified')"
+fi
+rm -f "$TMP/long_norm.wav"
+
+echo "== clip_detach_audio"
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+ins "$MEDIA/tone_av.mp4" 0 4 0 0
+ins "$MEDIA/noaudio.mp4" 0 2 0 100
+tool_json clip_set_volume '{"track":0,"clip":0,"gain_db":5}' >/dev/null
+DT0="$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa 0 0)"
+expect_eq "detach: noaudio.mp4 is an error" true "$(ferr clip_detach_audio '{"track":0,"clip":1}')"
+expect_eq "detach: no audio message" true "$(tool_text clip_detach_audio '{"track":0,"clip":1}' | grep -qi 'no audio' && echo true)"
+expect_eq "detach: a missing clip is an error" true "$(ferr clip_detach_audio '{"track":0,"clip":5}')"
+tool_json track_set '{"track":0,"lock":true}' >/dev/null
+expect_eq "detach: a locked track is an error" true "$(ferr clip_detach_audio '{"track":0,"clip":0}')"
+tool_json track_set '{"track":0,"lock":false}' >/dev/null
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "detach: errors changed nothing" "$DT0" "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa 0 0)"
+R="$(tool_json clip_detach_audio '{"track":0,"clip":0}')"
+expect_eq "detach: an audio track was added (2 tracks), audio_track 1" "2 1 audio" "$(echo "$R" | jq -r '"\(.tracks | length) \(.audio_track) \(.tracks[1].type)"')"
+expect_eq "detach: the audio clip covers the same range" '["clip",0,100,0,99,true]' "$(echo "$R" | jq -c '.tracks[1].clips[0] | [.kind,.start,.duration,.in,.out,.has_audio]')"
+expect_eq "detach: the video clip stays, without audio" '["clip",0,100,0,99,false]' "$(echo "$R" | jq -c '.tracks[0].clips[0] | [.kind,.start,.duration,.in,.out,.has_audio]')"
+expect_eq "detach: the result tracks are get_timeline's" "$(echo "$R" | jq -c '.tracks')" "$(tool_json get_timeline '{}' | jq -c '.tracks')"
+expect_eq "detach: the gain (audio filter) went with the audio" '[[],[5]]' "$(echo "[$(fa 0 0 | jq -c '[.filters[] | select(.id=="gain") | .params.level]'),$(fa 1 0 | jq -c '[.filters[] | select(.id=="gain") | .params.level]')]" | jq -c .)"
+DT1="$(tool_json get_timeline '{}' | jq -c 'del(.position)')"
+expect_eq "detach: one undo step" "Detach audio" "$(undo_text)"
+expect_eq "detach: undo restores the timeline and the filters" "$DT0" "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa 0 0)"
+redo_text >/dev/null
+expect_eq "detach: redo" "$DT1" "$(tool_json get_timeline '{}' | jq -c 'del(.position)')"
+expect_eq "detach: the audio-only clip is refused (audio track)" true "$(ferr clip_detach_audio '{"track":1,"clip":0}')"
+expect_eq "detach: the detached video clip has no audio left" true "$(ferr clip_detach_audio '{"track":0,"clip":0}')"
+undo_text >/dev/null
+# An audio track that is blank over the range is reused (a new, empty track is not: Shotcut
+# keeps a one-frame blank on it); a locked one is refused.
+tool_json track_add '{"type":"audio"}' >/dev/null
+ins "$MEDIA/audioonly.wav" 0 2 1 200
+tool_json track_set '{"track":1,"lock":true}' >/dev/null
+expect_eq "detach: a locked target audio track is an error" true "$(ferr clip_detach_audio '{"track":0,"clip":0}')"
+tool_json track_set '{"track":1,"lock":false}' >/dev/null
+R="$(tool_json clip_detach_audio '{"track":0,"clip":0}')"
+expect_eq "detach: the existing empty audio track is used (no new track)" "2 1" "$(echo "$R" | jq -r '"\(.tracks | length) \(.audio_track)"')"
+expect_eq "detach: the audio clip is on it" '["clip",0,100]' "$(echo "$R" | jq -c '.tracks[1].clips[0] | [.kind,.start,.duration]')"
 
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
