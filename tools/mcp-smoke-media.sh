@@ -664,11 +664,25 @@ for bad in '{"columns":9}' '{"columns":0}' '{"rows":0}' '{"rows":9}' '{"tile_wid
   expect_eq "get_overview: $bad is an error" true "$(tool_is_error get_overview "$bad")"
 done
 expect_eq "get_overview: columns message" "columns must be an integer from 1 to 8." "$(tool_text get_overview '{"columns":9}')"
-tool_json play '{}' >/dev/null
-sleep 0.5
-ov_call '{"columns":2,"rows":2,"tile_width":96}' "$TMP/ovp.jpg"
-expect_eq "get_overview while playing: succeeds" false "$(jq -r '.result.isError' "$TMP/ov.json")"
-expect_eq "get_overview while playing: still playing afterwards" true "$(tool_json get_state '{}' | jq -r '.playing')"
+# The 3x1 sheet ends with the last frame (224). Resuming playback while a frame of that tile was
+# still in flight used to end playback at once, paused at 225 (one past the last frame).
+for rep in 1 2 3 4 5; do
+  tool_json pause '{"position":100}' >/dev/null
+  tool_json play '{}' >/dev/null
+  sleep 0.5
+  ov_call '{"columns":3,"rows":1,"tile_width":96}' "$TMP/ovp.jpg"
+  expect_eq "get_overview while playing ($rep): succeeds" false "$(jq -r '.result.isError' "$TMP/ov.json")"
+  sleep 0.1
+  expect_eq "get_overview while playing ($rep): playing, not past the end after 100 ms" "true true" "$(tool_json get_state '{}' | jq -r '"\(.playing) \(.position <= 224)"')"
+  sleep 0.3
+  expect_eq "get_overview while playing ($rep): playing, not past the end after 400 ms" "true true" "$(tool_json get_state '{}' | jq -r '"\(.playing) \(.position <= 224)"')"
+done
+tool_json pause '{"position":100}' >/dev/null
+ov_call '{"columns":3,"rows":1,"tile_width":96}' "$TMP/ovp.jpg"
+sleep 0.1
+expect_eq "get_overview while paused: paused at 100 after 100 ms" "false 100" "$(tool_json get_state '{}' | jq -r '"\(.playing) \(.position)"')"
+sleep 0.3
+expect_eq "get_overview while paused: paused at 100 after 400 ms" "false 100" "$(tool_json get_state '{}' | jq -r '"\(.playing) \(.position)"')"
 tool_json pause '{"position":10}' >/dev/null
 # Fewer frames than tiles: a 5-frame timeline reduces 4x4 to 5 tiles in 4 columns and 2 rows.
 tool_json timeline_trim '{"track":0,"clip":0,"edge":"out","frame":5,"ripple":true}' >/dev/null

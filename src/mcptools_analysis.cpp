@@ -1277,9 +1277,17 @@ QJsonObject getOverviewTool(const QJsonObject &arguments)
     if (error.isEmpty() && changed())
         error = changedError;
     if (timeline()) {
-        movePlayhead(qMin(before, lastFrame()));
-        if (wasPlaying)
+        const int restore = qMin(before, lastFrame());
+        if (wasPlaying) {
+            // Resuming at once lets a frame of the last tile that is still in flight be shown at
+            // playing speed; at the last frame Player then ends playback (paused one past the
+            // end). Wait until the restored frame is shown, so those frames have drained.
+            QString ignored;
+            fetchSettledFrame(restore, ignored);
             MLT.play(speed);
+        } else {
+            movePlayhead(restore);
+        }
     }
     if (!error.isEmpty())
         return textResult(error, true);
