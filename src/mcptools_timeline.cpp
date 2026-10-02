@@ -60,12 +60,14 @@ QJsonObject playlistJson()
             QString name = QString::fromUtf8(info->producer->get(kShotcutCaptionProperty));
             if (name.isEmpty())
                 name = QFileInfo(path).fileName();
-            items.append(QJsonObject{{"index", i},
-                                     {"name", name},
-                                     {"path", path},
-                                     {"in", info->frame_in},
-                                     {"out", info->frame_out},
-                                     {"duration", info->frame_count}});
+            QJsonObject item{{"index", i},
+                             {"name", name},
+                             {"path", path},
+                             {"in", info->frame_in},
+                             {"out", info->frame_out},
+                             {"duration", info->frame_count}};
+            addMediaFields(*info->producer, item);
+            items.append(item);
         }
     }
     return QJsonObject{{"fps", MLT.profile().fps()}, {"items", items}};

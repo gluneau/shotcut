@@ -51,9 +51,10 @@ QJsonObject clipJson(MultitrackModel &model, int track, int clip)
         o["out"] = info->frame_out;
     }
     o["name"] = model.data(index, MultitrackModel::NameRole).toString();
-    if (o["kind"] == "clip" && info && info->producer && info->producer->is_valid())
+    if (o["kind"] == "clip" && info && info->producer && info->producer->is_valid()) {
         o["path"] = ProxyManager::resource(*info->producer);
-    else
+        addMediaFields(*info->producer, o);
+    } else
         o["path"] = model.data(index, MultitrackModel::ResourceRole).toString();
     o["fade_in"] = model.data(index, MultitrackModel::FadeInRole).toInt();
     o["fade_out"] = model.data(index, MultitrackModel::FadeOutRole).toInt();
@@ -61,6 +62,30 @@ QJsonObject clipJson(MultitrackModel &model, int track, int clip)
 }
 
 } // namespace
+
+// Source media fields from the producer's probe results; each is omitted when unknown.
+void addMediaFields(Mlt::Producer &producer, QJsonObject &o)
+{
+    const int width = producer.get_int("meta.media.width");
+    const int height = producer.get_int("meta.media.height");
+    if (width > 0 && height > 0) {
+        o["width"] = width;
+        o["height"] = height;
+    }
+    if (producer.property_exists("audio_index"))
+        o["has_audio"] = producer.get_int("audio_index") >= 0;
+    const int videoIndex = producer.get_int("video_index");
+    if (videoIndex >= 0) {
+        const QByteArray key = QStringLiteral("meta.media.%1.codec.rotate")
+                                   .arg(videoIndex)
+                                   .toUtf8();
+        if (producer.property_exists(key.constData()))
+            o["rotation"] = producer.get_int(key.constData());
+    }
+    const double den = producer.get_double("meta.media.frame_rate_den");
+    if (den > 0)
+        o["fps"] = producer.get_double("meta.media.frame_rate_num") / den;
+}
 
 QJsonObject schema(const char *json)
 {

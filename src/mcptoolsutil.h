@@ -54,6 +54,10 @@ int lastFrame();
 // Moves the playhead the same way for a plain clip and for a timeline.
 void movePlayhead(int position);
 
+// Adds width, height, has_audio, rotation and fps of the source media from the producer's
+// properties; fields that are unknown are left out.
+void addMediaFields(Mlt::Producer &producer, QJsonObject &o);
+
 // A timeline track as get_timeline reports it.
 QJsonObject trackJson(MultitrackModel &model, int track);
 
