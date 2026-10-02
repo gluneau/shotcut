@@ -228,14 +228,19 @@ QJsonObject trackJson(MultitrackModel &model, int track)
     QJsonArray clips;
     for (int c = 0; c < model.rowCount(index); ++c)
         clips.append(clipJson(model, track, c));
-    return QJsonObject{
-        {"index", track},
-        {"name", model.data(index, MultitrackModel::NameRole).toString()},
-        {"type", model.trackList().at(track).type == AudioTrackType ? "audio" : "video"},
-        {"locked", model.data(index, MultitrackModel::IsLockedRole).toBool()},
-        {"muted", model.data(index, MultitrackModel::IsMuteRole).toBool()},
-        {"hidden", model.data(index, MultitrackModel::IsHiddenRole).toBool()},
-        {"clips", clips}};
+    const bool audio = model.trackList().at(track).type == AudioTrackType;
+    // Every Shotcut track carries audio (video tracks mix their clips' sound), so all have gain.
+    QJsonObject o{{"index", track},
+                  {"name", model.data(index, MultitrackModel::NameRole).toString()},
+                  {"type", audio ? "audio" : "video"},
+                  {"locked", model.data(index, MultitrackModel::IsLockedRole).toBool()},
+                  {"muted", model.data(index, MultitrackModel::IsMuteRole).toBool()},
+                  {"hidden", model.data(index, MultitrackModel::IsHiddenRole).toBool()},
+                  {"gain_db", model.data(index, MultitrackModel::GainRole).toDouble()},
+                  {"clips", clips}};
+    if (!audio)
+        o["composite"] = model.data(index, MultitrackModel::IsCompositeRole).toBool();
+    return o;
 }
 
 bool validTrack(

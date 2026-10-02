@@ -1094,5 +1094,246 @@ echo "INFO  remove_ranges undo of 60 ranges x 2 tracks: $((T1 - T0)) s, RSS $(rs
 expect_eq "remove_ranges at the cap: one undo restores" "$TC0" "$(tool_json get_timeline '{}')"
 expect_eq "remove_ranges: the user's ripple-all-tracks setting is unchanged" false "$(tool_json get_timeline '{}' | jq -r '.settings.ripple_all_tracks')"
 
+echo "== track and marker tools"
+TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[].name]')"
+for t in track_add track_remove track_set marker_add marker_list marker_remove; do
+  expect_eq "tools/list has $t" true "$(echo "$TOOLS" | jq -r "contains([\"$t\"])")"
+done
+tool_json open_project "{\"path\":\"$EMPTY\",\"discard_changes\":true}" >/dev/null
+sleep 1
+tl() { tool_json get_timeline '{}'; }
+expect_eq "track_add: no timeline is an error" true "$(tool_is_error track_add '{"type":"audio"}')"
+expect_eq "track_add: no timeline message" "There is no timeline; add a clip first." "$(tool_text track_add '{"type":"audio"}')"
+expect_eq "marker_add: no timeline is an error" true "$(tool_is_error marker_add '{"start":0,"text":"x"}')"
+expect_eq "marker_list: no timeline lists nothing" '[]' "$(tool_json marker_list '{}' | jq -c '.markers')"
+expect_eq "track_set: no timeline is an error" true "$(tool_is_error track_set '{"track":0,"mute":true}')"
+expect_eq "track_remove: no timeline is an error" true "$(tool_is_error track_remove '{"track":0}')"
+tool_json timeline_insert_range "{\"path\":\"$MEDIA/tone_av.mp4\",\"in_s\":0,\"out_s\":10,\"track\":0,\"position\":0}" >/dev/null
+TK0="$(tl)"
+V1CLIPS="$(echo "$TK0" | jq -c '.tracks[0]' | clipf)"
+expect_eq "tracks fixture: V1 holds one 250-frame clip" "[[0,250,0,249]]" "$V1CLIPS"
+expect_eq "trackJson: gain_db 0 on a video track" 0 "$(echo "$TK0" | jq '.tracks[0].gain_db')"
+expect_eq "trackJson: composite false on the only video track" false "$(echo "$TK0" | jq '.tracks[0].composite')"
+
+R="$(tool_json track_add '{"type":"audio","name":"Dialog"}')"
+expect_eq "track_add audio: added" '{"index":1,"name":"Dialog","type":"audio"}' "$(echo "$R" | jq -c '.added')"
+expect_eq "track_add audio: two tracks in the result" 2 "$(echo "$R" | jq '.tracks | length')"
+TK1="$(tl)"
+expect_eq "track_add audio: get_timeline names and types" '[["V1","video"],["Dialog","audio"]]' "$(echo "$TK1" | jq -c '[.tracks[] | [.name, .type]]')"
+expect_eq "track_add audio: no composite field on an audio track" null "$(echo "$TK1" | jq '.tracks[1].composite')"
+expect_eq "track_add audio: gain_db 0" 0 "$(echo "$TK1" | jq '.tracks[1].gain_db')"
+expect_eq "track_add: one undo step with its own text" "Add audio track" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "track_add: undo restores the timeline byte for byte" "$TK0" "$(tl)"
+tool_json redo '{}' >/dev/null
+expect_eq "track_add: redo re-applies" "$TK1" "$(tl)"
+R="$(tool_json track_add '{"type":"video"}')"
+expect_eq "track_add video: added at index 0 with Shotcut's name" '{"index":0,"name":"V2","type":"video"}' "$(echo "$R" | jq -c '.added')"
+TK2="$(tl)"
+expect_eq "track_add video: rows shifted by one" '[["V2","video"],["V1","video"],["Dialog","audio"]]' "$(echo "$TK2" | jq -c '[.tracks[] | [.name, .type]]')"
+expect_eq "track_add video: V1's clips moved to row 1" "$V1CLIPS" "$(echo "$TK2" | jq -c '.tracks[1]' | clipf)"
+expect_eq "track_add video: indexes follow the rows" '[0,1,2]' "$(echo "$TK2" | jq -c '[.tracks[].index]')"
+expect_eq "track_add video: the new top track composites" true "$(echo "$TK2" | jq '.tracks[0].composite')"
+expect_eq "track_add video: undo text" "Add video track" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "track_add video: undo restores" "$TK1" "$(tl)"
+tool_json redo '{}' >/dev/null
+expect_eq "track_add video: redo re-applies" "$TK2" "$(tl)"
+expect_eq "track_add: bad type is an error" true "$(tool_is_error track_add '{"type":"subtitle"}')"
+expect_eq "track_add: missing type is an error" true "$(tool_is_error track_add '{}')"
+expect_eq "track_add: empty name is an error" true "$(tool_is_error track_add '{"type":"audio","name":""}')"
+expect_eq "track_add: 65-char name is an error" true "$(tool_is_error track_add "$(jq -nc '{type:"audio",name:("n" * 65)}')")"
+expect_eq "track_add: non-string name is an error" true "$(tool_is_error track_add '{"type":"audio","name":5}')"
+expect_eq "track_add: errors changed nothing" "$TK2" "$(tl)"
+
+ts() { tool_json track_set "$1"; }
+tserr() { tool_is_error track_set "$1"; }
+R="$(ts '{"track":2,"name":"Music"}')"
+expect_eq "track_set name: result tracks" Music "$(echo "$R" | jq -r '.tracks[2].name')"
+expect_eq "track_set name: get_timeline" Music "$(tl | jq -r '.tracks[2].name')"
+expect_eq "track_set: undo text" "Set track properties" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "track_set name: undo restores" "$TK2" "$(tl)"
+tool_json redo '{}' >/dev/null
+ts '{"track":2,"mute":true}' >/dev/null
+expect_eq "track_set mute: muted" true "$(tl | jq '.tracks[2].muted')"
+ts '{"track":2,"mute":false}' >/dev/null
+expect_eq "track_set mute false: unmuted" false "$(tl | jq '.tracks[2].muted')"
+R="$(ts '{"track":2,"mute":false}')"
+expect_eq "track_set mute false again: still unmuted (set, not toggle)" false "$(tl | jq '.tracks[2].muted')"
+expect_eq "track_set mute false again: nothing changed" '[]' "$(echo "$R" | jq -c '.changed')"
+ts '{"track":1,"mute":true}' >/dev/null
+expect_eq "track_set mute on a video track" true "$(tl | jq '.tracks[1].muted')"
+tool_json undo '{}' >/dev/null
+ts '{"track":0,"hide":true}' >/dev/null
+expect_eq "track_set hide: hidden" true "$(tl | jq '.tracks[0].hidden')"
+ts '{"track":0,"hide":false}' >/dev/null
+expect_eq "track_set hide false: shown" false "$(tl | jq '.tracks[0].hidden')"
+ts '{"track":0,"composite":false}' >/dev/null
+expect_eq "track_set composite false" false "$(tl | jq '.tracks[0].composite')"
+ts '{"track":0,"composite":true}' >/dev/null
+expect_eq "track_set composite true" true "$(tl | jq '.tracks[0].composite')"
+R="$(ts '{"track":2,"gain_db":-6}')"
+expect_eq "track_set gain_db: result" -6 "$(echo "$R" | jq '.tracks[2].gain_db')"
+expect_eq "track_set gain_db: get_timeline" -6 "$(tl | jq '.tracks[2].gain_db')"
+ts '{"track":1,"gain_db":2.5}' >/dev/null
+expect_eq "track_set gain_db on a video track" 2.5 "$(tl | jq '.tracks[1].gain_db')"
+tool_json undo '{}' >/dev/null
+ts '{"track":2,"lock":true}' >/dev/null
+expect_eq "track_set lock: locked" true "$(tl | jq '.tracks[2].locked')"
+ts '{"track":2,"lock":false}' >/dev/null
+expect_eq "track_set lock false: unlocked" false "$(tl | jq '.tracks[2].locked')"
+
+TS0="$(tl)"
+R="$(ts '{"track":2,"name":"Combo","mute":true,"gain_db":3,"lock":true}')"
+expect_eq "track_set combined: changed" '["name","mute","gain_db","lock"]' "$(echo "$R" | jq -c '.changed')"
+expect_eq "track_set combined: read back" '["Combo",true,3,true]' "$(tl | jq -c '.tracks[2] | [.name, .muted, .gain_db, .locked]')"
+TS1="$(tl)"
+expect_eq "track_set combined: one undo step" "Set track properties" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "track_set combined: one undo reverts it fully" "$TS0" "$(tl)"
+tool_json redo '{}' >/dev/null
+expect_eq "track_set combined: redo re-applies" "$TS1" "$(tl)"
+tool_json undo '{}' >/dev/null
+R="$(ts '{"track":0,"name":"Top","hide":true,"composite":false,"mute":true}')"
+expect_eq "track_set combined video: read back" '["Top",true,false,true]' "$(tl | jq -c '.tracks[0] | [.name, .hidden, .composite, .muted]')"
+tool_json undo '{}' >/dev/null
+expect_eq "track_set combined video: one undo reverts it" "$TS0" "$(tl)"
+
+# No-op: the second identical call adds no undo step, so one undo reverts the FIRST call.
+ts '{"track":2,"name":"Same","gain_db":-3}' >/dev/null
+TN1="$(tl)"
+R="$(call_tool track_set '{"track":2,"name":"Same","gain_db":-3}')"
+expect_eq "track_set identical: success" false "$(echo "$R" | jq -r '.result.isError')"
+expect_eq "track_set identical: nothing changed" '[]' "$(echo "$R" | jq -c '.result.content[0].text | fromjson | .changed')"
+expect_eq "track_set identical: timeline unchanged" "$TN1" "$(tl)"
+tool_json undo '{}' >/dev/null
+expect_eq "track_set identical: added no undo step (one undo reverts the first call)" "$TS0" "$(tl)"
+# Two consecutive gain calls are two undo steps (ChangeTrackGainCommand would merge them).
+ts '{"track":2,"gain_db":-3}' >/dev/null
+ts '{"track":2,"gain_db":-9}' >/dev/null
+tool_json undo '{}' >/dev/null
+expect_eq "track_set two gain calls: first undo gives -3" -3 "$(tl | jq '.tracks[2].gain_db')"
+tool_json undo '{}' >/dev/null
+expect_eq "track_set two gain calls: second undo gives 0" "$TS0" "$(tl)"
+
+expect_eq "track_set: gain_db 100 is an error" true "$(tserr '{"track":2,"gain_db":100}')"
+expect_eq "track_set: gain_db -71 is an error" true "$(tserr '{"track":2,"gain_db":-71}')"
+expect_eq "track_set: string gain_db is an error" true "$(tserr '{"track":2,"gain_db":"3"}')"
+expect_eq "track_set: hide on an audio track is an error" true "$(tserr '{"track":2,"hide":true}')"
+expect_eq "track_set: composite on an audio track is an error" true "$(tserr '{"track":2,"composite":false}')"
+expect_eq "track_set: composite on the bottom video track is an error" true "$(tserr '{"track":1,"composite":true}')"
+expect_eq "track_set: no property is an error" true "$(tserr '{"track":2}')"
+expect_eq "track_set: unknown track is an error" true "$(tserr '{"track":9,"mute":true}')"
+expect_eq "track_set: missing track is an error" true "$(tserr '{"mute":true}')"
+expect_eq "track_set: string mute is an error" true "$(tserr '{"track":2,"mute":"yes"}')"
+expect_eq "track_set: empty name is an error" true "$(tserr '{"track":2,"name":""}')"
+expect_eq "track_set: 65-char name is an error" true "$(tserr "$(jq -nc '{track:2,name:("n" * 65)}')")"
+expect_eq "track_set: an invalid property among valid ones changes nothing" true "$(tserr '{"track":2,"name":"Bad","gain_db":100}')"
+expect_eq "track_set: errors changed nothing" "$TS0" "$(tl)"
+
+# Locked tracks can only be unlocked; lock:false combined with other properties unlocks first.
+ts '{"track":1,"lock":true}' >/dev/null
+TL_LOCK="$(tl)"
+expect_eq "locked track: renaming is an error" true "$(tserr '{"track":1,"name":"X"}')"
+expect_eq "locked track: error tells how to unlock" true "$(tool_text track_set '{"track":1,"mute":true}' | grep -q 'lock:false' && echo true || echo false)"
+expect_eq "locked track: lock:true with another property is an error" true "$(tserr '{"track":1,"lock":true,"mute":true}')"
+R="$(call_tool track_set '{"track":1,"lock":true}')"
+expect_eq "locked track: lock:true again is a no-op success" false "$(echo "$R" | jq -r '.result.isError')"
+expect_eq "locked track: track_remove is an error" true "$(tool_is_error track_remove '{"track":1,"force":true}')"
+expect_eq "locked track: timeline_insert_range is an error" true "$(tool_is_error timeline_insert_range "{\"path\":\"$MEDIA/tone_av.mp4\",\"in_s\":0,\"out_s\":1,\"track\":1,\"position\":0}")"
+expect_eq "locked track: errors changed nothing" "$TL_LOCK" "$(tl)"
+R="$(ts '{"track":1,"lock":false,"name":"Unlocked","mute":true}')"
+expect_eq "unlock combined: all applied" '["Unlocked",false,true]' "$(tl | jq -c '.tracks[1] | [.name, .locked, .muted]')"
+tool_json undo '{}' >/dev/null
+expect_eq "unlock combined: one undo relocks and restores" "$TL_LOCK" "$(tl)"
+ts '{"track":1,"lock":false}' >/dev/null
+expect_eq "unlocked again" "$TS0" "$(tl)"
+
+# Clips on the top video track for the force checks (the bottom video track is never removed).
+tool_json timeline_insert_range "{\"path\":\"$MEDIA/tone_av.mp4\",\"in_s\":0,\"out_s\":2,\"track\":0,\"position\":25,\"mode\":\"overwrite\"}" >/dev/null
+TSC="$(tl)"
+expect_eq "track_remove fixture: clip on the top track" "[[25,50,0,49]]" "$(echo "$TSC" | jq -c '.tracks[0]' | clipf)"
+expect_eq "track_remove: a track with clips is an error" true "$(tool_is_error track_remove '{"track":0}')"
+expect_eq "track_remove: the error mentions force" true "$(tool_text track_remove '{"track":0}' | grep -q 'force' && echo true || echo false)"
+expect_eq "track_remove: string force is an error" true "$(tool_is_error track_remove '{"track":0,"force":"yes"}')"
+expect_eq "track_remove: unknown track is an error" true "$(tool_is_error track_remove '{"track":7}')"
+expect_eq "track_remove: the bottom video track is an error even with force" true "$(tool_is_error track_remove '{"track":1,"force":true}')"
+expect_eq "track_remove: the bottom video track message" true "$(tool_text track_remove '{"track":1,"force":true}' | grep -q 'bottom video track' && echo true || echo false)"
+expect_eq "track_remove: errors changed nothing" "$TSC" "$(tl)"
+R="$(tool_json track_remove '{"track":0,"force":true}')"
+expect_eq "track_remove force: tracks left" '[["V1","video"],["Music","audio"]]' "$(echo "$R" | jq -c '[.tracks[] | [.name, .type]]')"
+expect_eq "track_remove force: removed" '{"index":0,"name":"V2","type":"video"}' "$(echo "$R" | jq -c '.removed')"
+expect_eq "track_remove force: get_timeline agrees" 2 "$(tl | jq '.tracks | length')"
+expect_eq "track_remove: undo text" "Remove video track" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "track_remove: one undo restores the clips and tracks byte for byte" "$TSC" "$(tl)"
+tool_json redo '{}' >/dev/null
+expect_eq "track_remove: redo re-applies" 2 "$(tl | jq '.tracks | length')"
+tool_json undo '{}' >/dev/null
+expect_eq "track_remove: redo then undo restores again" "$TSC" "$(tl)"
+# The clip stays on the top track for the checks below (undoing an overwrite onto an empty track
+# leaves a gap, which is not what these checks are about).
+TS0="$TSC"
+# A renamed, hidden, muted, non-compositing track and a muted audio track with gain come back as
+# they were.
+ts '{"track":0,"name":"Styled","hide":true,"mute":true,"composite":false,"gain_db":-4}' >/dev/null
+ts '{"track":2,"mute":true,"gain_db":5}' >/dev/null
+TR0="$(tl)"
+tool_json track_remove '{"track":0,"force":true}' >/dev/null
+tool_json undo '{}' >/dev/null
+expect_eq "track_remove styled video track: undo restores every property" "$TR0" "$(tl)"
+tool_json track_remove '{"track":2}' >/dev/null
+expect_eq "track_remove: the last audio track may be removed" '["video","video"]' "$(tl | jq -c '[.tracks[].type]')"
+tool_json undo '{}' >/dev/null
+expect_eq "track_remove styled audio track: undo restores every property" "$TR0" "$(tl)"
+tool_json undo '{}' >/dev/null
+tool_json undo '{}' >/dev/null
+expect_eq "styling undone" "$TS0" "$(tl)"
+tool_json track_remove '{"track":0,"force":true}' >/dev/null
+expect_eq "track_remove: removing the last video track is an error" true "$(tool_is_error track_remove '{"track":0,"force":true}')"
+tool_json undo '{}' >/dev/null
+expect_eq "track_remove of the top track undone" "$TS0" "$(tl)"
+
+echo "== markers"
+ML() { tool_json marker_list '{}'; }
+expect_eq "marker_list: empty" '[]' "$(ML | jq -c '.markers')"
+R="$(tool_json marker_add '{"start":50,"text":"Point"}')"
+expect_eq "marker_add point: index" 0 "$(echo "$R" | jq '.index')"
+expect_eq "marker_add point: end defaults to start" '[0,50,50,"Point"]' "$(echo "$R" | jq -c '.marker | [.index, .start, .end, .text]')"
+expect_eq "marker_add point: default color is #rrggbb" true "$(echo "$R" | jq '.marker.color | test("^#[0-9a-f]{6}$")')"
+expect_eq "marker_add point: markers_count" 1 "$(echo "$R" | jq '.markers_count')"
+R="$(tool_json marker_add '{"start":100,"end":150,"text":"Range","color":"#FF0000"}')"
+expect_eq "marker_add range" '{"color":"#ff0000","end":150,"index":1,"start":100,"text":"Range"}' "$(echo "$R" | jq -c '.marker')"
+tool_json marker_add '{"start":10,"text":"Early","color":"#00ff00"}' >/dev/null
+M3="$(ML)"
+expect_eq "marker_list: index order (append order)" '[[0,"Point",50,50],[1,"Range",100,150],[2,"Early",10,10]]' "$(echo "$M3" | jq -c '[.markers[] | [.index, .text, .start, .end]]')"
+expect_eq "marker_add: undo text" "Add marker: Early" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "marker_add: undo removes it" 2 "$(ML | jq '.markers | length')"
+tool_json redo '{}' >/dev/null
+expect_eq "marker_add: redo restores the list" "$M3" "$(ML)"
+R="$(tool_json marker_remove '{"index":1}')"
+expect_eq "marker_remove: markers_count" 2 "$(echo "$R" | jq '.markers_count')"
+expect_eq "marker_remove: removed marker reported" Range "$(echo "$R" | jq -r '.removed.text')"
+expect_eq "marker_remove: list after" '["Point","Early"]' "$(ML | jq -c '[.markers[].text]')"
+expect_eq "marker_remove: undo text" "Delete marker: Range" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "marker_remove: undo restores the list exactly" "$M3" "$(ML)"
+tool_json redo '{}' >/dev/null
+expect_eq "marker_remove: redo removes again" '["Point","Early"]' "$(ML | jq -c '[.markers[].text]')"
+tool_json undo '{}' >/dev/null
+R="$(tool_json marker_add "$(jq -nc '{start:0,text:("t" * 200)}')")"
+expect_eq "marker_add: 200-char text accepted" 200 "$(echo "$R" | jq '.marker.text | length')"
+tool_json undo '{}' >/dev/null
+merr() { tool_is_error marker_add "$1"; }
+expect_eq "marker_add: negative start is an error" true "$(merr '{"start":-1,"text":"x"}')"
+expect_eq "marker_add: end < start is an error" true "$(merr '{"start":20,"end":10,"text":"x"}')"
+expect_eq "marker_add: empty text is an error" true "$(merr '{"start":0,"text":""}')"
+expect_eq "marker_add: missing text is an error" true "$(merr '{"start":0}')"
+expect_eq "marker_add: 201-char text is an error" true "$(merr "$(jq -nc '{start:0,text:("t" * 201)}')")"
+expect_eq "marker_add: color name is an error" true "$(merr '{"start":0,"text":"x","color":"red"}')"
+expect_eq "marker_add: short color is an error" true "$(merr '{"start":0,"text":"x","color":"#12345"}')"
+expect_eq "marker_add: non-hex color is an error" true "$(merr '{"start":0,"text":"x","color":"#gggggg"}')"
+expect_eq "marker_add: fractional start is an error" true "$(merr '{"start":1.5,"text":"x"}')"
+expect_eq "marker_add: string start is an error" true "$(merr '{"start":"1","text":"x"}')"
+expect_eq "marker_remove: unknown index is an error" true "$(tool_is_error marker_remove '{"index":3}')"
+expect_eq "marker_remove: negative index is an error" true "$(tool_is_error marker_remove '{"index":-1}')"
+expect_eq "marker_remove: missing index is an error" true "$(tool_is_error marker_remove '{}')"
+expect_eq "markers: errors changed nothing" "$M3" "$(ML)"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

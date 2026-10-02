@@ -20,16 +20,19 @@
 #include "docks/timelinedock.h"
 #include "mainwindow.h"
 #include "mltcontroller.h"
+#include "models/markersmodel.h"
 #include "models/multitrackmodel.h"
 #include "settings.h"
 
 #include <MltPlaylist.h>
 
+#include <QRegularExpression>
 #include <QScopedPointer>
 #include <QUndoStack>
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -447,6 +450,340 @@ QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
                                                {"markers", ripple && guard.markers()}}}});
 }
 
+QJsonArray allTracksJson(MultitrackModel &model)
+{
+    QJsonArray tracks;
+    for (int t = 0; t < model.trackList().size(); ++t)
+        tracks.append(trackJson(model, t));
+    return tracks;
+}
+
+// Ends the caller's macro. When ok is false the macro is rolled back and dropped from the stack
+// (QUndoStack::undo() skips the undo() of an obsolete command, so the order matters).
+bool finishMacro(QUndoStack *stack, bool ok)
+{
+    stack->endMacro();
+    if (!ok) {
+        auto *macro = const_cast<QUndoCommand *>(stack->command(stack->index() - 1));
+        macro->undo();
+        macro->setObsolete(true);
+        stack->undo();
+    }
+    return ok;
+}
+
+// An optional track name: 1 to 64 characters, not only spaces. A null name when absent.
+bool readTrackName(const QJsonObject &arguments, QString &name, QString &error)
+{
+    const QJsonValue v = arguments.value("name");
+    if (v.isUndefined())
+        return true;
+    name = v.toString();
+    if (!v.isString() || name.trimmed().isEmpty() || name.size() > 64) {
+        error = QStringLiteral("name must be a string of 1 to 64 characters.");
+        return false;
+    }
+    return true;
+}
+
+QJsonObject trackAddTool(const QJsonObject &arguments)
+{
+    const QString type = arguments.value("type").toString();
+    if (type != "video" && type != "audio")
+        return textResult("type must be \"video\" or \"audio\".", true);
+    QString name, error;
+    if (!readTrackName(arguments, name, error))
+        return textResult(error, true);
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline; add a clip first.", true);
+    MultitrackModel &model = *MAIN.timelineDock()->model();
+    const bool video = type == "video";
+    const int before = model.trackList().size();
+    MLT.pause();
+    QUndoStack *stack = MAIN.undoStack();
+    stack->beginMacro(video ? QObject::tr("Add video track") : QObject::tr("Add audio track"));
+    stack->push(new Timeline::AddTrackCommand(model, video));
+    // Shotcut puts a new video track on top and a new audio track at the bottom.
+    const int index = video ? 0 : model.trackList().size() - 1;
+    const bool added = model.trackList().size() == before + 1
+                       && model.trackList().at(index).type
+                              == (video ? VideoTrackType : AudioTrackType);
+    if (added && !name.isNull())
+        stack->push(new Timeline::NameTrackCommand(model, index, name));
+    if (!finishMacro(stack, added))
+        return textResult("Shotcut did not add the track; nothing was changed.", true);
+    const QString newName = model.data(model.index(index), MultitrackModel::NameRole).toString();
+    return jsonResult(
+        QJsonObject{{"tracks", allTracksJson(model)},
+                    {"added", QJsonObject{{"index", index}, {"type", type}, {"name", newName}}}});
+}
+
+QJsonObject trackRemoveTool(const QJsonObject &arguments)
+{
+    int track = 0;
+    if (readFrame(arguments, "track", track) != FrameArg::Ok)
+        return textResult("track must be a non-negative integer.", true);
+    const QJsonValue forceValue = arguments.value("force");
+    if (!forceValue.isUndefined() && !forceValue.isBool())
+        return textResult("force must be a boolean.", true);
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    MultitrackModel &model = *MAIN.timelineDock()->model();
+    QString error;
+    if (!validTrack(model, track, error))
+        return textResult(error, true);
+    const bool video = model.trackList().at(track).type == VideoTrackType;
+    // Undoing the removal of the bottom video track while other video tracks exist reconnects
+    // their blend transitions to the wrong tracks (Shotcut's own Remove Track has this bug, also
+    // when the track is first moved up), so the bottom video track is never removed.
+    if (video && track == model.bottomVideoTrackIndex())
+        return textResult(QStringLiteral("Track %1 is the bottom video track, which cannot be "
+                                         "removed (a timeline needs a video track, and Shotcut "
+                                         "cannot undo removing the bottom one correctly). Remove "
+                                         "its clips with timeline_remove_ranges, or remove a "
+                                         "video track above it. Nothing was changed.")
+                              .arg(track),
+                          true);
+    if (!forceValue.toBool()) {
+        for (int c = 0; c < model.rowCount(model.index(track)); ++c) {
+            if (kindOf(model, track, c) != "blank")
+                return textResult(QStringLiteral("Track %1 holds clips; pass force:true to remove "
+                                                 "it with them (one undo restores them).")
+                                      .arg(track),
+                                  true);
+        }
+    }
+    const QString name = model.data(model.index(track), MultitrackModel::NameRole).toString();
+    const int before = model.trackList().size();
+    MLT.pause();
+    QUndoStack *stack = MAIN.undoStack();
+    stack->beginMacro(video ? QObject::tr("Remove video track")
+                            : QObject::tr("Remove audio track"));
+    // RemoveTrackCommand restores the clips, name and user filters but not mute, hide, gain or
+    // compositing. These commands clear them on the track about to go, or change nothing, and
+    // put them back when the macro is undone.
+    const QModelIndex index = model.index(track);
+    if (model.data(index, MultitrackModel::IsMuteRole).toBool())
+        stack->push(new Timeline::MuteTrackCommand(model, track));
+    // Audio tracks always report hidden (their video is hidden), so only video tracks count.
+    if (video && model.data(index, MultitrackModel::IsHiddenRole).toBool())
+        stack->push(new Timeline::HideTrackCommand(model, track));
+    if (model.data(index, MultitrackModel::GainEnabledRole).toBool()
+        && model.data(index, MultitrackModel::GainRole).toDouble() != 0)
+        stack->push(new Timeline::ChangeTrackGainCommand(model, track, 0));
+    if (video)
+        stack->push(new Timeline::CompositeTrackCommand(
+            model, track, model.data(index, MultitrackModel::IsCompositeRole).toBool()));
+    stack->push(new Timeline::RemoveTrackCommand(model, track));
+    if (!finishMacro(stack, model.trackList().size() == before - 1))
+        return textResult("Shotcut did not remove the track; nothing was changed.", true);
+    return jsonResult(QJsonObject{
+        {"tracks", allTracksJson(model)},
+        {"removed",
+         QJsonObject{{"index", track}, {"type", video ? "video" : "audio"}, {"name", name}}}});
+}
+
+QJsonObject trackSetTool(const QJsonObject &arguments)
+{
+    int track = 0;
+    if (readFrame(arguments, "track", track) != FrameArg::Ok)
+        return textResult("track must be a non-negative integer.", true);
+    QString name, error;
+    if (!readTrackName(arguments, name, error))
+        return textResult(error, true);
+    QJsonObject flags;
+    for (const char *key : {"mute", "lock", "hide", "composite"}) {
+        const QJsonValue v = arguments.value(key);
+        if (v.isUndefined())
+            continue;
+        if (!v.isBool())
+            return textResult(QStringLiteral("%1 must be a boolean.").arg(key), true);
+        flags[key] = v;
+    }
+    const QJsonValue gainValue = arguments.value("gain_db");
+    const double gain = gainValue.toDouble();
+    if (!gainValue.isUndefined()
+        && (!gainValue.isDouble() || !std::isfinite(gain) || gain < -70 || gain > 24))
+        return textResult("gain_db must be a number from -70 to 24.", true);
+    if (name.isNull() && flags.isEmpty() && gainValue.isUndefined())
+        return textResult("Pass at least one of name, mute, lock, hide, composite, gain_db.", true);
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    MultitrackModel &model = *MAIN.timelineDock()->model();
+    if (!validTrack(model, track, error, false, true))
+        return textResult(error, true);
+    const QModelIndex index = model.index(track);
+    const bool video = model.trackList().at(track).type == VideoTrackType;
+    if (!video && (flags.contains("hide") || flags.contains("composite")))
+        return textResult(QStringLiteral("Track %1 is an audio track; hide and composite apply to "
+                                         "video tracks only.")
+                              .arg(track),
+                          true);
+    if (flags.value("composite").toBool() && track == model.bottomVideoTrackIndex())
+        return textResult(QStringLiteral("Track %1 is the bottom video track, which has nothing "
+                                         "below it to composite onto.")
+                              .arg(track),
+                          true);
+    if (!gainValue.isUndefined() && !model.data(index, MultitrackModel::GainEnabledRole).toBool())
+        return textResult(QStringLiteral("Track %1's gain has keyframes; gain_db cannot set it.")
+                              .arg(track),
+                          true);
+    const bool locked = model.data(index, MultitrackModel::IsLockedRole).toBool();
+    const bool unlock = flags.contains("lock") && !flags.value("lock").toBool();
+    if (locked && !unlock
+        && (!name.isNull() || flags.size() > flags.contains("lock") || !gainValue.isUndefined()))
+        return textResult(QStringLiteral("Track %1 is locked; only lock:false is allowed (it may "
+                                         "be combined with other properties, which are applied "
+                                         "after unlocking).")
+                              .arg(track),
+                          true);
+
+    // Only properties that differ are pushed. Mute and hide commands toggle, so they must not be
+    // pushed when the value already matches. Unlock goes first and lock last, so the other
+    // commands of the call apply to an unlocked track.
+    struct Change
+    {
+        QString key;
+        std::function<QUndoCommand *()> command;
+    };
+    std::vector<Change> changes;
+    auto differs = [&](const char *key, int role) {
+        return flags.contains(key) && flags.value(key).toBool() != model.data(index, role).toBool();
+    };
+    if (unlock && locked)
+        changes.push_back(
+            {"lock", [&] { return new Timeline::LockTrackCommand(model, track, false); }});
+    if (!name.isNull() && name != model.data(index, MultitrackModel::NameRole).toString())
+        changes.push_back(
+            {"name", [&] { return new Timeline::NameTrackCommand(model, track, name); }});
+    if (differs("mute", MultitrackModel::IsMuteRole))
+        changes.push_back({"mute", [&] { return new Timeline::MuteTrackCommand(model, track); }});
+    if (differs("hide", MultitrackModel::IsHiddenRole))
+        changes.push_back({"hide", [&] { return new Timeline::HideTrackCommand(model, track); }});
+    if (differs("composite", MultitrackModel::IsCompositeRole))
+        changes.push_back({"composite", [&] {
+                               return new Timeline::CompositeTrackCommand(
+                                   model, track, flags.value("composite").toBool());
+                           }});
+    if (!gainValue.isUndefined()
+        && std::abs(gain - model.data(index, MultitrackModel::GainRole).toDouble()) > 1e-9)
+        changes.push_back({"gain_db", [&] {
+                               return new Timeline::ChangeTrackGainCommand(model, track, gain);
+                           }});
+    if (flags.value("lock").toBool() && !locked)
+        changes.push_back(
+            {"lock", [&] { return new Timeline::LockTrackCommand(model, track, true); }});
+
+    QJsonArray changed;
+    if (!changes.empty()) {
+        MLT.pause();
+        QUndoStack *stack = MAIN.undoStack();
+        // Every call is its own macro, so two calls setting gain stay two undo steps
+        // (ChangeTrackGainCommand merges with a directly preceding one).
+        stack->beginMacro(QObject::tr("Set track properties"));
+        for (const Change &change : changes) {
+            stack->push(change.command());
+            changed.append(change.key);
+        }
+        const bool ok
+            = (name.isNull() || model.data(index, MultitrackModel::NameRole).toString() == name)
+              && (!flags.contains("mute")
+                  || model.data(index, MultitrackModel::IsMuteRole).toBool()
+                         == flags.value("mute").toBool())
+              && (!flags.contains("hide")
+                  || model.data(index, MultitrackModel::IsHiddenRole).toBool()
+                         == flags.value("hide").toBool())
+              && (!flags.contains("composite")
+                  || model.data(index, MultitrackModel::IsCompositeRole).toBool()
+                         == flags.value("composite").toBool())
+              && (!flags.contains("lock")
+                  || model.data(index, MultitrackModel::IsLockedRole).toBool()
+                         == flags.value("lock").toBool())
+              && (gainValue.isUndefined()
+                  || std::abs(model.data(index, MultitrackModel::GainRole).toDouble() - gain)
+                         < 1e-6);
+        if (!finishMacro(stack, ok))
+            return textResult("Shotcut did not apply the properties; nothing was changed.", true);
+    }
+    return jsonResult(QJsonObject{{"tracks", allTracksJson(model)}, {"changed", changed}});
+}
+
+QJsonObject markerJson(int index, const Markers::Marker &marker)
+{
+    return QJsonObject{{"index", index},
+                       {"start", marker.start},
+                       {"end", marker.end},
+                       {"text", marker.text},
+                       {"color", marker.color.name()}};
+}
+
+QJsonObject markerAddTool(const QJsonObject &arguments)
+{
+    Markers::Marker marker;
+    if (readFrame(arguments, "start", marker.start) != FrameArg::Ok)
+        return textResult("start must be a non-negative integer frame.", true);
+    marker.end = marker.start;
+    const FrameArg endArg = readFrame(arguments, "end", marker.end);
+    if (endArg == FrameArg::Invalid || marker.end < marker.start)
+        return textResult("end must be an integer frame at least start.", true);
+    const QJsonValue textValue = arguments.value("text");
+    marker.text = textValue.toString();
+    if (!textValue.isString() || marker.text.trimmed().isEmpty() || marker.text.size() > 200)
+        return textResult("text must be a string of 1 to 200 characters.", true);
+    const QJsonValue colorValue = arguments.value("color");
+    if (colorValue.isUndefined()) {
+        marker.color = Settings.markerColor();
+    } else {
+        static const QRegularExpression hex("^#[0-9a-fA-F]{6}$");
+        if (!colorValue.isString() || !hex.match(colorValue.toString()).hasMatch())
+            return textResult("color must be \"#rrggbb\".", true);
+        marker.color = QColor(colorValue.toString());
+    }
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline; add a clip first.", true);
+    MarkersModel &markers = *MAIN.timelineDock()->markersModel();
+    const int before = markers.getMarkers().size();
+    MLT.pause();
+    markers.append(marker);
+    const int count = markers.getMarkers().size();
+    if (count != before + 1)
+        return textResult("Shotcut did not add the marker.", true);
+    return jsonResult(QJsonObject{{"index", count - 1},
+                                  {"marker", markerJson(count - 1, markers.getMarker(count - 1))},
+                                  {"markers_count", count}});
+}
+
+QJsonObject markerListTool(const QJsonObject &)
+{
+    QJsonArray list;
+    if (MAIN.isMultitrackValid()) {
+        const QList<Markers::Marker> markers = MAIN.timelineDock()->markersModel()->getMarkers();
+        for (int i = 0; i < markers.size(); ++i)
+            list.append(markerJson(i, markers.at(i)));
+    }
+    return jsonResult(QJsonObject{{"markers", list}});
+}
+
+QJsonObject markerRemoveTool(const QJsonObject &arguments)
+{
+    int index = 0;
+    if (readFrame(arguments, "index", index) != FrameArg::Ok)
+        return textResult("index must be a non-negative integer.", true);
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    MarkersModel &markers = *MAIN.timelineDock()->markersModel();
+    const int before = markers.getMarkers().size();
+    if (index >= before)
+        return textResult(QStringLiteral("There is no marker %1; call marker_list.").arg(index),
+                          true);
+    const QJsonObject removed = markerJson(index, markers.getMarker(index));
+    MLT.pause();
+    markers.remove(index);
+    if (markers.getMarkers().size() != before - 1)
+        return textResult("Shotcut did not remove the marker.", true);
+    return jsonResult(QJsonObject{{"removed", removed}, {"markers_count", before - 1}});
+}
+
 } // namespace
 
 QList<McpTool> McpTools::structureTools()
@@ -513,5 +850,73 @@ QList<McpTool> McpTools::structureTools()
              "ripple":{"type":"boolean","description":"Default true."}
            },"required":["tracks","ranges"]})"),
          timelineRemoveRangesTool},
+        {"track_add",
+         "Add an empty timeline track as ONE undo step, optionally named (otherwise Shotcut names "
+         "it V<n> or A<n>). A new video track goes on TOP, at index 0, so every existing track "
+         "index shifts up by one (re-read indexes from the result); a new audio track goes at the "
+         "bottom (the last index). Needs a timeline (create one with timeline_insert_range or "
+         "timeline_add_playlist). Returns {tracks:[...all tracks], added:{index, type, name}}.",
+         schema(R"({"type":"object","properties":{
+             "type":{"type":"string","enum":["video","audio"]},
+             "name":{"type":"string","minLength":1,"maxLength":64}
+           },"required":["type"]})"),
+         trackAddTool},
+        {"track_remove",
+         "Remove a track as ONE undo step (undo restores its clips, filters, name, mute, hide, "
+         "gain and compositing). A track that holds clips or transitions is refused unless force "
+         "is true. Locked tracks are refused, and so is the bottom video track (the last video "
+         "track listed): a timeline needs one, and Shotcut cannot undo removing it correctly "
+         "while other video tracks exist; remove its clips instead. Audio tracks may all be "
+         "removed. Later track indexes shift down by one. Returns {tracks:[...all tracks], "
+         "removed:{index, type, name}}.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "force":{"type":"boolean","description":"Remove a track that still holds clips."}
+           },"required":["track"]})"),
+         trackRemoveTool},
+        {"track_set",
+         "Set track properties as ONE undo step; pass at least one. Values are set, not "
+         "toggled: properties that already have the value are skipped, and a call where nothing "
+         "differs succeeds without adding an undo step. hide and composite (blend over the "
+         "tracks below) are for video tracks only, and the bottom video track cannot composite. "
+         "gain_db (-70 to 24, 0 = unchanged level) applies to any track, since video tracks carry "
+         "sound too; a gain with keyframes is refused. A locked track only accepts lock:false, "
+         "which may be combined with other properties: it unlocks first, then applies them; "
+         "lock:true is applied after the other properties. Returns {tracks:[...all tracks], "
+         "changed:[property names applied]}.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "name":{"type":"string","minLength":1,"maxLength":64},
+             "mute":{"type":"boolean"},
+             "lock":{"type":"boolean"},
+             "hide":{"type":"boolean","description":"Video tracks only."},
+             "composite":{"type":"boolean","description":"Video tracks only."},
+             "gain_db":{"type":"number","minimum":-70,"maximum":24}
+           },"required":["track"]})"),
+         trackSetTool},
+        {"marker_add",
+         "Add a timeline marker as ONE undo step: a point (end omitted or equal to start) or a "
+         "range (end > start, inclusive frames as in Shotcut). Markers are listed in the order "
+         "they were added, not by time; the new one is last. Needs a timeline. Returns {index, "
+         "marker:{index, start, end, text, color}, markers_count}.",
+         schema(R"({"type":"object","properties":{
+             "start":{"type":"integer","minimum":0,"description":"Timeline frame."},
+             "end":{"type":"integer","minimum":0,"description":"Timeline frame, at least start. Default start."},
+             "text":{"type":"string","minLength":1,"maxLength":200},
+             "color":{"type":"string","pattern":"^#[0-9a-fA-F]{6}$","description":"Default: Shotcut's marker color."}
+           },"required":["start","text"]})"),
+         markerAddTool},
+        {"marker_list",
+         "List the timeline markers in index order: {markers:[{index, start, end, text, "
+         "color}]} (empty without a timeline).",
+         schema(R"({"type":"object","properties":{}})"),
+         markerListTool},
+        {"marker_remove",
+         "Remove the marker at index (from marker_list) as ONE undo step; later markers' indexes "
+         "shift down by one. Returns {removed:{index, start, end, text, color}, markers_count}.",
+         schema(R"({"type":"object","properties":{
+             "index":{"type":"integer","minimum":0}
+           },"required":["index"]})"),
+         markerRemoveTool},
     };
 }
