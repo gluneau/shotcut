@@ -4,7 +4,8 @@
 # Usage: MCP_TOKEN=<token> [MCP_PORT=7468] tools/mcp-smoke-ripple.sh
 # Run it against a FRESH, throwaway Shotcut whose settings have Timeline > Ripple All Tracks and
 # Ripple Markers turned on (shotcut.ini: [timeline] rippleAllTracks=true, rippleMarkers=true);
-# with other settings it reports that and skips its checks. Needs: bash, curl, jq, ffmpeg.
+# with other settings it reports that, skips its checks and exits 2 (not a pass).
+# Needs: bash, curl, jq, ffmpeg.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=tools/mcp-smoke-lib.sh
@@ -50,7 +51,7 @@ SETTINGS='{"all_tracks":true,"markers":true}'
 settings() { tool_json get_timeline '{}' | jq -c '{all_tracks: .settings.ripple_all_tracks, markers: .settings.ripple_markers}'; }
 if [ "$(settings)" != "$SETTINGS" ]; then
   echo "SKIP  the ripple settings are not both on in this Shotcut; nothing checked."
-  exit 0
+  exit 2
 fi
 # Markers as "text@start" from a saved copy of the project.
 markers() {
