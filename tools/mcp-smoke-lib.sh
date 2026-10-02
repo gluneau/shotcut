@@ -48,6 +48,24 @@ wait_job() {
   echo "$out"
 }
 
+# open_fixture_project PATH: opens a copy of the project file PATH under a new, unique name next to
+# it (so relative media paths still resolve), discarding unsaved changes; prints the open_project
+# result. Shotcut refuses to open a project that has an auto-save file, which it writes every 60 s
+# while that project is open and modified, so reopening the same path again is racy; a path that
+# was never opened has none. A refused open is reported as a FAIL (on stderr, so it shows even
+# when the result is discarded).
+open_fixture_project() {
+  local copy out
+  copy="$(mktemp --suffix=.mlt "$(dirname "$1")/$(basename "$1" .mlt)-XXXXXX")" \
+    && cp "$1" "$copy" || { fail "open_fixture_project $1" "could not copy it" >&2; return 1; }
+  out="$(call_tool open_project "$(jq -nc --arg p "$copy" '{path:$p,discard_changes:true}')")"
+  if [ "$(echo "$out" | jq -r '.result.isError')" != false ]; then
+    fail "open_fixture_project $1" "$(echo "$out" | jq -r '.result.content[0].text // .')" >&2
+    return 1
+  fi
+  echo "$out" | jq -c '.result.content[0].text | fromjson'
+}
+
 # fresh_guard: exits 2 unless the target is a fresh session (fails closed).
 fresh_guard() {
   local state

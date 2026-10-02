@@ -183,7 +183,7 @@ LOCKED="$TMP/locked.mlt"
 tool_json save_project "{\"path\":\"$LOCKED\"}" >/dev/null
 PL="$(grep -o '<track producer="[^"]*"' "$LOCKED" | grep -v background | head -1 | sed 's/.*producer="//; s/"//')"
 sed -i "0,/<playlist id=\"$PL\"[^>]*>/s//&\n  <property name=\"shotcut:lock\">1<\/property>/" "$LOCKED"
-tool_json open_project "{\"path\":\"$LOCKED\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$LOCKED" >/dev/null
 sleep 2
 expect_eq "locked clip: track 0 is locked after reopening" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
 L="$(job_result detect_silence '{"track":0,"clip":0}')"
@@ -298,7 +298,7 @@ echo "== detect_scenes on clips"
 # Reopen the project of the locked block without its lock, put scenes.mp4 on the timeline.
 UNLOCKED="$TMP/unlocked.mlt"
 grep -v 'shotcut:lock' "$LOCKED" > "$UNLOCKED"
-tool_json open_project "{\"path\":\"$UNLOCKED\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$UNLOCKED" >/dev/null
 sleep 2
 tool_json playlist_add "{\"path\":\"$MEDIA/scenes.mp4\"}" >/dev/null
 tool_json timeline_add_playlist '{}' >/dev/null
@@ -336,7 +336,7 @@ LOCKED2="$TMP/locked2.mlt"
 tool_json save_project "{\"path\":\"$LOCKED2\"}" >/dev/null
 PL2="$(grep -o '<track producer="[^"]*"' "$LOCKED2" | grep -v background | head -1 | sed 's/.*producer="//; s/"//')"
 sed -i "0,/<playlist id=\"$PL2\"[^>]*>/s//&\n  <property name=\"shotcut:lock\">1<\/property>/" "$LOCKED2"
-tool_json open_project "{\"path\":\"$LOCKED2\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$LOCKED2" >/dev/null
 sleep 2
 expect_eq "locked scenes clip: track 0 is locked after reopening" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
 SL="$(job_result detect_scenes "{\"track\":0,\"clip\":$(scene_clip)}")"
@@ -363,14 +363,14 @@ cat > "$WARP" <<XML
   </tractor>
 </mlt>
 XML
-tool_json open_project "{\"path\":\"$WARP\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$WARP" >/dev/null
 sleep 1
 expect_eq "speed-changed clip fixture: one clip of 112 frames" "[[0,112,0,111]]" "$(tool_json get_timeline '{}' | jq -c '[.tracks[0].clips[] | select(.kind=="clip") | [.start, .duration, .in, .out]]')"
 SW="$(job_result detect_scenes '{"track":0,"clip":0,"wait_ms":20000}')"
 expect_eq "speed-changed clip: the source file is analysed" "$MEDIA/scenes.mp4" "$(echo "$SW" | jq -r '.path')"
 expect_eq "speed-changed clip: scenes found" true "$(echo "$SW" | jq -r '.scenes | length > 0')"
 expect_eq "speed-changed clip: no scene has timeline_frames" 0 "$(echo "$SW" | jq -r '[.scenes[] | select(has("timeline_frames"))] | length')"
-tool_json open_project "{\"path\":\"$LOCKED2\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$LOCKED2" >/dev/null
 sleep 2
 
 echo "== transcribe: supplied transcripts"
@@ -554,7 +554,7 @@ else
     expect_eq "transcribe noaudio: message" "$MEDIA/noaudio.mp4 has no audio stream." "$(tool_text transcribe "$(jq -nc --arg p "$MEDIA/noaudio.mp4" '{path:$p}')")"
 
     # jfk.wav on the timeline, trimmed by 2 s at its start
-    tool_json open_project "{\"path\":\"$UNLOCKED\",\"discard_changes\":true}" >/dev/null
+    open_fixture_project "$UNLOCKED" >/dev/null
     sleep 2
     tool_json playlist_add "{\"path\":\"$MEDIA/jfk.wav\"}" >/dev/null
     tool_json timeline_add_playlist '{}' >/dev/null
@@ -582,7 +582,7 @@ else
     tool_json save_project "{\"path\":\"$LOCKED3\"}" >/dev/null
     PL3="$(grep -o '<track producer="[^"]*"' "$LOCKED3" | grep -v background | head -1 | sed 's/.*producer="//; s/"//')"
     sed -i "0,/<playlist id=\"$PL3\"[^>]*>/s//&\n  <property name=\"shotcut:lock\">1<\/property>/" "$LOCKED3"
-    tool_json open_project "{\"path\":\"$LOCKED3\",\"discard_changes\":true}" >/dev/null
+    open_fixture_project "$LOCKED3" >/dev/null
     sleep 2
     expect_eq "transcribe locked clip: track 0 is locked" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
     WL="$(job_result transcribe "{\"track\":0,\"clip\":$(jfk_clip),\"wait_ms\":20000,\"language\":\"en\"}")"
@@ -595,7 +595,7 @@ echo "== get_overview"
 expect_eq "tools/list has get_overview" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["get_overview"])')"
 # The unlocked project from the scenes block, emptied, then scenes.mp4 alone on track 0:
 # red frames 0-74, green 75-149, blue 150-224.
-tool_json open_project "{\"path\":\"$UNLOCKED\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$UNLOCKED" >/dev/null
 sleep 2
 for _ in $(seq 1 20); do
   K="$(tool_json get_timeline '{}' | jq -r '[.tracks[0].clips | to_entries[] | select(.value.kind!="blank")] | last | .key // empty')"
@@ -761,7 +761,7 @@ echo "== get_overview on a portrait (9:16) timeline"
 PORTRAIT="$TMP/portrait.mlt"
 tool_json save_project "{\"path\":\"$PORTRAIT\"}" >/dev/null
 sed -i -E '/<profile/{s/ width="[0-9]+"/ width="180"/;s/ height="[0-9]+"/ height="320"/;s/display_aspect_num="[0-9]+"/display_aspect_num="9"/;s/display_aspect_den="[0-9]+"/display_aspect_den="16"/;s/sample_aspect_num="[0-9]+"/sample_aspect_num="1"/;s/sample_aspect_den="[0-9]+"/sample_aspect_den="1"/}' "$PORTRAIT"
-tool_json open_project "{\"path\":\"$PORTRAIT\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$PORTRAIT" >/dev/null
 sleep 2
 expect_eq "portrait: get_frame is 180x320" "180 320" "$(call_tool get_frame '{"position":10}' | jq -r '.result.content[1].text | fromjson | "\(.width) \(.height)"')"
 ov_call '{"columns":4,"rows":2,"tile_width":96,"format":"png"}' "$TMP/ovp96.png"
@@ -786,7 +786,7 @@ cat > "$EMPTY" <<'XML'
   <playlist id="playlist0"/>
 </mlt>
 XML
-tool_json open_project "{\"path\":\"$EMPTY\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$EMPTY" >/dev/null
 sleep 1
 TL0="$(tool_json get_timeline '{}')"
 expect_eq "insert_range: the session has no timeline" 0 "$(echo "$TL0" | jq '.tracks | length')"
@@ -877,7 +877,7 @@ tool_json save_project "{\"path\":\"$IR_UNLOCKED\"}" >/dev/null
 cp "$IR_UNLOCKED" "$IR_LOCKED"
 PL4="$(grep -o '<track producer="[^"]*"' "$IR_LOCKED" | grep -v background | head -1 | sed 's/.*producer="//; s/"//')"
 sed -i "0,/<playlist id=\"$PL4\"[^>]*>/s//&\n  <property name=\"shotcut:lock\">1<\/property>/" "$IR_LOCKED"
-tool_json open_project "{\"path\":\"$IR_LOCKED\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$IR_LOCKED" >/dev/null
 sleep 1
 expect_eq "insert_range locked: track 0 is locked after reopening" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
 LTL="$(tool_json get_timeline '{}')"
@@ -885,7 +885,7 @@ expect_eq "insert_range: locked track is an error" true "$(ierr "$S")"
 expect_eq "insert_range: overwrite on a locked track is an error" true "$(ierr "$(with '.mode="overwrite"')")"
 expect_eq "insert_range: locked track unchanged" "$LTL" "$(tool_json get_timeline '{}')"
 
-tool_json open_project "{\"path\":\"$IR_UNLOCKED\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$IR_UNLOCKED" >/dev/null
 sleep 1
 tool_json playlist_add "{\"path\":\"$MEDIA/scenes.mp4\"}" >/dev/null
 UTL="$(tool_json get_timeline '{}')"
@@ -973,7 +973,7 @@ cat > "$TW" <<XML
   </playlist>
 </mlt>
 XML
-tool_json open_project "{\"path\":\"$TW\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$TW" >/dev/null
 sleep 1
 expect_eq "insert_range timewarp fixture: one playlist item" 1 "$(tool_json get_playlist '{}' | jq '.items | length')"
 expect_eq "insert_range: a speed-changed playlist item is refused" true "$(tool_text timeline_insert_range '{"playlist_index":0,"track":0,"position":0}' | grep -q 'speed change' && echo true || echo false)"
@@ -982,7 +982,7 @@ expect_eq "insert_range: the refusal creates no timeline" 0 "$(tool_json get_tim
 echo "== timeline_remove_ranges"
 expect_eq "tools/list has timeline_remove_ranges" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["timeline_remove_ranges"])')"
 expect_eq "remove_ranges: no timeline is an error" true "$(tool_is_error timeline_remove_ranges '{"tracks":[0],"ranges":[{"start":0,"end":10}]}')"
-tool_json open_project "{\"path\":\"$EMPTY\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$EMPTY" >/dev/null
 sleep 1
 tool_json timeline_insert_range "{\"path\":\"$MEDIA/tone_av.mp4\",\"in_s\":0,\"out_s\":10,\"track\":0,\"position\":0}" >/dev/null
 RR0="$(tool_json get_timeline '{}')"
@@ -1116,7 +1116,7 @@ tool_json save_project "{\"path\":\"$RR_UNLOCKED\"}" >/dev/null
 cp "$RR_UNLOCKED" "$RR_LOCKED"
 PL5="$(grep -o '<track producer="[^"]*"' "$RR_LOCKED" | grep -v background | head -1 | sed 's/.*producer="//; s/"//')"
 sed -i "0,/<playlist id=\"$PL5\"[^>]*>/s//&\n  <property name=\"shotcut:lock\">1<\/property>/" "$RR_LOCKED"
-tool_json open_project "{\"path\":\"$RR_LOCKED\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$RR_LOCKED" >/dev/null
 sleep 1
 expect_eq "remove_ranges locked: track 0 is locked after reopening" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
 RRK="$(tool_json get_timeline '{}')"
@@ -1149,7 +1149,7 @@ cat > "$1" <<XML
 XML
 }
 two_track "$TMP/two-equal.mlt" 249
-tool_json open_project "{\"path\":\"$TMP/two-equal.mlt\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$TMP/two-equal.mlt" >/dev/null
 sleep 1
 TT0="$(tool_json get_timeline '{}')"
 expect_eq "remove_ranges two tracks fixture: V1 and A1 of 250 frames" "video [[0,250,0,249]] audio [[0,250,0,249]]" "$(echo "$TT0" | jq -r '[.tracks[] | "\(.type) \(. | [.clips[] | select(.kind=="clip") | [.start,.duration,.in,.out]] | tojson)"] | join(" ")')"
@@ -1171,7 +1171,7 @@ tool_json undo '{}' >/dev/null
 expect_eq "remove_ranges: unlisted-track case undone" "$TT0" "$(tool_json get_timeline '{}')"
 
 two_track "$TMP/two-diff.mlt" 199
-tool_json open_project "{\"path\":\"$TMP/two-diff.mlt\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$TMP/two-diff.mlt" >/dev/null
 sleep 1
 TD0="$(tool_json get_timeline '{}')"
 R="$(rr '{"tracks":[0,1],"ranges":[{"start":150,"end":230}]}')"
@@ -1187,7 +1187,7 @@ expect_eq "remove_ranges: different-length case undone" "$TD0" "$(tool_json get_
 # A1 starts at frame 30 (a leading gap): with ripple the gap part of a range is removed too, so
 # both tracks lose the same 60 frames and stay aligned.
 two_track "$TMP/two-gap.mlt" 219 '<blank length="30"/>'
-tool_json open_project "{\"path\":\"$TMP/two-gap.mlt\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$TMP/two-gap.mlt" >/dev/null
 sleep 1
 TG0="$(tool_json get_timeline '{}')"
 expect_eq "remove_ranges gap fixture: A1 clip starts at 30" "[[30,220,0,219]]" "$(echo "$TG0" | jq -c '.tracks[1]' | clipf)"
@@ -1204,7 +1204,7 @@ expect_eq "remove_ranges across a leading gap: one undo restores byte for byte" 
 # frames on 2 tracks are really applied; one more is refused before any change.
 CAP=120
 HALF=$((CAP / 2))
-tool_json open_project "{\"path\":\"$TMP/two-equal.mlt\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$TMP/two-equal.mlt" >/dev/null
 sleep 1
 tool_json seek '{"position":100}' >/dev/null
 TC0="$(tool_json get_timeline '{}')"
@@ -1240,7 +1240,7 @@ expect_eq "remove_ranges: the user's ripple-all-tracks setting is unchanged" fal
 # The guarded tools (EditPreviewGuard) pause, block preview refreshes and, for large edits, feed
 # the preview a stand-in; the preview must work again afterwards, or get_frame would time out or
 # show a stale picture. scenes.mp4 is red 0-74, green 75-149, blue 150-224.
-tool_json open_project "{\"path\":\"$EMPTY\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$EMPTY" >/dev/null
 sleep 1
 tool_json timeline_insert_range "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":9,\"track\":0,\"position\":0}" >/dev/null
 gf_call '{"position":10}' "$TMP/rf0.jpg"
@@ -1301,7 +1301,7 @@ TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.
 for t in track_add track_remove track_set marker_add marker_list marker_remove; do
   expect_eq "tools/list has $t" true "$(echo "$TOOLS" | jq -r "contains([\"$t\"])")"
 done
-tool_json open_project "{\"path\":\"$EMPTY\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$EMPTY" >/dev/null
 sleep 1
 tl() { tool_json get_timeline '{}'; }
 expect_eq "track_add: no timeline is an error" true "$(tool_is_error track_add '{"type":"audio"}')"
@@ -1594,7 +1594,7 @@ cat > "$KG" <<XML
   </tractor>
 </mlt>
 XML
-tool_json open_project "{\"path\":\"$KG\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$KG" >/dev/null
 sleep 1
 # saved_gain [MARKER]: the level of every volume filter of a saved copy, one per line, with
 # MARKER (default: any) in its properties: "shotcut:trackVolume<" marks the track gain filter.

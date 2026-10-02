@@ -45,7 +45,7 @@ cat > "$TMP/two.mlt" <<XML
   </tractor>
 </mlt>
 XML
-tool_json open_project "{\"path\":\"$TMP/two.mlt\",\"discard_changes\":true}" >/dev/null
+open_fixture_project "$TMP/two.mlt" >/dev/null
 sleep 1
 SETTINGS='{"all_tracks":true,"markers":true}'
 settings() { tool_json get_timeline '{}' | jq -c '{all_tracks: .settings.ripple_all_tracks, markers: .settings.ripple_markers}'; }
