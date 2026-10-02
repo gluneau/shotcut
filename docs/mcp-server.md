@@ -412,6 +412,82 @@ Residual risks:
   a long session of many cuts can use several GB on a debug build.
 - The analysis cache and Whisper results have no size budget beyond their entry counts.
 
+## Stage 3B: filters
+
+Stage 3B starts with five generic filter tools (43 tools in all) that add, change and remove
+filters on TIMELINE clips:
+
+| Tool | What it does | Key arguments |
+|------|--------------|---------------|
+| `filter_list_available` | The allowlist below with parameters, ranges, defaults and units | none |
+| `filter_list_applied` | A clip's filters in order (as the Filters panel lists them) | `track`, `clip` |
+| `filter_add` | Adds an allowlisted filter after the clip's existing filters | `track`, `clip`, `filter`, `params?` |
+| `filter_set` | Changes parameters of an allowlisted filter | `track`, `clip`, `index`, `params` |
+| `filter_remove` | Removes any listed filter (undo puts it back in place) | `track`, `clip`, `index` |
+
+`filter_list_applied` returns `{filters:[{index, id, service, disabled, params}]}`; the edit tools
+return `{index, track}` (the track as `get_timeline` reports it). Hidden internal filters (such
+as the audio level meter) are never listed and keep their place.
+
+### The allowlist
+
+Parameters, ranges and defaults are those of Shotcut's own filter UIs (`src/qml/filters/`): the
+tool sets the defaults itself, because Shotcut applies them only when its UI first shows a new
+filter. Missing params take the defaults; unknown names, wrong types and values out of range are
+errors. A rect is `{x, y, w, h}` in pixels of the video mode (stored as `"x y w h 1"`); its
+default `fit` is the clip's picture fitted into the frame and centered.
+
+| id | MLT service | Kind | Parameters (range, default, unit) | Set automatically |
+|----|-------------|------|-----------------------------------|-------------------|
+| `gain` | `volume` | audio | `level` -70..24, 0 dB | |
+| `normalize_one_pass` | `dynamic_loudness` | audio | `target_loudness` -50..-10, -23 LUFS; `window` 2..600, 10 s; `max_gain` 0..30, 15 dB; `min_gain` -30..0, -15 dB; `max_rate` 0.5..9, 3 dB/s | `discontinuity_reset` 1 |
+| `brightness` | `brightness` | video | `level` 0..2, 1 (1 = unchanged) | `rgb_only` 1 |
+| `color_grading` | `lift_gamma_gain` | video | `lift_r/g/b` -1..1, 0; `gamma_r/g/b` and `gain_r/g/b` 0.5..2, 1 (raw MLT values; Shotcut's wheels show other numbers) | `shotcut:filter_version` 1 |
+| `saturation` | `frei0r.saturat0r` | video | `saturation` 0..3, 1 (a multiplier; stored as multiplier x 0.125 in property `0`) | `threads` 0 |
+| `white_balance` | `frei0r.colgate` | video | `neutral_color` `#rrggbb`, `#7f7f7f`; `temperature_k` 1000..15000, 6500 K (stored as K / 15000 in property `1`) | `threads` 0 |
+| `box_blur` | `box_blur` | video | `hradius`, `vradius` integers 0..100, 5 px | |
+| `blur_pad` | `pillar_echo` | video | `blur` 0..10, 4 %; `rect` rect, fit | |
+| `size_position` | `affine` | video | `rect` (property `transition.rect`) rect, fit; `rotation` (property `transition.fix_rotate_x`) -360..360, 0 degrees | `transition.fill` 1, `transition.distort` 0, `transition.valign` middle, `transition.halign` center, `background` `color:#00000000`, `transition.threads` 0 |
+| `crop` | `crop` | video, once per clip | `left`, `right` integers 0..video width; `top`, `bottom` 0..video height; 0 px (left + right and top + bottom must leave a picture) | `use_profile` 1, `center` 0, `center_bias` 0 |
+
+A row whose MLT service is missing (for example the frei0r plugins are not installed) is listed
+under `unavailable` with the reason, and cannot be added. GPU-only (Movit) filters are never
+offered.
+
+`filter_list_applied` reports allowlisted filters with the tool-facing names and units above (a
+value with keyframes is shown as its raw MLT string). Other filters report their Shotcut id (or
+MLT service) and empty `params`; `filter_set` refuses them, `filter_remove` removes them.
+
+### Rules
+
+- Every call is ONE undo step with its own text: `Add <label> filter`, `Set <label>:
+  name=value, ...` (two `filter_set` calls are always two undo steps, even with equal values) and
+  `Remove <label> filter`, where label is Shotcut's name of the filter (for example "Gain /
+  Volume").
+- The tools work by `(track, clip)` through the timeline model, never through the Filters panel:
+  they do not change the selection, and the clip opened in the Source player cannot be targeted
+  (Shotcut has no undo for filters there).
+- `shotcut:filter` is set to the id Shotcut uses (the filter UI's objectName, for example
+  `audioGain`, `affineSizePosition`, `blur_pad`) and left out when Shotcut has none (Shotcut
+  then identifies the filter by its MLT service), so the Filters panel shows tool-made filters
+  under their real names. `_shotcut:newFilter` is never set, so opening the filter in the panel
+  does not reset its values to the UI's defaults.
+- A clip's filter is attached to the clip's parent producer, as in Shotcut, with the clip's in
+  and out; it follows the clip when it is moved or trimmed.
+- Refused: a locked track (`filter_list_applied` works on one), a blank or a transition, an audio
+  filter on a clip without audio, a picture filter on an audio-only clip or on an audio track, a
+  second filter of a kind that allows only one (`crop`), an index not in `filter_list_applied`.
+
+### Known limits and residual risks (stage 3B filters)
+
+- Keyframes are not edited: `filter_set` refuses a parameter that has keyframes.
+- Filters on the clip opened in the Source player, on tracks and on the timeline output are not
+  reachable through the tools. The commands can target the timeline output (for the caption
+  burn-in of a later stage), but no tool uses that path yet, so it is untested.
+- If the Filters panel shows a filter that `filter_set` changes, the panel reloads it; other
+  panel state (the selected filter) may reset when a tool adds or removes a filter of the clip it
+  shows.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -486,6 +562,14 @@ the user's ripple settings and puts them back: pre-seed a `[timeline]` section w
 prints SKIP and exits 2, which is not a pass. Each script ends with "All checks passed." (exit
 code 0) when it passes.
 
+Stage 3B has its own script, also needing a FRESH throwaway Shotcut:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] tools/mcp-smoke-polish.sh
+
+It needs bash, curl, jq and ffmpeg. It builds a timeline from the generated fixtures, adds,
+changes and removes filters with their undo and redo, saves and reopens a copy of the project,
+and checks the refusals.
+
 Manual checks (they need a modified project, which the tools cannot create):
 
 - With an edited project loaded, wait for the first autosave tick (the file under
@@ -513,5 +597,5 @@ Manual checks for stage 2 (GUI only; the headless script cannot cover them):
 ## Known limits
 
 Not covered by the tools or not tested headless: locked tracks (refused, tested by hand only), GPU
-mode, proxies, generators and titles, filters other than fades, subtitles, two-pass
+mode, proxies, generators and titles, filters outside the stage 3B allowlist, subtitles, two-pass
 encoding and export ranges.
