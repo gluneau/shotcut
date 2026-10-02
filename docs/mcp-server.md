@@ -160,6 +160,195 @@ is its size (0 if absent) and `elapsed_ms` is the run time so far, or the total 
 finished. `exit_code` is the raw process code; a render that reached 99% or more counts as
 succeeded. `error` is the end of the render log when it failed.
 
+## Stage 3A: perception and structure
+
+Stage 3A adds 15 tools (38 in all) so a client can hear and read footage, look at the whole
+timeline at once and cut it by frame ranges, and manage tracks and markers.
+
+| Tool | What it does | Key arguments |
+|------|--------------|---------------|
+| `get_job` | Status and result of a background analysis job | `job_id` |
+| `analyze_media` | Probes a media file with ffprobe | `path` |
+| `detect_silence` | Silent and spoken stretches of a source's audio | source, `noise_db?`, `min_s?`, `wait_ms?` |
+| `audio_levels` | Loudness (LUFS, LRA, true peak) and per-slice RMS/peak levels | source, `buckets?`, `wait_ms?` |
+| `detect_scenes` | Scene changes (cuts) in a source's video | source, `threshold?`, `wait_ms?` |
+| `transcribe` | Speech to text with word times (Whisper), or stores a supplied transcript | source, `language?`, `wait_ms?`; or `path` + `transcript` |
+| `get_overview` | One contact-sheet image of the whole timeline | `columns?`, `rows?`, `tile_width?`, `format?` |
+| `timeline_insert_range` | Puts a range of a file on a track at a frame (insert or overwrite) | `path` or `playlist_index`, `in_s`, `out_s`, `track`, `position`, `mode?` |
+| `timeline_remove_ranges` | Cuts the same frame ranges out of several tracks | `tracks`, `ranges`, `ripple?` (default true) |
+| `track_add` | Adds an empty video or audio track | `type`, `name?` |
+| `track_remove` | Removes a track | `track`, `force?` |
+| `track_set` | Sets name, mute, lock, hide, composite, gain_db | `track` plus at least one property |
+| `marker_add` | Adds a point or range marker | `start`, `end?`, `text`, `color?` |
+| `marker_list` | Lists markers in index order | none |
+| `marker_remove` | Removes a marker | `index` |
+
+"Source" means exactly one of `path` (absolute path of an existing file) or `track` and `clip` (a
+timeline clip: only its trimmed range is analysed; a locked track is fine). All result times are
+seconds in the SOURCE file. For a clip source, results also carry `timeline_frames`: timeline
+frame numbers (`[{start, end}]` with `end` exclusive, or a single frame for `detect_scenes`),
+empty or omitted when a time does not map onto the clip, and always for a clip with a speed
+change.
+
+### Background jobs
+
+The analysis tools run external programs in the background. `wait_ms` (integer 0 to 20000,
+default 0) makes the call wait for the result; without it, or when the job is slower, the call
+returns `{job_id, state}` at once. Poll it with `get_job {job_id}`, which returns `{job_id, kind,
+state, percent?, result?, error?, elapsed_ms}`; `state` is `running`, `succeeded`, `failed` or
+`cancelled`, `result` is present once it succeeded and `error` (with the end of the program's
+output) once it failed. An identical call while the first still runs returns the same job. Jobs
+live in memory (the newest 200) until Shotcut quits, also after the project is closed. A job is
+killed after 600 s (`transcribe`: 600 s plus the length of the audio, at most 4 h).
+`analyze_media` always waits up to 5 s.
+
+Programs are looked up in Shotcut's application folder first, then on `PATH`: `ffmpeg` and
+`ffprobe` (both ship with Shotcut). A missing program is a tool error. Arguments are passed as a
+list, never through a shell. Temporary files (`transcribe`'s decoded audio) are deleted when the
+job ends.
+
+Results are cached in memory, keyed by the file's path, size and modification time, the tool and
+its parameters (and for a clip, its position and trim, since `timeline_frames` depend on them). A
+cached result comes back at once with `"cached": true`. The cache keeps the 200 most recent
+results, has no size budget and is lost when Shotcut quits. Editing a file in place without
+changing its size or modification time is not noticed.
+
+### Analysis tools
+
+- `analyze_media {path}` returns `{path, duration_s, size_bytes, video, audio}`: `video` is
+  `{width, height, fps, codec, rotation, pix_fmt}` or null, `audio` is `{channels, sample_rate,
+  codec}` or null; first video and first audio stream only; `rotation` is degrees as ffprobe
+  reports it (may be negative). `duration_s` is null when unknown. Errors: relative or missing
+  path, a directory, a Qt resource path, a file that is not media (the job fails). Stage 3A also
+  adds `width`, `height`, `has_audio`, `rotation` and `fps` of the source to clips in
+  `get_playlist` and `get_timeline` (omitted when unknown).
+- `detect_silence` (`noise_db` -90 to -10, default -35; `min_s` 0.05 to 30, default 0.4)
+  returns `{path, in_s, out_s, ranges, speech_ranges, total_silence_s}`; `ranges` are the silent
+  stretches and `speech_ranges` the rest of `[in_s, out_s]`, each `{start_s, end_s,
+  duration_s, timeline_frames?}`. Boundaries are approximate (about 0.1 s). A silence running
+  to the end is closed at `out_s`. A source without audio is an error.
+- `audio_levels` (`buckets` 1 to 600, default 60) returns `{path, in_s, out_s, integrated_lufs,
+  loudness_range_lu, true_peak_dbtp, buckets:[{start_s, end_s, rms_db, peak_db}]}`. Levels are
+  dBFS with a floor of -120; `integrated_lufs` reads -70 for silence (ebur128's floor). A source
+  without audio, or longer than 7200 s, is an error (analyse a clip range instead).
+- `detect_scenes` (`threshold` 0.05 to 0.9, default 0.3) returns `{path, in_s, out_s,
+  scenes:[{time_s, score, timeline_frames?}]}`; `time_s` is the first frame of the new scene,
+  `score` (0 to 1, 3 decimals) how different it is from the frame before. A hard cut scores
+  about 1, a change between similar pictures less (the fixture's red-to-green cut scores 0.64),
+  so a high threshold misses soft cuts. A cut on the very first frame of the analysed range is
+  never reported (there is no frame before it). A source without video is an error.
+- `get_overview` (`columns` and `rows` 1 to 8, default 4; `tile_width` 96 to 640, default 320;
+  `format` `jpeg` or `png`) returns one image of `columns*rows` frames evenly spaced from frame
+  0 to the last frame, each labelled with its timecode and frame number, plus `{columns, rows,
+  tile_width, positions}` with the values actually used. Limits: a timeline with fewer frames
+  than tiles gets one tile per frame; `tile_width` is reduced (not below 96) so neither side of
+  the image exceeds 4096 px; every tile waits at most 3 s for its frame and the whole sheet at
+  most 45 s, else an error. The playhead is put back and playback resumes; a source clip shown
+  in the player is replaced by the timeline. Refused with no timeline, an empty timeline, or
+  while an export started with `export_video` runs; stopped with an error if the timeline
+  changes meanwhile.
+
+### transcribe and Whisper
+
+`transcribe` runs the Whisper.cpp program and model configured in Shotcut: Settings are in the
+Subtitles panel > Speech to Text... > Configuration (the `whisper-cli` executable and a GGML model
+file; nothing is downloaded). When either is missing the call returns "Whisper is not
+configured" at once, without starting a job. The audio is decoded with ffmpeg to 16 kHz mono and
+passed to `whisper-cli ... -ojf`; GPU use follows the dialog's Use GPU option, and a failed run is
+not retried (the error carries the program's message and, with the GPU on, a hint to turn it
+off). `language` is `auto` (default) or a Whisper code (`en`, `fr`, ...; also `haw`, `yue`);
+whisper-cli itself rejects unknown codes.
+
+The result is `{path, in_s, out_s, language, granularity, segments:[{start_s, end_s, text,
+words:[{start_s, end_s, text}], timeline_frames?}]}`. `granularity` is `word`, or `segment` when
+Whisper gave no word times. Words lie inside their segment, in order, and may have `start_s ==
+end_s`. Punctuation tokens (ASCII, and Unicode punctuation such as an ellipsis or an em dash)
+join a word's text without extending its end time. A segment that has no length once clamped to
+the analysed range is dropped. Audio without speech gives `segments: []`.
+
+Bring your own transcript instead: `transcribe {path, transcript}` (nothing else) stores
+`transcript` = `{segments:[{start_s, end_s, text, words?}]}` for that file: 1 to 5000 segments
+sorted by `start_s`, `0 <= start_s < end_s <= 86400`, non-empty text of at most 2000
+characters, words (at most 2000 per segment) inside their segment and in order. It is returned
+with `"supplied": true` by later `transcribe {path}` calls and wins over Whisper results. A track
+and clip call always runs Whisper. Supplied transcripts are never evicted, but at most 200 files
+may hold one: storing for a 201st file is an error, replacing the transcript of a file that has
+one is allowed. The last 50 Whisper results are also kept per file for later tools.
+
+### Structure tools
+
+- `timeline_insert_range` puts `[in_s, out_s)` of a media file (`path`) or of a playlist item
+  (`playlist_index`, whose own in/out is the default range; its filters are not carried over and
+  an item with a speed change is refused) on `track` at the absolute frame `position`, as one
+  undo step, and returns `{track, inserted:{start, duration}, ripple:{all_tracks, markers}}`.
+  `mode` `insert` (default) splits a clip at `position` and pushes later items right; whether
+  other tracks and markers also move follows Shotcut's own ripple settings, reported in
+  `ripple` and in `get_timeline`'s `settings`. `overwrite` replaces what is under the range and
+  never ripples. With no timeline, `track` must be 0 and a video track is created. Refused:
+  locked tracks, still images, generators, project files, a range beyond the file or shorter
+  than one frame, a position more than one hour after the end of the track, a position inside a
+  transition and an overwrite covering part of one. Inserting exactly at a transition's start
+  puts the new clip before the transition, which then plays after the new clip instead of at the
+  end of the previous clip; inserting exactly at its end puts the new clip between the
+  transition and the next clip. An overwrite covering a whole transition replaces it.
+- `timeline_remove_ranges` cuts the same `ranges` (absolute frames `{start, end}`, `end`
+  exclusive, up to 500) out of every listed track (1 to 8) as one undo step, and returns
+  `{tracks, removed_frames, ranges_applied, ripple}`. Ranges are sorted, overlapping or touching
+  ones merged, clamped to the end of the longest listed track and dropped past it. With `ripple`
+  true (default) each range is closed on every listed track, gaps included, so the tracks stay
+  aligned; unlisted tracks are never touched, whatever Shotcut's ripple-all-tracks setting is
+  (the tool turns it off while it works and restores it). Markers follow Shotcut's
+  ripple-markers setting: markers inside a range are deleted and later ones shift once, with the
+  track that loses the most. With `ripple` false the clips are lifted and gaps remain. A range
+  that overlaps or touches a transition is refused before anything changes (keep a one-frame
+  margin).
+
+  Work cap: at most 120 cuts per call (ranges after merging times listed tracks, for example 60
+  ranges on 2 tracks); more is refused up front with nothing changed. Every split and remove
+  makes Shotcut snapshot the whole track for undo and a split reopens the media, so the cost
+  grows faster than the number of cuts (on a debug build 120 cuts take about 12 s, their undo
+  about 30 s, and memory grows by roughly 0.6 GB). For more ranges send chunks from the END of
+  the timeline to the start, so ripple never shifts a range you have not sent yet (or re-read
+  `get_timeline` between chunks); each call is one undo step.
+- `track_add {type, name?}` adds an empty track as one undo step and returns `{tracks, added}`.
+  A video track goes on top (index 0, so every index shifts by one), an audio track at the
+  bottom. A track head selected in the timeline is deselected, as Shotcut's own Add Track does.
+- `track_remove {track, force?}` removes a track as one undo step; a track holding clips needs
+  `force: true`. Undo restores its clips, filters, name, mute, hide, gain and compositing on/off
+  (not a custom blend mode). The bottom video track is refused: a timeline needs one, and
+  Shotcut's own Remove Track, when undone with other video tracks present, reconnects their
+  blend transitions to the wrong tracks. Remove its clips with `timeline_remove_ranges` instead.
+- `track_set` sets `name`, `mute`, `lock`, `hide` and `composite` (video only; the bottom video
+  track cannot composite) and `gain_db` (-70 to 24, any track) as one undo step. Values are set,
+  not toggled; a call that changes nothing adds no undo step. A locked track only accepts
+  `lock: false` (optionally with other properties, applied after unlocking). A gain with
+  keyframes is refused.
+- Names (tracks, 1 to 64) and marker texts (1 to 200) count characters as Unicode code points
+  and must not be blank.
+- `marker_add {start, end?, text, color?}` adds a point or range marker (inclusive frames as in
+  Shotcut; `start` and `end` at most one hour of frames after the end of the timeline; `color`
+  `#rrggbb`) and returns `{index, marker, markers_count}`. Markers are listed by `marker_list`
+  in the order they were added, not by time. `marker_remove {index}` removes one; later indexes
+  shift down.
+
+`get_timeline` tracks now also report `gain_db` and, for video tracks, `composite`.
+
+### Known limits and residual risks (stage 3A)
+
+- Undoing an overwrite onto an empty or short track leaves the extra gap that Shotcut's own
+  Overwrite command creates (the same happens in the GUI).
+- Removing a track whose gain has keyframes and undoing brings the keyframes back in an
+  ordinary Gain/Volume filter (Shotcut's Remove Track copies filters without the track-gain
+  marker): it sounds the same, but `gain_db` then reports 0.
+- Proxy clips may report the proxy's dimensions in `get_playlist`/`get_timeline`.
+- `get_overview` does not detect an export started from the Shotcut window (those use melt, not
+  the player), and uses the player while it runs.
+- A clip with a speed change has no `timeline_frames`, and its `in_s`/`out_s` are its trimmed
+  frames divided by the frame rate, not true source seconds.
+- Memory grows with every split `timeline_remove_ranges` makes (each split reopens the media);
+  a long session of many cuts can use several GB on a debug build.
+- The analysis cache and Whisper results have no size budget beyond their entry counts.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -175,6 +364,11 @@ and write one video file to any folder the user can write, never over media used
 (see Export, with the caveat described there). `export_video`'s `preset` can only name a stock
 preset or a plain custom preset file, not a path. Tool calls are refused while a Shotcut dialog is
 open (close it and try again).
+
+Stage 3A lets the token make Shotcut read any file the user can read with ffprobe, ffmpeg and the
+configured Whisper program (only results come back, never the file's bytes), keep transcripts and
+analysis results in memory, and write short-lived temporary files (decoded audio) in the system
+temp folder. Programs get argument lists, never a shell command line.
 
 ## Testing
 
@@ -204,6 +398,31 @@ and "a custom preset is applied". Without it those two checks race the fast rend
 Both scripts must pass: every check prints PASS and the script ends with "All checks passed."
 (exit code 0).
 
+Stage 3A has two scripts, each needing its own FRESH throwaway Shotcut like the stage 2 script:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] [MCP_APPDATA=<scratch dir>] tools/mcp-smoke-media.sh
+    MCP_TOKEN=<token> [MCP_PORT=<port>] tools/mcp-smoke-ripple.sh
+
+They need bash, curl, jq, ffmpeg, ffprobe, xxd, md5sum and base64; `tools/mcp-fixtures.sh` (run by
+the scripts) generates the test media with ffmpeg. `mcp-smoke-media.sh` covers every stage 3A
+tool and takes a few minutes on a debug build. `MCP_APPDATA` enables the "get_overview while an
+export runs" checks (they write a slow custom preset there, as stage 2 does). Its Whisper checks
+depend on the Whisper program configured in that Shotcut (pre-seed a `[subtitles]` section with
+`whisperExe=<path of whisper-cli>` and `whisperModel=<path of a GGML model>` in `shotcut.ini`):
+
+- not configured: it checks the "Whisper is not configured" error and skips the rest;
+- configured with a real whisper-cli: it transcribes whisper.cpp's `samples/jfk.wav` (set
+  `JFK_WAV` if it is not at `~/GitHub/whisper.cpp/samples/jfk.wav`);
+- configured with `tools/mcp-fake-whisper.sh` (any existing file as the model): it checks the
+  parser on a canned transcript (Unicode punctuation, a segment clamped to nothing), no model
+  needed.
+
+Run it in all three setups. `mcp-smoke-ripple.sh` checks that `timeline_remove_ranges` overrides
+the user's ripple settings and puts them back: pre-seed a `[timeline]` section with
+`rippleAllTracks=true` and `rippleMarkers=true` in that Shotcut's `shotcut.ini`. Without them it
+prints SKIP and exits 2, which is not a pass. Each script ends with "All checks passed." (exit
+code 0) when it passes.
+
 Manual checks (they need a modified project, which the tools cannot create):
 
 - With an edited project loaded, wait for the first autosave tick (the file under
@@ -231,5 +450,5 @@ Manual checks for stage 2 (GUI only; the headless script cannot cover them):
 ## Known limits
 
 Not covered by the tools or not tested headless: locked tracks (refused, tested by hand only), GPU
-mode, proxies, generators and titles, filters other than fades, markers, subtitles, two-pass
+mode, proxies, generators and titles, filters other than fades, subtitles, two-pass
 encoding and export ranges.
