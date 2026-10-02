@@ -101,50 +101,19 @@ QJsonObject getTimelineTool(const QJsonObject &)
 QJsonObject playlistAddTool(const QJsonObject &arguments)
 {
     const QString path = arguments.value("path").toString();
-    if (path.isEmpty() || isResourcePath(path) || !QDir::isAbsolutePath(path))
-        return textResult("path must be an absolute file path.", true);
-    const QFileInfo info(path);
-    if (!info.exists() || !info.isFile())
-        return textResult("No such file: " + path, true);
+    QString error;
+    if (!checkMediaPath(path, error))
+        return textResult(error, true);
     if (path.endsWith(".mlt", Qt::CaseInsensitive) || path.endsWith(".xml", Qt::CaseInsensitive))
         return textResult("Project files cannot be added to the playlist; use open_project.", true);
 
-    // Like PlaylistDock::addFiles: runs animation formats in a subprocess so a crashing file
-    // cannot take Shotcut down. It shows no dialog.
-    if (MLT.checkFile(path))
-        return textResult("Shotcut cannot open " + path + " as media.", true);
-
-    Mlt::Producer probe(MLT.profile(), path.toUtf8().constData());
-    if (!probe.is_valid() || probe.get_length() <= 0)
-        return textResult("Shotcut cannot open " + path + " as media.", true);
-
-    // Same as Shotcut's Add Files: with nothing loaded the first file is opened so the project
-    // profile follows it.
-    Mlt::Producer *source = &probe;
-    if (!isLoaded()) {
-        // MainWindow::open() asks what to do with unsaved changes when no project is loaded.
-        if (MAIN.isWindowModified()) {
-            return textResult("The current project has unsaved changes. Save it first.", true);
-        }
-        Mlt::Properties properties;
-        properties.set(kShotcutSkipConvertProperty, 1);
-        MAIN.open(path, &properties, false);
-        if (isLoaded())
-            source = MLT.producer();
-    }
-    QScopedPointer<Mlt::Producer> producer(MLT.setupNewProducer(source));
-    if (!producer || !producer->is_valid())
-        return textResult("Shotcut could not prepare " + path + ".", true);
-    producer->set(kShotcutSkipConvertProperty, 1);
-    // Generators (producers without a finite length) would need Shotcut's duration dialog.
-    // Still images do not: setupNewProducer gives them the default image duration. A probe is
-    // not reported live before setupNewProducer, so this can only be checked here.
-    if (MLT.isLiveProducer(producer.data()) && !producer->get_int(kShotcutVirtualClip))
-        return textResult("Generators are not supported by playlist_add.", true);
+    std::unique_ptr<Mlt::Producer> producer = newMediaProducer(path, "playlist_add", true, error);
+    if (!producer)
+        return textResult(error, true);
 
     ProxyManager::generateIfNotExists(*producer);
     MAIN.undoStack()->push(
-        new Playlist::AppendCommand(*MAIN.playlistDock()->model(), MLT.XML(producer.data())));
+        new Playlist::AppendCommand(*MAIN.playlistDock()->model(), MLT.XML(producer.get())));
     return jsonResult(playlistJson());
 }
 

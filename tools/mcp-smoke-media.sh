@@ -655,5 +655,131 @@ ov_call '{"columns":8,"rows":8,"tile_width":640}' "$TMP/ovpbig.jpg"
 expect_eq "portrait 8x8 at 640: tile_width reduced by the height limit" 287 "$(ov_info | jq -r '.tile_width')"
 expect_eq "portrait 8x8 at 640: size 8*287+14 by 8*510+14" 2310x4094 "$(img_size "$TMP/ovpbig.jpg")"
 
+echo "== timeline_insert_range"
+expect_eq "tools/list has timeline_insert_range" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["timeline_insert_range"])')"
+# An empty project (what Shotcut saves with nothing loaded) gives a session with no timeline.
+EMPTY="$TMP/empty.mlt"
+cat > "$EMPTY" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="playlist0">
+  <profile description="320x240 25 fps" width="320" height="240" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="4" display_aspect_den="3" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <playlist id="playlist0"/>
+</mlt>
+XML
+tool_json open_project "{\"path\":\"$EMPTY\",\"discard_changes\":true}" >/dev/null
+sleep 1
+TL0="$(tool_json get_timeline '{}')"
+expect_eq "insert_range: the session has no timeline" 0 "$(echo "$TL0" | jq '.tracks | length')"
+ins() { tool_json timeline_insert_range "$1"; }
+clipf() { jq -c "[.clips[] | select(.kind==\"clip\") | [.start, .duration, .in, .out]]"; }
+tlclips() { tool_json get_timeline '{}' | jq -c '.tracks[0]' | clipf; }
+R="$(ins "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":3.0,\"out_s\":6.0,\"track\":0,\"position\":0}")"
+expect_eq "insert_range on an empty session: inserted start and duration" "0 75" "$(echo "$R" | jq -r '"\(.inserted.start) \(.inserted.duration)"')"
+expect_eq "insert_range on an empty session: one clip, duration 75, in 75" "[[0,75,75,149]]" "$(echo "$R" | jq -c '.track' | clipf)"
+expect_eq "insert_range: the created track is a video track" video "$(echo "$R" | jq -r '.track.type')"
+TL1="$(tool_json get_timeline '{}')"
+expect_eq "insert_range: get_timeline agrees" "[[0,75,75,149]]" "$(echo "$TL1" | jq -c '.tracks[0]' | clipf)"
+expect_eq "insert_range: get_timeline has one track and duration 75" "1 75" "$(echo "$TL1" | jq -r '"\(.tracks | length) \(.duration)"')"
+expect_eq "insert_range: the clip is scenes.mp4" "$MEDIA/scenes.mp4" "$(echo "$TL1" | jq -r '[.tracks[0].clips[] | select(.kind=="clip")][0].path')"
+U="$(tool_json undo '{}')"
+expect_eq "insert_range: one undo step with its own text" "Insert range into track" "$(echo "$U" | jq -r '.text')"
+expect_eq "insert_range: undo restores the session without a timeline" "$TL0" "$(tool_json get_timeline '{}')"
+tool_json redo '{}' >/dev/null
+expect_eq "insert_range: redo re-applies" "$TL1" "$(tool_json get_timeline '{}')"
+tool_json seek '{"position":5}' >/dev/null
+TL1="$(tool_json get_timeline '{}')"
+expect_eq "insert_range: playhead at 5 before the overwrite" 5 "$(echo "$TL1" | jq '.position')"
+
+R="$(ins "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":1,\"track\":0,\"position\":10,\"mode\":\"overwrite\"}")"
+expect_eq "overwrite: inserted start and duration" "10 25" "$(echo "$R" | jq -r '"\(.inserted.start) \(.inserted.duration)"')"
+expect_eq "overwrite: splits the clip around the new one" "[[0,10,75,84],[10,25,0,24],[35,40,110,149]]" "$(echo "$R" | jq -c '.track' | clipf)"
+TL2="$(tool_json get_timeline '{}')"
+expect_eq "overwrite: get_timeline agrees" "[[0,10,75,84],[10,25,0,24],[35,40,110,149]]" "$(echo "$TL2" | jq -c '.tracks[0]' | clipf)"
+expect_eq "overwrite: total duration unchanged" 75 "$(echo "$TL2" | jq '.duration')"
+expect_eq "overwrite: the playhead does not move" 5 "$(echo "$TL2" | jq '.position')"
+expect_eq "overwrite: undo text" "Overwrite range onto track" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "overwrite: one undo restores the previous get_timeline" "$TL1" "$(tool_json get_timeline '{}')"
+tool_json redo '{}' >/dev/null
+expect_eq "overwrite: redo re-applies" "$TL2" "$(tool_json get_timeline '{}')"
+
+R="$(ins "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":2,\"track\":0,\"position\":25}")"
+expect_eq "insert into a clip: inserted start and duration" "25 50" "$(echo "$R" | jq -r '"\(.inserted.start) \(.inserted.duration)"')"
+expect_eq "insert into a clip: splits it and ripples later clips" "[[0,10,75,84],[10,15,0,14],[25,50,0,49],[75,10,15,24],[85,40,110,149]]" "$(echo "$R" | jq -c '.track' | clipf)"
+TL3="$(tool_json get_timeline '{}')"
+expect_eq "insert into a clip: get_timeline agrees" "[[0,10,75,84],[10,15,0,14],[25,50,0,49],[75,10,15,24],[85,40,110,149]]" "$(echo "$TL3" | jq -c '.tracks[0]' | clipf)"
+expect_eq "insert into a clip: total duration grows by exactly 50" 125 "$(echo "$TL3" | jq '.duration')"
+expect_eq "insert into a clip: the playhead does not move" 5 "$(echo "$TL3" | jq '.position')"
+tool_json undo '{}' >/dev/null
+expect_eq "insert into a clip: one undo restores the previous get_timeline" "$TL2" "$(tool_json get_timeline '{}')"
+tool_json redo '{}' >/dev/null
+expect_eq "insert into a clip: redo re-applies" "$TL3" "$(tool_json get_timeline '{}')"
+
+ffmpeg -loglevel error -y -f lavfi -i "color=c=white:size=64x64" -frames:v 1 "$TMP/still.png"
+S="{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":1,\"track\":0,\"position\":0}"
+with() { echo "$S" | jq -c "$1"; }
+ierr() { tool_is_error timeline_insert_range "$1"; }
+expect_eq "insert_range: relative path is an error" true "$(ierr "$(with '.path="scenes.mp4"')")"
+expect_eq "insert_range: missing file is an error" true "$(ierr "$(with ".path=\"$MEDIA/nope.mp4\"")")"
+expect_eq "insert_range: range beyond the file is an error" true "$(ierr "$(with '.in_s=8 | .out_s=9.5')")"
+expect_eq "insert_range: in_s == out_s is an error" true "$(ierr "$(with '.in_s=2 | .out_s=2')")"
+expect_eq "insert_range: in_s > out_s is an error" true "$(ierr "$(with '.in_s=3 | .out_s=2')")"
+expect_eq "insert_range: negative in_s is an error" true "$(ierr "$(with '.in_s=-1')")"
+expect_eq "insert_range: missing out_s with a path is an error" true "$(ierr "$(with 'del(.out_s)')")"
+expect_eq "insert_range: negative position is an error" true "$(ierr "$(with '.position=-1')")"
+expect_eq "insert_range: fractional position is an error" true "$(ierr "$(with '.position=1.5')")"
+expect_eq "insert_range: missing position is an error" true "$(ierr "$(with 'del(.position)')")"
+expect_eq "insert_range: unknown track is an error" true "$(ierr "$(with '.track=7')")"
+expect_eq "insert_range: missing track is an error" true "$(ierr "$(with 'del(.track)')")"
+expect_eq "insert_range: mode ripple is an error" true "$(ierr "$(with '.mode="ripple"')")"
+expect_eq "insert_range: playlist_index out of range is an error" true "$(ierr '{"playlist_index":0,"track":0,"position":0}')"
+expect_eq "insert_range: negative playlist_index is an error" true "$(ierr '{"playlist_index":-1,"track":0,"position":0}')"
+expect_eq "insert_range: an image is an error" true "$(ierr "$(with ".path=\"$TMP/still.png\"")")"
+expect_eq "insert_range: a Qt resource path is an error" true "$(ierr "$(with '.path=":/icons/shotcut-logo-64.png"')")"
+expect_eq "insert_range: a .mlt file is an error" true "$(ierr "$(with ".path=\"$EMPTY\"")")"
+expect_eq "insert_range: string in_s is an error" true "$(ierr "$(with '.in_s="0"')")"
+expect_eq "insert_range: string out_s is an error" true "$(ierr "$(with '.out_s="1"')")"
+expect_eq "insert_range: string track is an error" true "$(ierr "$(with '.track="0"')")"
+expect_eq "insert_range: string position is an error" true "$(ierr "$(with '.position="0"')")"
+expect_eq "insert_range: string playlist_index is an error" true "$(ierr '{"playlist_index":"0","track":0,"position":0}')"
+expect_eq "insert_range: both path and playlist_index is an error" true "$(ierr "$(with '.playlist_index=0')")"
+expect_eq "insert_range: neither path nor playlist_index is an error" true "$(ierr "$(with 'del(.path)')")"
+expect_eq "insert_range: the errors changed nothing" "$TL3" "$(tool_json get_timeline '{}')"
+
+R="$(ins "{\"path\":\"$MEDIA/audioonly.wav\",\"in_s\":0,\"out_s\":1,\"track\":0,\"position\":125}")"
+expect_eq "insert_range: audio-only media on a video track is allowed (as in Shotcut)" "125 25" "$(echo "$R" | jq -r '"\(.inserted.start) \(.inserted.duration)"')"
+tool_json undo '{}' >/dev/null
+expect_eq "insert_range: undo of the audio insert" "$TL3" "$(tool_json get_timeline '{}')"
+
+# Lock track 0 in a saved copy and reopen it (no tool locks a track yet; Task 10 adds track_set).
+IR_UNLOCKED="$TMP/ir-unlocked.mlt"
+IR_LOCKED="$TMP/ir-locked.mlt"
+tool_json save_project "{\"path\":\"$IR_UNLOCKED\"}" >/dev/null
+cp "$IR_UNLOCKED" "$IR_LOCKED"
+PL4="$(grep -o '<track producer="[^"]*"' "$IR_LOCKED" | grep -v background | head -1 | sed 's/.*producer="//; s/"//')"
+sed -i "0,/<playlist id=\"$PL4\"[^>]*>/s//&\n  <property name=\"shotcut:lock\">1<\/property>/" "$IR_LOCKED"
+tool_json open_project "{\"path\":\"$IR_LOCKED\",\"discard_changes\":true}" >/dev/null
+sleep 1
+expect_eq "insert_range locked: track 0 is locked after reopening" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
+LTL="$(tool_json get_timeline '{}')"
+expect_eq "insert_range: locked track is an error" true "$(ierr "$S")"
+expect_eq "insert_range: overwrite on a locked track is an error" true "$(ierr "$(with '.mode="overwrite"')")"
+expect_eq "insert_range: locked track unchanged" "$LTL" "$(tool_json get_timeline '{}')"
+
+tool_json open_project "{\"path\":\"$IR_UNLOCKED\",\"discard_changes\":true}" >/dev/null
+sleep 1
+tool_json playlist_add "{\"path\":\"$MEDIA/scenes.mp4\"}" >/dev/null
+UTL="$(tool_json get_timeline '{}')"
+R="$(ins '{"playlist_index":0,"track":0,"position":0}')"
+expect_eq "insert_range playlist_index: the item's own range by default" "0 225" "$(echo "$R" | jq -r '"\(.inserted.start) \(.inserted.duration)"')"
+expect_eq "insert_range playlist_index: clip frames" "[0,225,0,224]" "$(echo "$R" | jq -c '.track' | clipf | jq -c '.[0]')"
+expect_eq "insert_range playlist_index: later clips ripple by 225" 350 "$(tool_json get_timeline '{}' | jq '.duration')"
+tool_json undo '{}' >/dev/null
+expect_eq "insert_range playlist_index: undo restores" "$UTL" "$(tool_json get_timeline '{}')"
+R="$(ins '{"playlist_index":0,"in_s":1,"out_s":2,"track":0,"position":0,"mode":"overwrite"}')"
+expect_eq "insert_range playlist_index with in_s/out_s" "[0,25,25,49]" "$(echo "$R" | jq -c '.track' | clipf | jq -c '.[0]')"
+tool_json undo '{}' >/dev/null
+expect_eq "insert_range playlist_index: only in_s is an error" true "$(ierr '{"playlist_index":0,"in_s":1,"track":0,"position":0}')"
+expect_eq "insert_range playlist_index: index 1 is out of range" true "$(ierr '{"playlist_index":1,"track":0,"position":0}')"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

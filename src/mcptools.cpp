@@ -363,6 +363,7 @@ QList<McpTool> McpTools::all()
     tools += timelineTools();
     tools += exportTools();
     tools += analysisTools();
+    tools += structureTools();
     return tools;
 }
 

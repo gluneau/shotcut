@@ -82,6 +82,32 @@ std::unique_ptr<Mlt::ClipInfo> plainClip(MultitrackModel &model,
                                          QString &error,
                                          bool allowLocked = false);
 
+// path is an absolute path of an existing file (not a Qt resource).
+bool checkMediaPath(const QString &path, QString &error);
+
+// A new producer for the media file at a checked path, prepared like Shotcut's Add Files. With
+// nothing loaded the file is opened first so the project profile follows it. Generators (and
+// still images unless allowImages) are refused, naming toolName. Null with a message otherwise.
+std::unique_ptr<Mlt::Producer> newMediaProducer(const QString &path,
+                                                const QString &toolName,
+                                                bool allowImages,
+                                                QString &error);
+
+// A track a clip can be pushed to: an unlocked track, or track 0 when there is no timeline yet.
+bool validTargetTrack(int track, QString &error);
+
+// Pushes the single clip in xml (with its in and out) onto track at the absolute timeline frame
+// position as ONE undo step named undoText, without moving the playhead or using the clipboard or
+// the Source player. mode "insert" ripples per Shotcut's ripple settings; "overwrite" never
+// ripples. With no timeline the first video track is created in the same step. Returns the new
+// clip's index on the track, or -1 with a message.
+int pushClipXml(const QString &mode,
+                int track,
+                int position,
+                const QString &xml,
+                const QString &undoText,
+                QString &error);
+
 // "clip", "blank" or "transition".
 QString kindOf(MultitrackModel &model, int track, int clip);
 

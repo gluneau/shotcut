@@ -15,12 +15,15 @@
 
 #include "mcptoolsutil.h"
 
+#include "commands/timelinecommands.h"
 #include "docks/timelinedock.h"
 #include "mainwindow.h"
 #include "mltcontroller.h"
 #include "models/multitrackmodel.h"
 #include "proxymanager.h"
+#include "settings.h"
 #include "sharedframe.h"
+#include "shotcut_mlt_properties.h"
 #include "videowidget.h"
 
 #include <MltPlaylist.h>
@@ -30,8 +33,10 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QJsonDocument>
+#include <QScopedPointer>
 #include <QStringList>
 #include <QTimer>
+#include <QUndoStack>
 
 #include <cmath>
 #include <limits>
@@ -274,6 +279,128 @@ std::unique_ptr<Mlt::ClipInfo> plainClip(MultitrackModel &model,
     if (!info)
         error = QStringLiteral("Track %1 has no clip %2; call get_timeline.").arg(track).arg(clip);
     return info;
+}
+
+bool checkMediaPath(const QString &path, QString &error)
+{
+    if (path.isEmpty() || isResourcePath(path) || !QDir::isAbsolutePath(path)) {
+        error = QStringLiteral("path must be an absolute file path.");
+        return false;
+    }
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile()) {
+        error = "No such file: " + path;
+        return false;
+    }
+    return true;
+}
+
+std::unique_ptr<Mlt::Producer> newMediaProducer(const QString &path,
+                                                const QString &toolName,
+                                                bool allowImages,
+                                                QString &error)
+{
+    // Like PlaylistDock::addFiles: runs animation formats in a subprocess so a crashing file
+    // cannot take Shotcut down. It shows no dialog.
+    if (MLT.checkFile(path)) {
+        error = "Shotcut cannot open " + path + " as media.";
+        return nullptr;
+    }
+    Mlt::Producer probe(MLT.profile(), path.toUtf8().constData());
+    if (!probe.is_valid() || probe.get_length() <= 0) {
+        error = "Shotcut cannot open " + path + " as media.";
+        return nullptr;
+    }
+    if (!allowImages && MLT.isImageProducer(&probe)) {
+        error = "Still images are not supported by " + toolName + ".";
+        return nullptr;
+    }
+
+    // Same as Shotcut's Add Files: with nothing loaded the first file is opened so the project
+    // profile follows it.
+    Mlt::Producer *source = &probe;
+    if (!isLoaded()) {
+        // MainWindow::open() asks what to do with unsaved changes when no project is loaded.
+        if (MAIN.isWindowModified()) {
+            error = QStringLiteral("The current project has unsaved changes. Save it first.");
+            return nullptr;
+        }
+        Mlt::Properties properties;
+        properties.set(kShotcutSkipConvertProperty, 1);
+        MAIN.open(path, &properties, false);
+        if (isLoaded())
+            source = MLT.producer();
+    }
+    std::unique_ptr<Mlt::Producer> producer(MLT.setupNewProducer(source));
+    if (!producer || !producer->is_valid()) {
+        error = "Shotcut could not prepare " + path + ".";
+        return nullptr;
+    }
+    producer->set(kShotcutSkipConvertProperty, 1);
+    // Generators (producers without a finite length) would need Shotcut's duration dialog.
+    // Still images do not: setupNewProducer gives them the default image duration. A probe is
+    // not reported live before setupNewProducer, so this can only be checked here.
+    if (MLT.isLiveProducer(producer.get()) && !producer->get_int(kShotcutVirtualClip)) {
+        error = "Generators are not supported by " + toolName + ".";
+        return nullptr;
+    }
+    return producer;
+}
+
+bool validTargetTrack(int track, QString &error)
+{
+    if (MAIN.isMultitrackValid())
+        return validTrack(*MAIN.timelineDock()->model(), track, error);
+    if (track != 0) {
+        error = QStringLiteral("There is no timeline yet; use track 0 (a video track is created).");
+        return false;
+    }
+    return true;
+}
+
+int pushClipXml(const QString &mode,
+                int track,
+                int position,
+                const QString &xml,
+                const QString &undoText,
+                QString &error)
+{
+    if (mode != "insert" && mode != "overwrite") {
+        error = QStringLiteral("mode must be \"insert\" or \"overwrite\".");
+        return -1;
+    }
+    if (!validTargetTrack(track, error))
+        return -1;
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
+    MLT.pause();
+    MAIN.undoStack()->beginMacro(undoText);
+    if (!MAIN.isMultitrackValid()) {
+        // The tracks timeline_add_playlist creates on an empty timeline (V1, plus A1 when
+        // Shotcut's auto-add-tracks setting is on); the video track is index 0.
+        MAIN.undoStack()->push(new Timeline::AddTrackCommand(model, true));
+        if (Settings.timelineAutoAddTracks())
+            MAIN.undoStack()->push(new Timeline::AddTrackCommand(model, false));
+    }
+    int playtime = 0;
+    QScopedPointer<Mlt::Producer> trackProducer(
+        model.tractor()->track(model.trackList().at(track).mlt_index));
+    if (trackProducer)
+        playtime = trackProducer->get_playtime();
+    if (mode == "insert")
+        MAIN.undoStack()->push(new Timeline::InsertCommand(model,
+                                                           *dock->markersModel(),
+                                                           track,
+                                                           position,
+                                                           xml,
+                                                           false));
+    else
+        MAIN.undoStack()->push(new Timeline::OverwriteCommand(model, track, position, xml, false));
+    MAIN.undoStack()->endMacro();
+    // From the track's last frame on, Shotcut appends the clip at the end of the track (after a
+    // gap when position is beyond it), so it is then the last item.
+    return position >= playtime - 1 ? model.rowCount(model.index(track)) - 1
+                                    : dock->clipIndexAtPosition(track, position);
 }
 
 QString clipSourcePath(Mlt::ClipInfo &info)
