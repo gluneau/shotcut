@@ -169,6 +169,9 @@ QJsonObject timelineInsertRangeTool(const QJsonObject &arguments)
 
 // Puts Shotcut's ripple settings back on every exit path. The remove commands read them in their
 // constructors, so commands pushed while they were changed keep their own values on undo/redo.
+// The settings are written to QSettings during the call, so a crash in the middle leaves
+// ripple-all-tracks off (and ripple-markers possibly off) saved; accepted, because Shotcut offers
+// no other way to choose the ripple of RemoveCommand and the user can turn them back on.
 class RippleSettingsGuard
 {
 public:
@@ -190,13 +193,6 @@ private:
     const bool m_markers;
 };
 
-int trackPlaytime(MultitrackModel &model, int track)
-{
-    QScopedPointer<Mlt::Producer> producer(
-        model.tractor()->track(model.trackList().at(track).mlt_index));
-    return producer ? producer->get_playtime() : 0;
-}
-
 // End of the last item that is not a blank; 0 for an empty track (it holds a blank placeholder).
 int contentEnd(MultitrackModel &model, int track)
 {
@@ -207,18 +203,6 @@ int contentEnd(MultitrackModel &model, int track)
         return info ? info->start + info->frame_count : 0;
     }
     return 0;
-}
-
-int itemFrames(MultitrackModel &model, int track)
-{
-    int frames = 0;
-    for (int c = 0; c < model.rowCount(model.index(track)); ++c) {
-        std::unique_ptr<Mlt::ClipInfo> info = kindOf(model, track, c) == "blank"
-                                                  ? nullptr
-                                                  : model.getClipInfo(track, c);
-        frames += info ? info->frame_count : 0;
-    }
-    return frames;
 }
 
 // Splits the item under position (strictly inside it) so that position starts an item.
@@ -272,18 +256,23 @@ bool cutRange(
             return false;
         const int length = info->frame_count;
         position = info->start;
-        if (blank) {
-            const int before = trackPlaytime(model, track);
+        const int before = contentEnd(model, track);
+        if (ripple)
             dock->remove(track, clip, false);
-            if (trackPlaytime(model, track) != before - length)
+        else
+            dock->lift(track, clip, false);
+        // Cheap checks of the one item: material after the piece moved left by its length (the
+        // track can only end earlier when the piece was its last content: Shotcut drops trailing
+        // gaps), or a lifted piece is now inside a gap.
+        const int after = contentEnd(model, track);
+        if (ripple) {
+            if (hi < before ? after != before - length : after > position)
                 return false;
-        } else {
-            const int before = itemFrames(model, track);
-            if (ripple)
-                dock->remove(track, clip, false);
-            else
-                dock->lift(track, clip, false);
-            if (itemFrames(model, track) != before - length)
+        } else if (after > position) {
+            clip = dock->clipIndexAtPosition(track, position);
+            info = clip >= 0 ? model.getClipInfo(track, clip) : nullptr;
+            if (!info || kindOf(model, track, clip) != "blank"
+                || info->start + info->frame_count < hi)
                 return false;
         }
     }
@@ -351,30 +340,50 @@ QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
     }
     if (applied.empty())
         return textResult("No range lies inside the timeline.", true);
+    // Every split and remove snapshots its whole track for undo and a split opens a new producer,
+    // so the cost grows faster than the number of cuts. Measured on a debug build: 120 cuts take
+    // about 12 s (and their undo about 30 s).
+    const int maxCuts = 120;
+    if (int(applied.size()) * tracks.size() > maxCuts)
+        return textResult(QStringLiteral("Too much work for one call: %1 ranges (after merging) on "
+                                         "%2 track(s) is more than %3 range-track cuts. Send at "
+                                         "most %4 ranges per call, in chunks from the END of the "
+                                         "timeline to the start (ripple shifts later material), "
+                                         "or re-read get_timeline between chunks. Each call is "
+                                         "one undo step. Nothing was changed.")
+                              .arg(applied.size())
+                              .arg(tracks.size())
+                              .arg(maxCuts)
+                              .arg(maxCuts / tracks.size()),
+                          true);
 
     QJsonObject removedFrames;
     for (int i = 0; i < tracks.size(); ++i) {
         const int track = tracks.at(i);
+        // Removing or lifting a clip a transition joins breaks the transition.
+        QList<int> transitions;
+        for (int c = 0; c < model.rowCount(model.index(track)); ++c) {
+            if (kindOf(model, track, c) == "transition")
+                transitions.append(c);
+        }
         int removed = 0;
         for (const auto &range : applied) {
             const int end = qMin(range.second, extents.at(i));
             removed += qMax(0, end - range.first);
             if (range.first >= end)
                 continue;
-            // Removing or lifting a clip a transition joins breaks the transition.
-            for (int c = 0; c < model.rowCount(model.index(track)); ++c) {
-                if (kindOf(model, track, c) != "transition")
-                    continue;
-                std::unique_ptr<Mlt::ClipInfo> t = model.getClipInfo(track, c);
+            for (int transition : transitions) {
+                std::unique_ptr<Mlt::ClipInfo> t = model.getClipInfo(track, transition);
                 if (!t || range.first > t->start + t->frame_count || end < t->start)
                     continue;
-                return textResult(QStringLiteral("The range %1-%2 touches the transition on track "
-                                                 "%3 (item %4, frames %5-%6); keep ranges at "
-                                                 "least one frame away from transitions.")
+                return textResult(QStringLiteral("The range %1-%2 (end exclusive, after "
+                                                 "clamping) touches the transition on track %3 "
+                                                 "(item %4, frames %5-%6); keep ranges at least "
+                                                 "one frame away from transitions.")
                                       .arg(range.first)
-                                      .arg(range.second)
+                                      .arg(end)
                                       .arg(track)
-                                      .arg(c)
+                                      .arg(transition)
                                       .arg(t->start)
                                       .arg(t->start + t->frame_count - 1),
                                   true);
@@ -487,10 +496,14 @@ QList<McpTool> McpTools::structureTools()
          "listed tracks stay aligned; whether markers move follows Shotcut's ripple-markers "
          "setting (markers inside a range are deleted, later ones shift once). ripple false lifts "
          "the clips and leaves gaps of the same length (Shotcut drops a gap at the end of a "
-         "track). Item indexes change; use the returned tracks. Locked tracks are refused. "
-         "Returns {tracks:[...] in the listed order, removed_frames:{\"<track>\": frames of the "
-         "applied ranges inside that track}, ranges_applied:[{start, end}], ripple:{all_tracks, "
-         "markers}}.",
+         "track). Item indexes change; use the returned tracks. Locked tracks are refused. At "
+         "most 120 cuts per call (ranges after merging times listed tracks, e.g. 60 ranges on 2 "
+         "tracks); for more, send chunks from the END of the timeline to the start (ripple "
+         "shifts later material) or re-read get_timeline between chunks; each call is one undo "
+         "step. Returns {tracks:[...] in the listed order, removed_frames:{\"<track>\": frames "
+         "of the applied ranges inside that track up to its last clip, gaps included (with "
+         "ripple false also the frames of gaps that stay gaps)}, ranges_applied:[{start, end}], "
+         "ripple:{all_tracks, markers}}.",
          schema(R"({"type":"object","properties":{
              "tracks":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"integer","minimum":0},"description":"Distinct track indexes (0 is the topmost video track)."},
              "ranges":{"type":"array","minItems":1,"maxItems":500,"items":{"type":"object","properties":{

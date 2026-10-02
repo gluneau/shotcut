@@ -990,7 +990,7 @@ expect_eq "remove_ranges: locked track (ripple:false) is an error" true "$(rerr 
 expect_eq "remove_ranges: locked track unchanged" "$RRK" "$(tool_json get_timeline '{}')"
 
 # Two tracks (V1 and A1, written by hand: no tool adds a track before Task 10).
-two_track() { # FILE AUDIO_OUT
+two_track() { # FILE AUDIO_OUT [XML BEFORE THE AUDIO CLIP]
 cat > "$1" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <mlt LC_NUMERIC="C" producer="main_bin">
@@ -1001,7 +1001,7 @@ cat > "$1" <<XML
   <chain id="chain0" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
   <chain id="chain1" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
   <playlist id="playlist0"><property name="shotcut:video">1</property><property name="shotcut:name">V1</property><entry producer="chain0" in="0" out="249"/></playlist>
-  <playlist id="playlist1"><property name="shotcut:audio">1</property><property name="shotcut:name">A1</property><entry producer="chain1" in="0" out="$2"/></playlist>
+  <playlist id="playlist1"><property name="shotcut:audio">1</property><property name="shotcut:name">A1</property>${3:-}<entry producer="chain1" in="0" out="$2"/></playlist>
   <tractor id="tractor0" in="0" out="249">
     <property name="shotcut">1</property>
     <track producer="background"/>
@@ -1049,6 +1049,49 @@ expect_eq "remove_ranges: a range past the shorter track only cuts the longer on
 expect_eq "remove_ranges: the shorter track is unchanged" "$(echo "$TD0" | jq -c '.tracks[1]')" "$(echo "$R" | jq -c '.tracks[1]')"
 tool_json undo '{}' >/dev/null
 expect_eq "remove_ranges: different-length case undone" "$TD0" "$(tool_json get_timeline '{}')"
+# A1 starts at frame 30 (a leading gap): with ripple the gap part of a range is removed too, so
+# both tracks lose the same 60 frames and stay aligned.
+two_track "$TMP/two-gap.mlt" 219 '<blank length="30"/>'
+tool_json open_project "{\"path\":\"$TMP/two-gap.mlt\",\"discard_changes\":true}" >/dev/null
+sleep 1
+TG0="$(tool_json get_timeline '{}')"
+expect_eq "remove_ranges gap fixture: A1 clip starts at 30" "[[30,220,0,219]]" "$(echo "$TG0" | jq -c '.tracks[1]' | clipf)"
+R="$(rr '{"tracks":[0,1],"ranges":[{"start":20,"end":80}]}')"
+expect_eq "remove_ranges across a leading gap: removed_frames" '{"0":60,"1":60}' "$(echo "$R" | jq -c '.removed_frames')"
+expect_eq "remove_ranges across a leading gap: video" "[[0,20,0,19],[20,170,80,249]]" "$(echo "$R" | jq -c '.tracks[0]' | clipf)"
+expect_eq "remove_ranges across a leading gap: audio aligned" "[[20,170,50,219]]" "$(echo "$R" | jq -c '.tracks[1]' | clipf)"
+expect_eq "remove_ranges across a leading gap: duration 190" 190 "$(tldur)"
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges across a leading gap: one undo restores byte for byte" "$TG0" "$(tool_json get_timeline '{}')"
+
+# Work cap: 120 cuts (ranges after merging x tracks). 60 ranges of 2 frames on 2 tracks are
+# really applied; 61 are refused before any change.
+tool_json open_project "{\"path\":\"$TMP/two-equal.mlt\",\"discard_changes\":true}" >/dev/null
+sleep 1
+TC0="$(tool_json get_timeline '{}')"
+SHOTCUT_PID=""
+for p in $(pgrep -f -- "--appdata ${MCP_APPDATA:-/nonexistent}"); do [ "$(cat /proc/$p/comm 2>/dev/null)" = shotcut ] && SHOTCUT_PID=$p; done
+rss_mb() { if [ -n "$SHOTCUT_PID" ]; then echo $(( $(ps -o rss= -p "$SHOTCUT_PID") / 1024 )); else echo "?"; fi; }
+R60="$(jq -nc '{tracks:[0,1],ranges:[range(60) | {start:(.*4), end:(.*4+2)}]}')"
+R61="$(jq -nc '{tracks:[0,1],ranges:[range(61) | {start:(.*4), end:(.*4+2)}]}')"
+expect_eq "remove_ranges: 61 ranges on 2 tracks is over the cap" true "$(rerr "$R61")"
+expect_eq "remove_ranges: the cap error tells how to chunk" true "$(tool_text timeline_remove_ranges "$R61" | grep -q 'END of the timeline' && echo true || echo false)"
+expect_eq "remove_ranges: 121 ranges on 1 track is over the cap" true "$(rerr "$(jq -nc '{tracks:[0],ranges:[range(121) | {start:(.*2), end:(.*2+1)}]}')")"
+expect_eq "remove_ranges: over-cap requests changed nothing" "$TC0" "$(tool_json get_timeline '{}')"
+RSS0="$(rss_mb)"; T0="$(date +%s)"
+R="$(rr "$R60")"
+T1="$(date +%s)"; RSS1="$(rss_mb)"
+echo "INFO  remove_ranges 60 ranges x 2 tracks: $((T1 - T0)) s, RSS ${RSS0} -> ${RSS1} MB"
+expect_eq "remove_ranges at the cap: removed_frames" '{"0":120,"1":120}' "$(echo "$R" | jq -c '.removed_frames')"
+expect_eq "remove_ranges at the cap: 60 ranges applied" 60 "$(echo "$R" | jq '.ranges_applied | length')"
+expect_eq "remove_ranges at the cap: duration 130" 130 "$(tldur)"
+expect_eq "remove_ranges at the cap: both tracks keep 2-frame pieces from in 2, 6, ..." true "$(echo "$R" | jq '[.tracks[] | [.clips[] | select(.kind=="clip") | [.start,.duration,.in]]] | (.[0] == .[1]) and (.[0][0] == [0,2,2]) and (.[0][59] == [118,12,238])')"
+expect_eq "remove_ranges at the cap: finishes within 60 s" true "$([ $((T1 - T0)) -lt 60 ] && echo true || echo false)"
+T0="$(date +%s)"
+tool_json undo '{}' >/dev/null
+T1="$(date +%s)"
+echo "INFO  remove_ranges undo of 60 ranges x 2 tracks: $((T1 - T0)) s, RSS $(rss_mb) MB"
+expect_eq "remove_ranges at the cap: one undo restores" "$TC0" "$(tool_json get_timeline '{}')"
 expect_eq "remove_ranges: the user's ripple-all-tracks setting is unchanged" false "$(tool_json get_timeline '{}' | jq -r '.settings.ripple_all_tracks')"
 
 # FOOTER (later tasks insert their blocks above this line)
