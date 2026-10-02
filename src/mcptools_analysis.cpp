@@ -17,11 +17,15 @@
 #include "mcpjobs.h"
 #include "mcptools.h"
 #include "mcptoolsutil.h"
+#include "settings.h"
 
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <QTemporaryDir>
 #include <QVector>
 
 #include <algorithm>
@@ -630,6 +634,383 @@ QJsonObject audioLevelsTool(const QJsonObject &arguments)
     return jobResult(record, waitMs);
 }
 
+constexpr int kMaxSegments = 5000;
+constexpr int kMaxWordsPerSegment = 2000;
+constexpr double kMaxTranscriptSeconds = 86400;
+constexpr int kMaxTextChars = 2000;
+constexpr qint64 kMaxWhisperJson = 256 * 1024 * 1024;
+
+// Reads {start_s, end_s, text} of a supplied segment or word; text comes back trimmed.
+bool readTimedText(const QJsonValue &value,
+                   const QString &where,
+                   double &start,
+                   double &end,
+                   QString &text,
+                   QString &error)
+{
+    const QJsonObject o = value.toObject();
+    const QJsonValue s = o.value("start_s");
+    const QJsonValue e = o.value("end_s");
+    const QJsonValue t = o.value("text");
+    if (!value.isObject() || !s.isDouble() || !e.isDouble() || s.toDouble() < 0
+        || s.toDouble() >= e.toDouble() || e.toDouble() > kMaxTranscriptSeconds) {
+        error = QStringLiteral("%1 needs numbers start_s and end_s with 0 <= start_s < end_s <= %2.")
+                    .arg(where)
+                    .arg(kMaxTranscriptSeconds);
+        return false;
+    }
+    text = t.toString().trimmed();
+    if (!t.isString() || text.isEmpty() || t.toString().size() > kMaxTextChars) {
+        error = QStringLiteral("%1 needs a non-empty text of at most %2 characters.")
+                    .arg(where)
+                    .arg(kMaxTextChars);
+        return false;
+    }
+    start = s.toDouble();
+    end = e.toDouble();
+    return true;
+}
+
+bool readTranscript(const QJsonValue &value,
+                    const QString &path,
+                    QJsonObject &transcript,
+                    QString &error)
+{
+    const QJsonValue list = value.toObject().value("segments");
+    if (!value.isObject() || !list.isArray() || list.toArray().isEmpty()
+        || list.toArray().size() > kMaxSegments) {
+        error = QStringLiteral("transcript must be {segments:[{start_s, end_s, text, words?}]} with "
+                               "1 to %1 segments.")
+                    .arg(kMaxSegments);
+        return false;
+    }
+    QJsonArray segments;
+    bool allWords = true;
+    double previousStart = 0;
+    const QJsonArray input = list.toArray();
+    for (int i = 0; i < input.size(); ++i) {
+        const QString where = QStringLiteral("segments[%1]").arg(i);
+        double start = 0, end = 0;
+        QString text;
+        if (!readTimedText(input.at(i), where, start, end, text, error))
+            return false;
+        if (start < previousStart) {
+            error = QStringLiteral("segments must be sorted by start_s (%1).").arg(where);
+            return false;
+        }
+        previousStart = start;
+        QJsonObject segment{{"start_s", start}, {"end_s", end}, {"text", text}};
+        const QJsonValue wordsValue = input.at(i).toObject().value("words");
+        QJsonArray words;
+        if (!wordsValue.isUndefined()) {
+            if (!wordsValue.isArray() || wordsValue.toArray().size() > kMaxWordsPerSegment) {
+                error = QStringLiteral("%1.words must be an array of at most %2 words.")
+                            .arg(where)
+                            .arg(kMaxWordsPerSegment);
+                return false;
+            }
+            double previousWord = start;
+            const QJsonArray wordList = wordsValue.toArray();
+            for (int j = 0; j < wordList.size(); ++j) {
+                const QString wordWhere = QStringLiteral("%1.words[%2]").arg(where).arg(j);
+                double wordStart = 0, wordEnd = 0;
+                QString wordText;
+                if (!readTimedText(wordList.at(j), wordWhere, wordStart, wordEnd, wordText, error))
+                    return false;
+                if (wordStart < start || wordEnd > end) {
+                    error = QStringLiteral("%1 must lie inside its segment.").arg(wordWhere);
+                    return false;
+                }
+                if (wordStart < previousWord) {
+                    error = QStringLiteral("%1 starts before the word before it.").arg(wordWhere);
+                    return false;
+                }
+                previousWord = wordStart;
+                words.append(QJsonObject{{"start_s", wordStart},
+                                         {"end_s", wordEnd},
+                                         {"text", wordText}});
+            }
+        }
+        if (words.isEmpty())
+            allWords = false;
+        else
+            segment["words"] = words;
+        segments.append(segment);
+    }
+    transcript = QJsonObject{{"path", path},
+                             {"granularity", allWords ? "word" : "segment"},
+                             {"segments", segments},
+                             {"supplied", true}};
+    return true;
+}
+
+// The segments with timeline_frames on every segment and word for a clip source, or without any
+// (the form kept in McpTranscripts).
+QJsonArray segmentsFor(const SourceRef &ref, const QJsonArray &segments, bool withFrames)
+{
+    auto place = [&ref, withFrames](QJsonObject &o) {
+        if (withFrames && ref.isClip) {
+            o["timeline_frames"] = mapRangeToTimeline(ref,
+                                                      o.value("start_s").toDouble(),
+                                                      o.value("end_s").toDouble());
+        } else {
+            o.remove("timeline_frames");
+        }
+    };
+    QJsonArray list;
+    for (const QJsonValue &value : segments) {
+        QJsonObject segment = value.toObject();
+        place(segment);
+        if (segment.contains("words")) {
+            QJsonArray words;
+            for (const QJsonValue &word : segment.value("words").toArray()) {
+                QJsonObject w = word.toObject();
+                place(w);
+                words.append(w);
+            }
+            segment["words"] = words;
+        }
+        list.append(segment);
+    }
+    return list;
+}
+
+// Keeps a Whisper result for captions_from_transcript (a supplied transcript wins).
+void rememberTranscript(const SourceRef &ref, QJsonObject result)
+{
+    result.remove("cached");
+    result["segments"] = segmentsFor(ref, result.value("segments").toArray(), false);
+    McpTranscripts::store(ref.path, result);
+}
+
+// whisper.cpp writes token texts byte by byte, so one UTF-8 character can be split over two
+// tokens. The file is read as Latin-1 (one character per byte) and texts are decoded as UTF-8
+// once joined.
+QString utf8Of(const QString &bytes)
+{
+    return QString::fromUtf8(bytes.toLatin1());
+}
+
+bool parseWhisper(const SourceRef &ref,
+                  const AudioRange &range,
+                  const QString &language,
+                  const QString &jsonPath,
+                  QJsonObject &result,
+                  QString &error)
+{
+    QFile file(jsonPath);
+    if (!file.open(QIODevice::ReadOnly) || file.size() > kMaxWhisperJson) {
+        error = QStringLiteral("Whisper wrote no readable transcript.");
+        return false;
+    }
+    QJsonParseError parseError;
+    const QJsonObject root = QJsonDocument::fromJson(QString::fromLatin1(file.readAll()).toUtf8(),
+                                                     &parseError)
+                                 .object();
+    if (parseError.error != QJsonParseError::NoError || !root.value("transcription").isArray()) {
+        error = QStringLiteral("The transcript written by Whisper could not be read.");
+        return false;
+    }
+    struct Word
+    {
+        QString bytes;
+        double from = -1, to = -1;
+    };
+    bool anyTimed = false;
+    QJsonArray segments;
+    for (const QJsonValue &value : root.value("transcription").toArray()) {
+        const QJsonObject segment = value.toObject();
+        const QString text = utf8Of(segment.value("text").toString()).trimmed();
+        const QJsonObject offsets = segment.value("offsets").toObject();
+        if (text.isEmpty() || !offsets.value("from").isDouble() || !offsets.value("to").isDouble())
+            continue;
+        const double start = qBound(range.in,
+                                    range.in + offsets.value("from").toDouble() / 1000,
+                                    range.out);
+        const double end = qBound(start,
+                                  range.in + offsets.value("to").toDouble() / 1000,
+                                  range.out);
+        QList<Word> words;
+        for (const QJsonValue &tokenValue : segment.value("tokens").toArray()) {
+            const QJsonObject token = tokenValue.toObject();
+            QString piece = token.value("text").toString();
+            if (piece.isEmpty() || piece.startsWith("[_"))
+                continue;
+            if (piece.startsWith(' ') || words.isEmpty()) {
+                words.append(Word());
+                if (piece.startsWith(' '))
+                    piece.remove(0, 1);
+            }
+            Word &word = words.last();
+            word.bytes += piece;
+            const QJsonObject times = token.value("offsets").toObject();
+            if (times.value("from").isDouble() && times.value("to").isDouble()) {
+                if (word.from < 0)
+                    word.from = times.value("from").toDouble();
+                word.to = times.value("to").toDouble();
+                anyTimed = true;
+            }
+        }
+        QJsonArray wordList;
+        double previous = start;
+        for (const Word &word : words) {
+            const QString wordText = utf8Of(word.bytes).trimmed();
+            if (word.from < 0 || wordText.isEmpty())
+                continue;
+            const double wordStart = qBound(previous, range.in + word.from / 1000, end);
+            const double wordEnd = qBound(wordStart, range.in + word.to / 1000, end);
+            previous = wordStart;
+            wordList.append(QJsonObject{{"start_s", round3(wordStart)},
+                                        {"end_s", round3(wordEnd)},
+                                        {"text", wordText}});
+        }
+        segments.append(QJsonObject{{"start_s", round3(start)},
+                                    {"end_s", round3(end)},
+                                    {"text", text},
+                                    {"words", wordList}});
+    }
+    if (!anyTimed) {
+        for (auto it = segments.begin(); it != segments.end(); ++it) {
+            QJsonObject segment = it->toObject();
+            segment.remove("words");
+            *it = segment;
+        }
+    }
+    const QString detected = root.value("result").toObject().value("language").toString();
+    result = QJsonObject{{"path", ref.path},
+                         {"in_s", round3(range.in)},
+                         {"out_s", round3(range.out)},
+                         {"language", detected.isEmpty() ? language : detected},
+                         {"granularity", anyTimed ? "word" : "segment"},
+                         {"segments", segments}};
+    rememberTranscript(ref, result);
+    result["segments"] = segmentsFor(ref, segments, true);
+    return true;
+}
+
+QJsonObject storeTranscript(const QJsonObject &arguments)
+{
+    for (const char *key : {"track", "clip", "language", "wait_ms"}) {
+        if (arguments.contains(QLatin1String(key))) {
+            return textResult(QStringLiteral("Pass transcript with path only, not with %1.").arg(key),
+                              true);
+        }
+    }
+    if (!arguments.contains("path"))
+        return textResult("Pass path, the file the transcript belongs to, with transcript.", true);
+    SourceRef ref;
+    QString error;
+    QJsonObject transcript;
+    if (!resolveSource(QJsonObject{{"path", arguments.value("path")}}, ref, error)
+        || !readTranscript(arguments.value("transcript"), ref.path, transcript, error)) {
+        return textResult(error, true);
+    }
+    McpTranscripts::store(ref.path, transcript);
+    return jsonResult(transcript);
+}
+
+QJsonObject transcribeTool(const QJsonObject &arguments)
+{
+    if (arguments.contains("transcript"))
+        return storeTranscript(arguments);
+    QString error;
+    QString language = QStringLiteral("auto");
+    const QJsonValue languageValue = arguments.value("language");
+    if (!languageValue.isUndefined()) {
+        static const QRegularExpression code(QStringLiteral("^[a-z]{2,3}$"));
+        language = languageValue.toString();
+        if (!languageValue.isString() || (language != "auto" && !code.match(language).hasMatch())) {
+            return textResult("language must be auto or a lowercase ISO 639 code such as en or "
+                              "fra.",
+                              true);
+        }
+    }
+    int waitMs = 0;
+    if (!readWaitMs(arguments, waitMs, error))
+        return textResult(error, true);
+    SourceRef ref;
+    if (!resolveSource(arguments, ref, error))
+        return textResult(error, true);
+    QJsonObject stored;
+    if (!ref.isClip && McpTranscripts::get(ref.path, stored) && stored.value("supplied").toBool())
+        return jsonResult(stored);
+
+    const QString exe = Settings.whisperExe();
+    const QFileInfo exeInfo(exe);
+    if (exe.isEmpty() || !exeInfo.isFile() || !exeInfo.isExecutable()) {
+        return textResult("Whisper is not configured: set the Whisper.cpp executable in Shotcut "
+                          "(Subtitles panel > Speech to Text... > Configuration), or supply a "
+                          "transcript with transcribe {path, transcript}.",
+                          true);
+    }
+    const QString model = Settings.whisperModel();
+    if (model.isEmpty() || !QFileInfo(model).isFile()) {
+        return textResult("Whisper is not configured: choose a GGML model in Shotcut (Subtitles "
+                          "panel > Speech to Text... > Configuration), or supply a transcript "
+                          "with transcribe {path, transcript}.",
+                          true);
+    }
+    const QString program = McpJobs::findProgram("ffmpeg");
+    if (program.isEmpty()) {
+        return textResult("ffmpeg was not found in Shotcut's application folder or on PATH; "
+                          "install FFmpeg to transcribe.",
+                          true);
+    }
+    AudioRange range;
+    if (!audioRange(ref, range, error))
+        return textResult(error, true);
+
+    const QString key = McpJobs::cacheKeyFor(ref.path,
+                                             "transcribe",
+                                             QStringLiteral("%1|%2|%3")
+                                                 .arg(rangeParams(ref, range), language, model));
+    QJsonObject result;
+    if (McpJobs::cached(key, result)) {
+        rememberTranscript(ref, result);
+        return jsonResult(result);
+    }
+    // Removed when the job lets go of its parser, whichever way it ends.
+    auto dir = std::make_shared<QTemporaryDir>(
+        QDir::temp().filePath(QStringLiteral("shotcut-transcribe-XXXXXX")));
+    if (!dir->isValid())
+        return textResult("Could not create a temporary folder: " + dir->errorString(), true);
+    const QString wav = dir->filePath("audio.wav");
+    const QString out = dir->filePath("out");
+    QStringList decode{"-hide_banner", "-nostdin", "-y"};
+    decode += range.seek;
+    decode += {"-i", ref.path, "-vn", "-ac", "1", "-ar", "16000", wav};
+    // whisper-cli assumes English without --language, so auto is passed too.
+    QStringList whisper{"--file",
+                        wav,
+                        "--model",
+                        model,
+                        "--language",
+                        language,
+                        "-ojf",
+                        "--output-file",
+                        out};
+    McpJobs::Step whisperStep{exe, whisper};
+    if (Settings.whisperUseGpu()) {
+        whisperStep.failureHint = QStringLiteral("If the GPU is the problem, turn off Use GPU in "
+                                                 "Shotcut's Speech to Text dialog.");
+    } else {
+        whisperStep.args << "--no-gpu";
+    }
+    const int timeoutMs = int(qMin(4.0 * 3600 * 1000, 600000 + (range.out - range.in) * 1000));
+    const auto record = McpJobs::run(
+        "transcribe",
+        key,
+        {{program, decode}, whisperStep},
+        [ref, range, language, dir, out](const QList<McpJobs::StepOutput> &,
+                                         QJsonObject &transcript,
+                                         QString &err) {
+            return parseWhisper(ref, range, language, out + ".json", transcript, err);
+        },
+        key,
+        timeoutMs);
+    return jobResult(record, waitMs);
+}
+
 } // namespace
 
 std::shared_ptr<McpJobs::Record> McpTools::startAudioLevels(const SourceRef &ref,
@@ -782,5 +1163,48 @@ QList<McpTool> McpTools::analysisTools()
              "wait_ms":{"type":"integer","minimum":0,"maximum":20000,"default":0}
            }})"),
          detectScenesTool},
+        {"transcribe",
+         "Speech to text with word times, using the Whisper.cpp program and model configured in "
+         "Shotcut (Subtitles panel > Speech to Text... > Configuration); nothing is downloaded. "
+         "Give path (absolute file) or track and clip (a timeline clip: only its trimmed range is "
+         "transcribed; a locked track is fine). Returns {path, in_s, out_s, language, granularity, "
+         "segments} where segments is [{start_s, end_s, text, words:[{start_s, end_s, text}]}], "
+         "all times in seconds in the SOURCE file (words inside their segment, in order). "
+         "granularity is \"word\", or \"segment\" (no words) when the program gave no word times. "
+         "For a clip source every segment and word also has timeline_frames, [{start, end "
+         "(exclusive)}] on the timeline, empty when it does not map (speed changed). language "
+         "(default auto) is auto or an ISO 639 code such as en; the result names the detected one. "
+         "A source without audio is an error, and so is Whisper not being configured (checked "
+         "before any job starts). wait_ms (0 to 20000, default 0) waits for the result; without "
+         "it, or when slower, {job_id, state} is returned to poll with get_job. Results are cached "
+         "(\"cached\": true). A failing run is not retried: the error has the program's last "
+         "output. Bring your own transcript instead: pass path and transcript (and nothing else) "
+         "with transcript {segments:[{start_s, end_s, text, words?}]}: 1 to 5000 segments sorted "
+         "by start_s, 0 <= start_s < end_s <= 86400, text non-empty (at most 2000 characters), "
+         "words inside their segment and in order. It is kept in memory for that file (until "
+         "Shotcut quits) with \"supplied\": true and granularity \"word\" when every segment has "
+         "words, else \"segment\"; transcribe with only that path then returns it, and "
+         "captions_from_transcript uses it.",
+         schema(R"({"type":"object","properties":{
+             "path":{"type":"string","description":"Absolute path of the media file."},
+             "track":{"type":"integer","minimum":0,"description":"Track index (with clip)."},
+             "clip":{"type":"integer","minimum":0,"description":"Clip index on the track."},
+             "language":{"type":"string","default":"auto",
+               "description":"auto or an ISO 639 code (2 or 3 lowercase letters)."},
+             "wait_ms":{"type":"integer","minimum":0,"maximum":20000,"default":0},
+             "transcript":{"type":"object","properties":{
+               "segments":{"type":"array","minItems":1,"maxItems":5000,"items":{
+                 "type":"object","properties":{
+                   "start_s":{"type":"number","minimum":0,"maximum":86400},
+                   "end_s":{"type":"number","minimum":0,"maximum":86400},
+                   "text":{"type":"string","minLength":1,"maxLength":2000},
+                   "words":{"type":"array","items":{"type":"object","properties":{
+                     "start_s":{"type":"number"},"end_s":{"type":"number"},
+                     "text":{"type":"string"}},"required":["start_s","end_s","text"]}}},
+                 "required":["start_s","end_s","text"]}}},
+               "required":["segments"],
+               "description":"A transcript to keep for path instead of running Whisper."}
+           }})"),
+         transcribeTool},
     };
 }

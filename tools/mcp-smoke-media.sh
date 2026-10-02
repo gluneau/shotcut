@@ -311,5 +311,160 @@ SL="$(job_result detect_scenes "{\"track\":0,\"clip\":$(scene_clip)}")"
 expect_eq "locked scenes clip: detect_scenes works on a locked track" 1 "$(echo "$SL" | jq -r '.scenes | length')"
 expect_eq "locked scenes clip: timeline_frames present" number "$(echo "$SL" | jq -r '.scenes[0].timeline_frames | type')"
 
+echo "== transcribe: supplied transcripts"
+expect_eq "tools/list has transcribe" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["transcribe"])')"
+AOP="$MEDIA/audioonly.wav"
+# supply PATH TRANSCRIPT_JSON: the transcribe arguments that store TRANSCRIPT_JSON for PATH
+supply() { jq -nc --arg p "$1" --argjson t "$2" '{path:$p,transcript:$t}'; }
+TW='{"segments":[{"start_s":0.5,"end_s":2.0,"text":" Hello there ","words":[{"start_s":0.5,"end_s":1.0,"text":"Hello"},{"start_s":1.1,"end_s":2.0,"text":"there"}]},{"start_s":4.0,"end_s":6.5,"text":"General Kenobi","words":[{"start_s":4.0,"end_s":5.0,"text":"General"},{"start_s":5.0,"end_s":6.5,"text":"Kenobi"}]}]}'
+ST="$(tool_json transcribe "$(supply "$AOP" "$TW")")"
+expect_eq "transcribe supplied: accepted with word granularity" word "$(echo "$ST" | jq -r '.granularity')"
+expect_eq "transcribe supplied: path" "$AOP" "$(echo "$ST" | jq -r '.path')"
+expect_eq "transcribe supplied: two segments" 2 "$(echo "$ST" | jq -r '.segments | length')"
+expect_eq "transcribe supplied: text is trimmed" "Hello there" "$(echo "$ST" | jq -r '.segments[0].text')"
+SR="$(tool_json transcribe "$(jq -nc --arg p "$AOP" '{path:$p}')")"
+expect_eq "transcribe path only: returns the supplied transcript" word "$(echo "$SR" | jq -r '.granularity')"
+expect_eq "transcribe path only: segment times" "0.5 2 4 6.5" "$(echo "$SR" | jq -r '[.segments[] | .start_s, .end_s] | map(tostring) | join(" ")')"
+expect_eq "transcribe path only: word times" "0.5 1 1.1 2 4 5 5 6.5" "$(echo "$SR" | jq -r '[.segments[].words[] | .start_s, .end_s] | map(tostring) | join(" ")')"
+expect_eq "transcribe path only: word texts" "Hello there General Kenobi" "$(echo "$SR" | jq -r '[.segments[].words[].text] | join(" ")')"
+expect_eq "transcribe path only: supplied flag" true "$(echo "$SR" | jq -r '.supplied')"
+expect_eq "transcribe path only: no job_id" false "$(echo "$SR" | jq -r 'has("job_id")')"
+TSEG='{"segments":[{"start_s":0,"end_s":1,"text":"one","words":[{"start_s":0,"end_s":1,"text":"one"}]},{"start_s":1,"end_s":2,"text":"two"}]}'
+expect_eq "transcribe supplied: a segment without words gives segment granularity" segment "$(tool_json transcribe "$(supply "$TMP/note.txt" "$TSEG")" | jq -r '.granularity')"
+expect_eq "transcribe supplied: stored per path (note.txt)" segment "$(tool_json transcribe "$(jq -nc --arg p "$TMP/note.txt" '{path:$p}')" | jq -r '.granularity')"
+expect_eq "transcribe supplied: other path keeps its own transcript" word "$(tool_json transcribe "$(jq -nc --arg p "$AOP" '{path:$p}')" | jq -r '.granularity')"
+bad_transcript() { # NAME TRANSCRIPT_JSON
+  expect_eq "transcribe supplied invalid: $1" true "$(tool_is_error transcribe "$(supply "$AOP" "$2")")"
+}
+bad_transcript "empty segments" '{"segments":[]}'
+bad_transcript "no segments" '{}'
+bad_transcript "segments not an array" '{"segments":{}}'
+bad_transcript "transcript not an object" '[]'
+bad_transcript "start_s equals end_s" '{"segments":[{"start_s":1,"end_s":1,"text":"a"}]}'
+bad_transcript "start_s after end_s" '{"segments":[{"start_s":2,"end_s":1,"text":"a"}]}'
+bad_transcript "negative start_s" '{"segments":[{"start_s":-1,"end_s":1,"text":"a"}]}'
+bad_transcript "end_s beyond 86400" '{"segments":[{"start_s":0,"end_s":86400.5,"text":"a"}]}'
+bad_transcript "string start_s" '{"segments":[{"start_s":"0","end_s":1,"text":"a"}]}'
+bad_transcript "missing end_s" '{"segments":[{"start_s":0,"text":"a"}]}'
+bad_transcript "empty text" '{"segments":[{"start_s":0,"end_s":1,"text":""}]}'
+bad_transcript "blank text" '{"segments":[{"start_s":0,"end_s":1,"text":"   "}]}'
+bad_transcript "missing text" '{"segments":[{"start_s":0,"end_s":1}]}'
+bad_transcript "text over 2000 chars" "$(jq -nc '{segments:[{start_s:0,end_s:1,text:("a" * 2001)}]}')"
+bad_transcript "word before the segment" '{"segments":[{"start_s":1,"end_s":2,"text":"a","words":[{"start_s":0.5,"end_s":1.5,"text":"a"}]}]}'
+bad_transcript "word after the segment" '{"segments":[{"start_s":1,"end_s":2,"text":"a","words":[{"start_s":1.5,"end_s":2.5,"text":"a"}]}]}'
+bad_transcript "words decreasing" '{"segments":[{"start_s":0,"end_s":3,"text":"a b","words":[{"start_s":1,"end_s":2,"text":"a"},{"start_s":0.5,"end_s":1,"text":"b"}]}]}'
+bad_transcript "word start_s equals end_s" '{"segments":[{"start_s":0,"end_s":3,"text":"a","words":[{"start_s":1,"end_s":1,"text":"a"}]}]}'
+bad_transcript "word with empty text" '{"segments":[{"start_s":0,"end_s":3,"text":"a","words":[{"start_s":1,"end_s":2,"text":""}]}]}'
+bad_transcript "words not an array" '{"segments":[{"start_s":0,"end_s":3,"text":"a","words":{}}]}'
+bad_transcript "unsorted segments" '{"segments":[{"start_s":2,"end_s":3,"text":"b"},{"start_s":0,"end_s":1,"text":"a"}]}'
+# built by jq itself: a transcript this large does not fit in one command-line argument
+many() { jq -nc --arg p "$1" --argjson n "$2" '{path:$p,transcript:{segments:[range($n) | {start_s:., end_s:(. + 0.5), text:"w"}]}}'; }
+expect_eq "transcribe supplied invalid: 5001 segments" true "$(tool_is_error transcribe "$(many "$AOP" 5001)")"
+expect_eq "transcribe supplied: 5000 segments accepted" 5000 "$(tool_json transcribe "$(many "$TMP/note.txt" 5000)" | jq -r '.segments | length')"
+expect_eq "transcribe supplied: overlapping segments accepted" segment "$(tool_json transcribe "$(supply "$TMP/note.txt" '{"segments":[{"start_s":0,"end_s":2,"text":"a"},{"start_s":1,"end_s":3,"text":"b"}]}')" | jq -r '.granularity')"
+expect_eq "transcribe supplied invalid: transcript with track and clip" true "$(tool_is_error transcribe "$(jq -nc --argjson t "$TW" '{track:0,clip:0,transcript:$t}')")"
+expect_eq "transcribe supplied invalid: transcript with path and track" true "$(tool_is_error transcribe "$(supply "$AOP" "$TW" | jq -c '. + {track:0}')")"
+expect_eq "transcribe supplied invalid: transcript with path and clip" true "$(tool_is_error transcribe "$(supply "$AOP" "$TW" | jq -c '. + {clip:0}')")"
+expect_eq "transcribe supplied invalid: transcript with language" true "$(tool_is_error transcribe "$(supply "$AOP" "$TW" | jq -c '. + {language:"en"}')")"
+expect_eq "transcribe supplied invalid: transcript with wait_ms" true "$(tool_is_error transcribe "$(supply "$AOP" "$TW" | jq -c '. + {wait_ms:0}')")"
+expect_eq "transcribe supplied invalid: transcript without path" true "$(tool_is_error transcribe "{\"transcript\":$TW}")"
+expect_eq "transcribe supplied invalid: relative path" true "$(tool_is_error transcribe "$(supply "audioonly.wav" "$TW")")"
+expect_eq "transcribe supplied invalid: missing file" true "$(tool_is_error transcribe "$(supply "$MEDIA/nope.wav" "$TW")")"
+expect_eq "transcribe: a rejected transcript keeps the stored one" "Hello there General Kenobi" "$(tool_json transcribe "$(jq -nc --arg p "$AOP" '{path:$p}')" | jq -r '[.segments[].words[].text] | join(" ")')"
+expect_eq "transcribe: language english is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"english"}')")"
+expect_eq "transcribe: language EN is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"EN"}')")"
+expect_eq "transcribe: numeric language is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:5}')")"
+expect_eq "transcribe: wait_ms 20001 is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,wait_ms:20001}')")"
+expect_eq "transcribe: neither path nor track is an error" true "$(tool_is_error transcribe '{}')"
+expect_eq "transcribe: path and track is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,track:0}')")"
+
+echo "== transcribe: Whisper"
+TONE="$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p}')"
+# A job id from a new, uncached detect_silence call (to prove that no job was created in between).
+new_job_id() { tool_json detect_silence "$(jq -c ". + {noise_db:$1}" <<<"$SIL")" | jq -r '.job_id'; }
+tmp_dirs() { ls -d "${TMPDIR:-/tmp}"/shotcut-transcribe-* 2>/dev/null | wc -l; }
+TD0="$(tmp_dirs)"
+J1="$(new_job_id -41)"
+NC="$(tool_text transcribe "$TONE")"
+J2="$(new_job_id -42)"
+if [ "${NC#Whisper is not configured}" != "$NC" ]; then
+  expect_eq "transcribe not configured: is an error" true "$(tool_is_error transcribe "$TONE")"
+  expect_eq "transcribe not configured: says to supply a transcript" true "$(echo "$NC" | grep -q 'supply a transcript' && echo true || echo false)"
+  expect_eq "transcribe not configured: names the Speech to Text settings" true "$(echo "$NC" | grep -q 'Speech to Text' && echo true || echo false)"
+  expect_eq "transcribe not configured: no job was created" "$((J1 + 1))" "$J2"
+  expect_eq "transcribe not configured: clip source too" true "$(tool_text transcribe '{"track":0,"clip":0,"language":"fr"}' | grep -q '^Whisper is not configured' && echo true || echo false)"
+  echo "SKIP (no whisper): Whisper transcription checks (export WHISPER_EXE and WHISPER_MODEL to the harness)"
+else
+  echo "SKIP (whisper configured): not-configured checks"
+  # the call above started a job on tone_av.mp4
+  expect_eq "transcribe tone_av: the job ends" true "$(wait_job "$(echo "$NC" | jq -r '.job_id')" 120 | jq -r '.state != "running"')"
+  JFK_SRC="${JFK_WAV:-$HOME/GitHub/whisper.cpp/samples/jfk.wav}"
+  if [ ! -f "$JFK_SRC" ]; then
+    fail "transcribe whisper" "$JFK_SRC is missing (set JFK_WAV)"
+  else
+    cp "$JFK_SRC" "$MEDIA/jfk.wav"
+    JF="$(jq -nc --arg p "$MEDIA/jfk.wav" '{path:$p}')"
+    W="$(job_result transcribe "$(jq -c '. + {wait_ms:20000}' <<<"$JF")")"
+    norm='ascii_downcase | gsub("[^a-z ]"; "") | gsub(" +"; " ")'
+    expect_eq "transcribe jfk: granularity word" word "$(echo "$W" | jq -r '.granularity')"
+    expect_eq "transcribe jfk: language en" en "$(echo "$W" | jq -r '.language')"
+    expect_eq "transcribe jfk: path" "$MEDIA/jfk.wav" "$(echo "$W" | jq -r '.path')"
+    expect_eq "transcribe jfk: text has the famous line" true "$(echo "$W" | jq -r "[.segments[].text] | join(\" \") | $norm | contains(\"ask not what your country can do for you\")")"
+    expect_eq "transcribe jfk: at least 15 words" true "$(echo "$W" | jq -r '[.segments[].words[]] | length >= 15')"
+    expect_eq "transcribe jfk: words rebuild each segment's text" true "$(echo "$W" | jq -r '[.segments[] | ([.words[].text] | join(" ") | gsub(" +"; " ")) == (.text | gsub(" +"; " "))] | all')"
+    expect_eq "transcribe jfk: no special tokens in words" 0 "$(echo "$W" | jq -r '[.segments[].words[] | select(.text | test("^\\[_|^$"))] | length')"
+    expect_eq "transcribe jfk: words inside their segment" true "$(echo "$W" | jq -r '[.segments[] as $s | $s.words[] | .start_s >= $s.start_s and .end_s <= $s.end_s and .start_s <= .end_s] | all')"
+    expect_eq "transcribe jfk: word starts non-decreasing" true "$(echo "$W" | jq -r '[.segments[].words[].start_s] | . == sort')"
+    expect_eq "transcribe jfk: span within the 11 s file" true "$(echo "$W" | jq -r '(.segments[0].start_s >= 0) and (.segments[-1].end_s <= 11.05)')"
+    expect_eq "transcribe jfk: path source has no timeline_frames" 0 "$(echo "$W" | jq -r '[.segments[] | select(has("timeline_frames"))] | length')"
+    expect_eq "transcribe jfk: \"country\" is near 5.7 s" true "$(echo "$W" | jq -r '[.segments[].words[] | select(.text | test("^country"))][0].start_s | (. - 5.74) | fabs < 0.5')"
+    expect_eq "transcribe jfk: first call is not cached" null "$(echo "$W" | jq -c '.cached // null')"
+    expect_eq "transcribe jfk: second call is cached" true "$(tool_json transcribe "$JF" | jq -r '.cached')"
+    sleep 0.5
+    expect_eq "transcribe jfk: the temporary folder is removed" "$TD0" "$(tmp_dirs)"
+    COUNTRY="$(echo "$W" | jq -r '[.segments[].words[] | select(.text | test("^country"))][0].start_s')"
+
+    expect_eq "transcribe noaudio: error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/noaudio.mp4" '{path:$p}')")"
+    expect_eq "transcribe noaudio: message" "$MEDIA/noaudio.mp4 has no audio stream." "$(tool_text transcribe "$(jq -nc --arg p "$MEDIA/noaudio.mp4" '{path:$p}')")"
+
+    # jfk.wav on the timeline, trimmed by 2 s at its start
+    tool_json open_project "{\"path\":\"$UNLOCKED\",\"discard_changes\":true}" >/dev/null
+    sleep 2
+    tool_json playlist_add "{\"path\":\"$MEDIA/jfk.wav\"}" >/dev/null
+    tool_json timeline_add_playlist '{}' >/dev/null
+    jfk_clip() {
+      tool_json get_timeline '{}' | jq -r '[.tracks[0].clips | to_entries[] | select(.value.kind=="clip" and ((.value.path // .value.name) | test("jfk.wav$")))] | last | .key'
+    }
+    JI="$(jfk_clip)"
+    tool_json timeline_trim "{\"track\":0,\"clip\":$JI,\"edge\":\"in\",\"delta\":50,\"ripple\":true}" >/dev/null
+    expect_eq "transcribe trimmed clip: in is 50" 50 "$(tool_json get_timeline '{}' | jq -r ".tracks[0].clips[$JI].in")"
+    J0="$(clip_start "$JI")"
+    WT="$(job_result transcribe "{\"track\":0,\"clip\":$JI,\"wait_ms\":20000,\"language\":\"en\"}")"
+    expect_eq "transcribe trimmed clip: in_s about 2.0" true "$(echo "$WT" | jq -r '(.in_s - 2.0) | fabs < 0.01')"
+    expect_eq "transcribe trimmed clip: out_s about 11" true "$(echo "$WT" | jq -r '(.out_s - 11) | fabs < 0.05')"
+    expect_eq "transcribe trimmed clip: granularity word" word "$(echo "$WT" | jq -r '.granularity')"
+    expect_eq "transcribe trimmed clip: text has the second half" true "$(echo "$WT" | jq -r "[.segments[].text] | join(\" \") | $norm | contains(\"ask what you can do for your country\")")"
+    expect_eq "transcribe trimmed clip: all times in source seconds from in_s" true "$(echo "$WT" | jq -r '[.segments[] | .start_s, .end_s, (.words[] | .start_s, .end_s)] | all(. >= 1.999 and . <= 11.05)')"
+    expect_eq "transcribe trimmed clip: \"country\" stays at its source time" true "$(echo "$WT" | jq -r "[.segments[].words[] | select(.text | test(\"^country\"))][0].start_s | (. - $COUNTRY) | fabs < 0.5")"
+    expect_eq "transcribe trimmed clip: words inside their segment" true "$(echo "$WT" | jq -r '[.segments[] as $s | $s.words[] | .start_s >= $s.start_s and .end_s <= $s.end_s] | all')"
+    expect_eq "transcribe trimmed clip: every segment and word has timeline_frames" true "$(echo "$WT" | jq -r '[.segments[] | has("timeline_frames"), (.words[] | has("timeline_frames"))] | all')"
+    expect_eq "transcribe trimmed clip: word timeline frames = clip start + (start_s - 2) * 25" true "$(echo "$WT" | jq -r "[.segments[].words[] | select(.timeline_frames | length > 0) | (.timeline_frames[0].start - ($J0 + (.start_s * 25 | round) - 50)) | fabs <= 1] | (length > 10) and all")"
+    expect_eq "transcribe trimmed clip: segment timeline frames start at the clip" true "$(echo "$WT" | jq -r "(.segments[0].timeline_frames[0].start - ($J0 + (.segments[0].start_s * 25 | round) - 50)) | fabs <= 1")"
+    sleep 0.5
+    expect_eq "transcribe trimmed clip: the temporary folder is removed" "$TD0" "$(tmp_dirs)"
+
+    LOCKED3="$TMP/locked3.mlt"
+    tool_json save_project "{\"path\":\"$LOCKED3\"}" >/dev/null
+    PL3="$(grep -o '<track producer="[^"]*"' "$LOCKED3" | grep -v background | head -1 | sed 's/.*producer="//; s/"//')"
+    sed -i "0,/<playlist id=\"$PL3\"[^>]*>/s//&\n  <property name=\"shotcut:lock\">1<\/property>/" "$LOCKED3"
+    tool_json open_project "{\"path\":\"$LOCKED3\",\"discard_changes\":true}" >/dev/null
+    sleep 2
+    expect_eq "transcribe locked clip: track 0 is locked" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
+    WL="$(job_result transcribe "{\"track\":0,\"clip\":$(jfk_clip),\"wait_ms\":20000,\"language\":\"en\"}")"
+    expect_eq "transcribe locked clip: works on a locked track" word "$(echo "$WL" | jq -r '.granularity')"
+    expect_eq "transcribe locked clip: in_s about 2.0" true "$(echo "$WL" | jq -r '(.in_s - 2.0) | fabs < 0.01')"
+  fi
+fi
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

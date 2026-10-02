@@ -15,7 +15,8 @@ pass() { echo "PASS  $1"; }
 fail() { echo "FAIL  $1 -- $2"; failures=$((failures + 1)); }
 expect_eq() { if [ "$2" = "$3" ]; then pass "$1"; else fail "$1" "expected '$2', got '$3'"; fi; }
 
-rpc() { curl -s --max-time 60 -X POST "$URL" "${AUTH[@]}" "${JSON[@]}" -d "$1"; }
+# The body goes through stdin: one command-line argument is limited to 128 KiB on Linux.
+rpc() { curl -s --max-time 60 -X POST "$URL" "${AUTH[@]}" "${JSON[@]}" --data-binary @- <<<"$1"; }
 call_tool() {
   rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}"
 }

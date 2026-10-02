@@ -179,6 +179,8 @@ void startStep(const std::shared_ptr<Runner> &runner)
                                                       .trimmed();
                              if (!tail.isEmpty())
                                  error += " " + tail;
+                             if (!step.failureHint.isEmpty())
+                                 error += " " + step.failureHint;
                              finish(runner, "failed", error);
                              return;
                          }

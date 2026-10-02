@@ -25,7 +25,9 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonDocument>
+#include <QStringList>
 
 #include <cmath>
 #include <limits>
@@ -301,3 +303,56 @@ QJsonArray mapRangeToTimeline(const SourceRef &ref, double startSec, double endS
 }
 
 } // namespace McpTools
+
+namespace McpTranscripts {
+
+namespace {
+
+constexpr int kMaxTranscripts = 50;
+
+struct Store
+{
+    QHash<QString, QJsonObject> transcripts;
+    QStringList order;
+};
+
+Store &transcriptStore()
+{
+    static Store s;
+    return s;
+}
+
+QString keyOf(const QString &path)
+{
+    return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+}
+
+} // namespace
+
+void store(const QString &path, const QJsonObject &transcript)
+{
+    Store &s = transcriptStore();
+    const QString key = keyOf(path);
+    const auto it = s.transcripts.constFind(key);
+    if (it != s.transcripts.constEnd()) {
+        if (it->value("supplied").toBool() && !transcript.value("supplied").toBool())
+            return;
+        s.order.removeOne(key);
+    }
+    s.order.append(key);
+    if (s.order.size() > kMaxTranscripts)
+        s.transcripts.remove(s.order.takeFirst());
+    s.transcripts.insert(key, transcript);
+}
+
+bool get(const QString &path, QJsonObject &transcript)
+{
+    const Store &s = transcriptStore();
+    const auto it = s.transcripts.constFind(keyOf(path));
+    if (it == s.transcripts.constEnd())
+        return false;
+    transcript = it.value();
+    return true;
+}
+
+} // namespace McpTranscripts

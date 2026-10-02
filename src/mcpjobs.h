@@ -41,6 +41,8 @@ struct Step
     // is not buffered, so it is not subject to the 8 MiB cap; StepOutput::out is then empty.
     // Copies of the Step share the function, so keep its state in a shared_ptr.
     std::function<void(const QByteArray &)> onStdout;
+    // Appended to the job's error when this step exits non-zero or crashes.
+    QString failureHint;
 };
 
 struct StepOutput
