@@ -177,6 +177,7 @@ double round2(double value)
 }
 
 // Uses the analyze_media probe (and its cache) to require an audio stream and learn the duration.
+// An uncached probe may be waited on for up to 10 s even when wait_ms is 0.
 bool audioRange(const SourceRef &ref, AudioRange &range, QString &error)
 {
     const QString cacheKey = McpJobs::cacheKeyFor(ref.path, "analyze_media", QString());
@@ -636,7 +637,9 @@ QList<McpTool> McpTools::analysisTools()
          "e.g. for a waveform or to find quiet parts. Give path or track and clip (a clip: only "
          "its trimmed range; a locked track is fine); times are seconds in the SOURCE file. "
          "buckets (1 to 600, default 60). A source without audio is an error, and so is one "
-         "(or a clip range) longer than 7200 s. wait_ms (0 to 20000, default 0) waits for the "
+         "(or a clip range) longer than 7200 s. integrated_lufs reads -70 for silence (ebur128's own "
+         "floor) and true_peak_dbtp is floored at -120; buckets with no decoded samples (audio "
+         "shorter than the requested range) report -120. wait_ms (0 to 20000, default 0) waits for the "
          "result; without it, or when slower, {job_id, state} is returned to poll with get_job. "
          "Results are cached (\"cached\": true).",
          schema(R"({"type":"object","properties":{

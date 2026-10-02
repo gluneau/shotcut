@@ -143,6 +143,33 @@ expect_eq "detect_silence clip: range 2 timeline start 175" true "$(echo "$C" | 
 expect_eq "detect_silence clip: range 2 timeline end 212" true "$(echo "$C" | jq -r '(.ranges[1].timeline_frames[0].end - 212) | fabs <= 3')"
 expect_eq "detect_silence clip: speech ranges carry timeline_frames" true "$(echo "$C" | jq -r '[.speech_ranges[] | has("timeline_frames")] | all')"
 
+echo "== detect_silence and audio_levels on a trimmed clip"
+tool_json timeline_trim '{"track":0,"clip":0,"edge":"in","delta":25,"ripple":true}' >/dev/null
+expect_eq "trimmed clip: in is 25" 25 "$(tool_json get_timeline '{}' | jq -r '.tracks[0].clips[0].in')"
+TC="$(job_result detect_silence '{"track":0,"clip":0}')"
+expect_eq "trimmed clip: in_s about 1.0" true "$(echo "$TC" | jq -r '(.in_s - 1.0) | fabs < 0.01')"
+expect_eq "trimmed clip: out_s about 10" true "$(echo "$TC" | jq -r '(.out_s - 10) | fabs < 0.1')"
+expect_eq "trimmed clip: two ranges" 2 "$(echo "$TC" | jq -r '.ranges | length')"
+expect_eq "trimmed clip: range 1 in source time about 2.0-4.0" true "$(echo "$TC" | jq -r '((.ranges[0].start_s - 2.0) | fabs < 0.15) and ((.ranges[0].end_s - 4.0) | fabs < 0.15)')"
+expect_eq "trimmed clip: range 2 in source time about 7.0-8.5" true "$(echo "$TC" | jq -r '((.ranges[1].start_s - 7.0) | fabs < 0.15) and ((.ranges[1].end_s - 8.5) | fabs < 0.15)')"
+expect_eq "trimmed clip: range 1 timeline frames 25-75" true "$(echo "$TC" | jq -r '((.ranges[0].timeline_frames[0].start - 25) | fabs <= 3) and ((.ranges[0].timeline_frames[0].end - 75) | fabs <= 3)')"
+expect_eq "trimmed clip: range 2 timeline frames 150-187" true "$(echo "$TC" | jq -r '((.ranges[1].timeline_frames[0].start - 150) | fabs <= 3) and ((.ranges[1].timeline_frames[0].end - 187) | fabs <= 3)')"
+expect_eq "trimmed clip: first speech range starts at in_s" true "$(echo "$TC" | jq -r '(.speech_ranges[0].start_s - 1.0) | fabs < 0.01')"
+TV="$(job_result audio_levels '{"track":0,"clip":0,"buckets":10}')"
+expect_eq "trimmed clip levels: in_s about 1.0" true "$(echo "$TV" | jq -r '(.in_s - 1.0) | fabs < 0.01')"
+expect_eq "trimmed clip levels: out_s about 10" true "$(echo "$TV" | jq -r '(.out_s - 10) | fabs < 0.1')"
+expect_eq "trimmed clip levels: first bucket starts at in_s" true "$(echo "$TV" | jq -r '(.buckets[0].start_s - 1.0) | fabs < 0.01')"
+expect_eq "trimmed clip levels: first bucket (1.0-1.9 s) is tone" true "$(echo "$TV" | jq -r '(.buckets[0].rms_db + 23) | fabs < 3')"
+expect_eq "trimmed clip levels: third bucket (2.8-3.7 s) is silent" true "$(echo "$TV" | jq -r '.buckets[2].rms_db < -80')"
+tool_json timeline_trim '{"track":0,"clip":0,"edge":"in","delta":50,"ripple":true}' >/dev/null
+TD="$(job_result detect_silence '{"track":0,"clip":0}')"
+expect_eq "clip trimmed into the first silence: in_s about 3.0" true "$(echo "$TD" | jq -r '(.in_s - 3.0) | fabs < 0.01')"
+expect_eq "clip trimmed into the first silence: range 1 is clipped to start at in_s" true "$(echo "$TD" | jq -r '(.ranges[0].start_s - 3.0) | fabs < 0.01')"
+expect_eq "clip trimmed into the first silence: range 1 ends about 4.0" true "$(echo "$TD" | jq -r '(.ranges[0].end_s - 4.0) | fabs < 0.15')"
+expect_eq "clip trimmed into the first silence: range 1 timeline frames 0-25" true "$(echo "$TD" | jq -r '((.ranges[0].timeline_frames[0].start) | fabs <= 3) and ((.ranges[0].timeline_frames[0].end - 25) | fabs <= 3)')"
+expect_eq "clip trimmed into the first silence: range 2 timeline frames 101-137" true "$(echo "$TD" | jq -r '((.ranges[1].timeline_frames[0].start - 101) | fabs <= 3) and ((.ranges[1].timeline_frames[0].end - 137) | fabs <= 3)')"
+expect_eq "clip trimmed into the first silence: no speech before the first range" 2 "$(echo "$TD" | jq -r '.speech_ranges | length')"
+
 echo "== detect_silence on a clip of a locked track"
 # No tool locks a track yet (Task 10 adds track_set), so lock it in a saved copy of the project
 # and reopen that.
@@ -155,7 +182,7 @@ sleep 2
 expect_eq "locked clip: track 0 is locked after reopening" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
 L="$(job_result detect_silence '{"track":0,"clip":0}')"
 expect_eq "locked clip: detect_silence works on a locked track" 2 "$(echo "$L" | jq -r '.ranges | length')"
-expect_eq "locked clip: timeline_frames present" 50 "$(echo "$L" | jq -r '.ranges[0].timeline_frames[0].start | (. / 50 | round) * 50')"
+expect_eq "locked clip: timeline_frames of the trimmed clip" true "$(echo "$L" | jq -r '(.ranges[1].timeline_frames[0].start - 101) | fabs <= 3')"
 
 echo "== audio_levels"
 expect_eq "tools/list has audio_levels" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["audio_levels"])')"
@@ -187,7 +214,7 @@ expect_eq "audio_levels: path and clip is an error" true "$(tool_is_error audio_
 expect_eq "audio_levels: neither path nor track is an error" true "$(tool_is_error audio_levels '{}')"
 VC="$(job_result audio_levels '{"track":0,"clip":0,"buckets":10}')"
 expect_eq "audio_levels clip: 10 buckets" 10 "$(echo "$VC" | jq -r '.buckets | length')"
-expect_eq "audio_levels clip (locked track): in_s 0" 0 "$(echo "$VC" | jq -r '.in_s')"
+expect_eq "audio_levels clip (locked track): in_s about 3.0 (trimmed)" true "$(echo "$VC" | jq -r '(.in_s - 3.0) | fabs < 0.01')"
 # a 600 s file must be bucketed over its whole length, not truncated by the output cap
 ffmpeg -v error -nostdin -y -f lavfi -i "sine=frequency=440:duration=600:sample_rate=16000" "$TMP/long.wav"
 VL="$(job_result audio_levels "$(jq -nc --arg p "$TMP/long.wav" '{path:$p,buckets:10,wait_ms:20000}')")"
