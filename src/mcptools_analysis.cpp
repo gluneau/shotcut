@@ -29,6 +29,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -1104,6 +1105,35 @@ QString timecode(int frame, double fps)
         .arg(frame % rate, 2, 10, QChar('0'));
 }
 
+constexpr int kOverviewMaxSide = 4096;
+constexpr int kLabelMinPx = 8;
+
+struct OverviewLabel
+{
+    int pixelSize;
+    bool withTimecode;
+};
+
+// The tile label font: sized from both tile sides, then shrunk until the timecode, a gap and the
+// frame number fit across the tile; below the floor only the frame number is drawn.
+OverviewLabel overviewLabel(QFont font,
+                            int tileWidth,
+                            int tileHeight,
+                            const QString &timecodeText,
+                            const QString &numberText)
+{
+    const int start = qBound(10, qMin(tileHeight / 12, tileWidth / 24), 32);
+    for (int size = start; size >= kLabelMinPx; --size) {
+        font.setPixelSize(size);
+        const QFontMetrics metrics(font);
+        const int needed = metrics.horizontalAdvance(timecodeText)
+                           + metrics.horizontalAdvance(numberText) + size + 8;
+        if (needed <= tileWidth)
+            return {size, true};
+    }
+    return {start, false};
+}
+
 QJsonObject getOverviewTool(const QJsonObject &arguments)
 {
     QString error;
@@ -1150,19 +1180,32 @@ QJsonObject getOverviewTool(const QJsonObject &arguments)
         positionsJson.append(positions.last());
     }
 
-    const int tileHeight = qMax(1, qRound(tileWidth / MLT.profile().dar()));
+    const double dar = MLT.profile().dar();
     const int gap = 2;
+    auto heightOf = [dar](int width) { return qMax(1, qRound(width / dar)); };
+    while (tileWidth > 96
+           && (columns * tileWidth + gap * (columns - 1) > kOverviewMaxSide
+               || rows * heightOf(tileWidth) + gap * (rows - 1) > kOverviewMaxSide))
+        --tileWidth;
+    const int tileHeight = heightOf(tileWidth);
     QImage sheet(columns * tileWidth + gap * (columns - 1),
                  rows * tileHeight + gap * (rows - 1),
                  QImage::Format_RGB32);
     sheet.fill(Qt::black);
     QPainter painter(&sheet);
+    const double fps = MLT.profile().fps();
+    // Sized for the last frame, whose timecode and number are the widest.
+    const OverviewLabel label = overviewLabel(painter.font(),
+                                              tileWidth,
+                                              tileHeight,
+                                              timecode(last, fps),
+                                              QString::number(last));
     QFont font = painter.font();
-    font.setPixelSize(qMax(10, tileHeight / 12));
+    font.setPixelSize(label.pixelSize);
     painter.setFont(font);
     painter.setPen(Qt::white);
-    const int barHeight = font.pixelSize() + 8;
-    const double fps = MLT.profile().fps();
+    const int barHeight = label.pixelSize + 8;
+    const int playtime = tl->get_playtime();
 
     // The playhead moves for every tile; put it back, and resume playback only when the player
     // was playing the timeline (a source clip stays replaced by the timeline, as with get_frame).
@@ -1173,18 +1216,33 @@ QJsonObject getOverviewTool(const QJsonObject &arguments)
     const int before = qMin(tl->position(), last);
     QElapsedTimer clock;
     clock.start();
+    const QString budgetError = QStringLiteral("The overview took longer than %1 s; ask for "
+                                               "fewer tiles.")
+                                    .arg(kOverviewBudgetMs / 1000);
+    const QString changedError = QStringLiteral("The timeline changed while building the "
+                                                "overview.");
+    auto changed = [&]() {
+        Mlt::Producer *now = timeline();
+        return now != tl || now->get_playtime() != playtime;
+    };
     for (int i = 0; i < count && error.isEmpty(); ++i) {
+        if (changed()) {
+            error = changedError;
+            break;
+        }
         const int remaining = kOverviewBudgetMs - int(clock.elapsed());
         if (remaining <= 0) {
-            error = QStringLiteral("The overview took longer than %1 s; ask for fewer tiles.")
-                        .arg(kOverviewBudgetMs / 1000);
+            error = budgetError;
             break;
         }
         const QImage frame = fetchSettledFrame(positions[i],
                                                error,
                                                qMin(kOverviewTileTimeoutMs, remaining));
         if (frame.isNull()) {
-            error = QStringLiteral("Frame %1: %2").arg(positions[i]).arg(error);
+            // A tile whose wait the budget cut short is a budget failure, not a slow frame.
+            error = remaining < kOverviewTileTimeoutMs
+                        ? budgetError
+                        : QStringLiteral("Frame %1: %2").arg(positions[i]).arg(error);
             break;
         }
         const int x = (i % columns) * (tileWidth + gap);
@@ -1198,10 +1256,13 @@ QJsonObject getOverviewTool(const QJsonObject &arguments)
         const QRect bar(x, y + tileHeight - barHeight, tileWidth, barHeight);
         painter.fillRect(bar, QColor(0, 0, 0, 160));
         const QRect text = bar.adjusted(4, 0, -4, 0);
-        painter.drawText(text, Qt::AlignVCenter | Qt::AlignLeft, timecode(positions[i], fps));
+        if (label.withTimecode)
+            painter.drawText(text, Qt::AlignVCenter | Qt::AlignLeft, timecode(positions[i], fps));
         painter.drawText(text, Qt::AlignVCenter | Qt::AlignRight, QString::number(positions[i]));
     }
     painter.end();
+    if (error.isEmpty() && changed())
+        error = changedError;
     if (timeline()) {
         movePlayhead(qMin(before, lastFrame()));
         if (wasPlaying)
@@ -1431,13 +1492,17 @@ QList<McpTool> McpTools::analysisTools()
          "separated by 2 px. columns and rows (1 to 8, default 4), tile_width (96 to 640, "
          "default 320; the tile height follows the display aspect ratio), format jpeg (default) "
          "or png. A timeline with fewer frames than tiles gets one tile per frame and fewer "
-         "columns or rows. Returns the image and {columns, rows, tile_width, positions} with the "
-         "columns and rows actually used and the frame of every tile. Each tile is read like "
+         "columns or rows, and tile_width is reduced (not below 96) so that neither side of the "
+         "image exceeds 4096 px. Narrow tiles show only the frame number. Returns the image and "
+         "{columns, rows, tile_width, positions} with the columns, rows and tile_width actually "
+         "used and the frame of every tile. Each tile is read like "
          "get_frame with a position (with timeline filters and transitions), so the call takes a "
          "few seconds: at most 3 s per tile and 45 s in all, else an error. The playhead is put "
          "back afterwards and playback of the timeline resumes; a source clip shown in the "
          "player is replaced by the timeline. Refused when there is no timeline, the timeline "
-         "has no clips or an export runs.",
+         "has no clips or an export started with export_video runs (an export started in the "
+         "Shotcut window is not detected), and stopped with an error if the timeline changes "
+         "meanwhile.",
          schema(R"({"type":"object","properties":{
              "columns":{"type":"integer","minimum":1,"maximum":8,"default":4},
              "rows":{"type":"integer","minimum":1,"maximum":8,"default":4},

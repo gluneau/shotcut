@@ -515,6 +515,19 @@ ov_call() { call_tool get_overview "$1" > "$TMP/ov.json"; jq -r '.result.content
 ov_info() { jq -c '.result.content[1].text | fromjson' "$TMP/ov.json"; }
 img_size() { ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$1"; }
 gf_call() { call_tool get_frame "$1" | jq -r '.result.content[0].data' | base64 -d > "$2"; }
+# gray_rows FILE W H X Y: the luma of that rectangle, one line of W values per row
+gray_rows() { ffmpeg -v error -i "$1" -vf "crop=$2:$3:$4:$5,format=gray" -f rawvideo -pix_fmt gray - | od -An -v -tu1 -w"$2"; }
+bright_count() { gray_rows "$@" | awk '{for (i = 1; i <= NF; i++) if ($i > 200) n++} END {print n + 0}'; }
+# bright_cols FILE W H X Y: per column, # when any pixel is brighter than 200, else .
+bright_cols() { gray_rows "$@" | awk -v w="$2" '{for (i = 1; i <= NF; i++) if ($i > 200) b[i] = 1} END {for (i = 1; i <= w; i++) printf "%s", (b[i] ? "#" : "."); print ""}'; }
+# label_ok COLS: the label starts at the left edge (timecode drawn) and its widest inner gap,
+# the space between timecode and frame number, is at least 5 px (the parts do not overlap).
+label_ok() {
+  local cols="$1" first gap
+  first="$(echo "$cols" | sed 's/#.*//' | tr -d '\n' | wc -c)"
+  gap="$(echo "$cols" | sed 's/^\.*//; s/\.*$//' | grep -o '\.\+' | awk '{if (length > m) m = length} END {print m + 0}')"
+  if [ "$first" -lt 10 ] && [ "$gap" -ge 5 ]; then echo true; else echo "false(first=$first gap=$gap $cols)"; fi
+}
 # rgb_class FILE W H X Y: R, G, B or ? for the mean colour of that rectangle
 rgb_class() {
   local hex r g b
@@ -548,6 +561,14 @@ for i in $(seq 0 15); do
 done
 expect_eq "get_overview: tile colours follow the clip (red, green, blue)" RRRRRGGGGGGBBBBB "$CLASSES"
 expect_eq "get_overview: label bar darkens the bottom of the first tile" true "$(c="$(rgb_class "$TMP/ov.jpg" 300 6 10 230)"; [ "$c" != R ] && echo true || echo false)"
+# Label text: white glyphs (luma > 200) in the bottom 16 rows of the first tile's bar (13 px font,
+# 21 px bar on a 240 px tile); a PNG so that JPEG does not blur thin glyphs. Needs fonts.
+if [ "$(fc-list 2>/dev/null | wc -l)" -gt 0 ]; then
+  ov_call '{"columns":2,"rows":1,"format":"png"}' "$TMP/ovlabel.png"
+  expect_eq "get_overview: the label bar holds text (at least 40 bright pixels)" true "$([ "$(bright_count "$TMP/ovlabel.png" 320 16 0 222)" -ge 40 ] && echo true || echo false)"
+else
+  echo "SKIP  get_overview label text (no fonts installed)"
+fi
 ST="$(tool_json get_state '{}')"
 expect_eq "get_overview: playhead restored" 37 "$(echo "$ST" | jq -r '.position')"
 expect_eq "get_overview: still paused" false "$(echo "$ST" | jq -r '.playing')"
@@ -576,6 +597,9 @@ T1=$(date +%s%N)
 echo "      (get_overview 8x8 took $(( (T1 - T0) / 1000000 )) ms)"
 expect_eq "get_overview 8x8: 64 positions" 64 "$(ov_info | jq -r '.positions | length')"
 expect_eq "get_overview 8x8: size" 782x590 "$(img_size "$TMP/ov88.jpg")"
+ov_call '{"columns":8,"rows":8,"tile_width":640}' "$TMP/ovbig.jpg"
+expect_eq "get_overview 8x8 at 640: tile_width reduced to keep the sheet within 4096 px" 510 "$(ov_info | jq -r '.tile_width')"
+expect_eq "get_overview 8x8 at 640: size 8*510+14 by 8*383+14" 4094x3078 "$(img_size "$TMP/ovbig.jpg")"
 for bad in '{"columns":9}' '{"columns":0}' '{"rows":0}' '{"rows":9}' '{"tile_width":50}' '{"tile_width":641}' '{"format":"gif"}' '{"columns":"4"}' '{"columns":2.5}' '{"tile_width":null}' '{"format":5}'; do
   expect_eq "get_overview: $bad is an error" true "$(tool_is_error get_overview "$bad")"
 done
@@ -611,6 +635,25 @@ if [ -n "${MCP_APPDATA:-}" ]; then
 else
   echo "SKIP  get_overview while an export runs (needs MCP_APPDATA for the slow preset)"
 fi
+
+echo "== get_overview on a portrait (9:16) timeline"
+# No tool sets the video mode yet (Task 17), so make the project 180x320 9:16 in a saved copy.
+PORTRAIT="$TMP/portrait.mlt"
+tool_json save_project "{\"path\":\"$PORTRAIT\"}" >/dev/null
+sed -i -E '/<profile/{s/ width="[0-9]+"/ width="180"/;s/ height="[0-9]+"/ height="320"/;s/display_aspect_num="[0-9]+"/display_aspect_num="9"/;s/display_aspect_den="[0-9]+"/display_aspect_den="16"/;s/sample_aspect_num="[0-9]+"/sample_aspect_num="1"/;s/sample_aspect_den="[0-9]+"/sample_aspect_den="1"/}' "$PORTRAIT"
+tool_json open_project "{\"path\":\"$PORTRAIT\",\"discard_changes\":true}" >/dev/null
+sleep 2
+expect_eq "portrait: get_frame is 180x320" "180 320" "$(call_tool get_frame '{"position":10}' | jq -r '.result.content[1].text | fromjson | "\(.width) \(.height)"')"
+ov_call '{"columns":4,"rows":2,"tile_width":96,"format":"png"}' "$TMP/ovp96.png"
+expect_eq "portrait 4x2 at 96: size 4*96+6 by 2*171+2" 390x344 "$(img_size "$TMP/ovp96.png")"
+# The last tile (frame 224, the widest label); bottom 18 rows hold the 18 px bar of a 10 px font.
+expect_eq "portrait 96x171 tiles: timecode and frame number do not overlap" true "$(label_ok "$(bright_cols "$TMP/ovp96.png" 96 18 294 325)")"
+ov_call '{"format":"png"}' "$TMP/ovp320.png"
+expect_eq "portrait 4x4 at 320: size 4*320+6 by 4*569+6" 1286x2282 "$(img_size "$TMP/ovp320.png")"
+expect_eq "portrait 320x569 tiles: timecode and frame number do not overlap" true "$(label_ok "$(bright_cols "$TMP/ovp320.png" 320 18 966 2264)")"
+ov_call '{"columns":8,"rows":8,"tile_width":640}' "$TMP/ovpbig.jpg"
+expect_eq "portrait 8x8 at 640: tile_width reduced by the height limit" 287 "$(ov_info | jq -r '.tile_width')"
+expect_eq "portrait 8x8 at 640: size 8*287+14 by 8*510+14" 2310x4094 "$(img_size "$TMP/ovpbig.jpg")"
 
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
