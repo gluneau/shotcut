@@ -92,8 +92,11 @@ bool parseProbe(const QString &path,
         error = QStringLiteral("%1 has no audio or video stream.").arg(path);
         return false;
     }
+    bool durationOk = false;
+    const double duration = format.value("duration").toString().toDouble(&durationOk);
     result = QJsonObject{{"path", path},
-                         {"duration_s", format.value("duration").toString().toDouble()},
+                         {"duration_s",
+                          durationOk && duration >= 0 ? QJsonValue(duration) : QJsonValue()},
                          {"size_bytes", format.value("size").toString().toLongLong()},
                          {"video", video},
                          {"audio", audio}};
@@ -153,9 +156,12 @@ QList<McpTool> McpTools::analysisTools()
          getJobTool},
         {"analyze_media",
          "Probe a media file with ffprobe: {path, duration_s, size_bytes, video, audio}. video is "
-         "null for audio-only files, else {width, height, fps, codec, rotation (degrees), "
-         "pix_fmt}; audio is null for files without sound, else {channels, sample_rate, codec}. "
-         "Only the first video and first audio stream are reported. path must be an absolute path "
+         "null for audio-only files, else {width, height, fps, codec, rotation, pix_fmt}; "
+         "rotation is in degrees as ffprobe reports it (display rotation, may be negative, e.g. "
+         "-90), and an audio file with embedded cover art reports that picture as its video "
+         "stream; audio is null for files without sound, else {channels, sample_rate, codec}. "
+         "duration_s is null when ffprobe reports none. Only the first video and first audio stream "
+         "are reported. path must be an absolute path "
          "of an existing file. The call waits up to 5 seconds; a slower probe returns {job_id, "
          "state} to poll with get_job. Results are cached per file (path, size and modification "
          "time). An error is returned when ffprobe is missing or the file is not media.",

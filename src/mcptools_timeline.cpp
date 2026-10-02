@@ -527,14 +527,20 @@ QList<McpTool> McpTools::timelineTools()
     return {
         {"get_playlist",
          "List the playlist items in order: index, name, path, in, out (source frames) and "
-         "duration (frames).",
+         "duration (frames). Items also carry the source media's width, height, fps, has_audio and "
+         "rotation when known (omitted otherwise). has_audio reflects the producer's selected "
+         "audio stream, so a user-disabled audio stream may report false; proxy clips may report "
+         "the proxy's dimensions.",
          schema(R"({"type":"object","properties":{}})"),
          getPlaylistTool},
         {"get_timeline",
          "Describe the timeline: fps, playhead position, duration and every track (index 0 is the "
          "TOPMOST video track) with its clips. Items have kind clip, blank or transition and "
-         "start, duration, in, out, name, path, fade_in, fade_out. tracks is empty when no "
-         "timeline exists.",
+         "start, duration, in, out, name, path, fade_in, fade_out; items of kind clip also carry "
+         "the source media's width, height, fps, has_audio and rotation when known (omitted "
+         "otherwise; has_audio reflects the producer's selected audio stream, so a user-disabled "
+         "audio stream may report false; proxy clips may report the proxy's dimensions). tracks "
+         "is empty when no timeline exists.",
          schema(R"({"type":"object","properties":{}})"),
          getTimelineTool},
         {"playlist_add",
