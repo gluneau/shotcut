@@ -844,5 +844,212 @@ expect_eq "insert_range timewarp fixture: one playlist item" 1 "$(tool_json get_
 expect_eq "insert_range: a speed-changed playlist item is refused" true "$(tool_text timeline_insert_range '{"playlist_index":0,"track":0,"position":0}' | grep -q 'speed change' && echo true || echo false)"
 expect_eq "insert_range: the refusal creates no timeline" 0 "$(tool_json get_timeline '{}' | jq '.tracks | length')"
 
+echo "== timeline_remove_ranges"
+expect_eq "tools/list has timeline_remove_ranges" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["timeline_remove_ranges"])')"
+expect_eq "remove_ranges: no timeline is an error" true "$(tool_is_error timeline_remove_ranges '{"tracks":[0],"ranges":[{"start":0,"end":10}]}')"
+tool_json open_project "{\"path\":\"$EMPTY\",\"discard_changes\":true}" >/dev/null
+sleep 1
+tool_json timeline_insert_range "{\"path\":\"$MEDIA/tone_av.mp4\",\"in_s\":0,\"out_s\":10,\"track\":0,\"position\":0}" >/dev/null
+RR0="$(tool_json get_timeline '{}')"
+expect_eq "remove_ranges fixture: one 250-frame clip" "[[0,250,0,249]]" "$(echo "$RR0" | jq -c '.tracks[0]' | clipf)"
+rr() { tool_json timeline_remove_ranges "$1"; }
+rerr() { tool_is_error timeline_remove_ranges "$1"; }
+rrtrack() { jq -c '.tracks[0]' | clipf; }
+tldur() { tool_json get_timeline '{}' | jq '.duration'; }
+
+R="$(rr '{"tracks":[0],"ranges":[{"start":50,"end":100},{"start":175,"end":212}]}')"
+expect_eq "remove_ranges ripple: result clips" "[[0,50,0,49],[50,75,100,174],[125,38,212,249]]" "$(echo "$R" | rrtrack)"
+expect_eq "remove_ranges ripple: removed_frames" '{"0":87}' "$(echo "$R" | jq -c '.removed_frames')"
+expect_eq "remove_ranges ripple: ranges_applied" '[{"end":100,"start":50},{"end":212,"start":175}]' "$(echo "$R" | jq -c '.ranges_applied')"
+expect_eq "remove_ranges ripple: result reports ripple flags" '{"all_tracks":false,"markers":false}' "$(echo "$R" | jq -c '.ripple')"
+expect_eq "remove_ranges ripple: one track in the result" 1 "$(echo "$R" | jq '.tracks | length')"
+RR1="$(tool_json get_timeline '{}')"
+expect_eq "remove_ranges ripple: duration 250-50-37" 163 "$(echo "$RR1" | jq '.duration')"
+expect_eq "remove_ranges ripple: get_timeline agrees" "[[0,50,0,49],[50,75,100,174],[125,38,212,249]]" "$(echo "$RR1" | rrtrack)"
+U="$(tool_json undo '{}')"
+expect_eq "remove_ranges: one undo step with its own text" "Remove 2 range(s)" "$(echo "$U" | jq -r '.text')"
+expect_eq "remove_ranges: ONE undo restores the timeline byte for byte" "$RR0" "$(tool_json get_timeline '{}')"
+tool_json redo '{}' >/dev/null
+expect_eq "remove_ranges: redo re-applies" "$RR1" "$(tool_json get_timeline '{}')"
+tool_json undo '{}' >/dev/null
+
+R="$(rr '{"tracks":[0],"ranges":[{"start":60,"end":80},{"start":50,"end":70},{"start":200,"end":210}]}')"
+expect_eq "remove_ranges unsorted/overlapping: merged" '[{"end":80,"start":50},{"end":210,"start":200}]' "$(echo "$R" | jq -c '.ranges_applied')"
+expect_eq "remove_ranges unsorted/overlapping: clips" "[[0,50,0,49],[50,120,80,199],[170,40,210,249]]" "$(echo "$R" | rrtrack)"
+expect_eq "remove_ranges unsorted/overlapping: duration 210" 210 "$(tldur)"
+tool_json undo '{}' >/dev/null
+R="$(rr '{"tracks":[0],"ranges":[{"start":50,"end":60},{"start":60,"end":70}]}')"
+expect_eq "remove_ranges: touching ranges merge" '[{"end":70,"start":50}]' "$(echo "$R" | jq -c '.ranges_applied')"
+expect_eq "remove_ranges: touching ranges undo text" "Remove 1 range(s)" "$(tool_json undo '{}' | jq -r '.text')"
+R="$(rr '{"tracks":[0],"ranges":[{"start":0,"end":10},{"start":240,"end":250}]}')"
+expect_eq "remove_ranges touching the clip start and end" "[[0,230,10,239]]" "$(echo "$R" | rrtrack)"
+expect_eq "remove_ranges touching start and end: duration 230" 230 "$(tldur)"
+tool_json undo '{}' >/dev/null
+R="$(rr '{"tracks":[0],"ranges":[{"start":240,"end":400}]}')"
+expect_eq "remove_ranges partly beyond the end: clamped" '[{"end":250,"start":240}]' "$(echo "$R" | jq -c '.ranges_applied')"
+expect_eq "remove_ranges partly beyond the end: removed_frames" '{"0":10}' "$(echo "$R" | jq -c '.removed_frames')"
+expect_eq "remove_ranges partly beyond the end: duration 240" 240 "$(tldur)"
+tool_json undo '{}' >/dev/null
+R="$(rr '{"tracks":[0],"ranges":[{"start":100,"end":120},{"start":300,"end":400}]}')"
+expect_eq "remove_ranges: a range past the end is dropped" '[{"end":120,"start":100}]' "$(echo "$R" | jq -c '.ranges_applied')"
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges: the undos restore the fixture" "$RR0" "$(tool_json get_timeline '{}')"
+
+R="$(rr '{"tracks":[0],"ranges":[{"start":50,"end":100}],"ripple":false}')"
+expect_eq "remove_ranges ripple:false: clips keep their positions" "[[0,50,0,49],[100,150,100,249]]" "$(echo "$R" | rrtrack)"
+expect_eq "remove_ranges ripple:false: a 50-frame blank" "blank 50 50" "$(echo "$R" | jq -r '.tracks[0].clips[1] | "\(.kind) \(.start) \(.duration)"')"
+expect_eq "remove_ranges ripple:false: ripple flags off" '{"all_tracks":false,"markers":false}' "$(echo "$R" | jq -c '.ripple')"
+expect_eq "remove_ranges ripple:false: duration kept" 250 "$(tldur)"
+RRL="$(tool_json get_timeline '{}')"
+R="$(rr '{"tracks":[0],"ranges":[{"start":40,"end":120}]}')"
+expect_eq "remove_ranges ripple across a gap: clips" "[[0,40,0,39],[40,130,120,249]]" "$(echo "$R" | rrtrack)"
+expect_eq "remove_ranges ripple across a gap: duration 170" 170 "$(tldur)"
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges ripple across a gap: one undo" "$RRL" "$(tool_json get_timeline '{}')"
+R="$(rr '{"tracks":[0],"ranges":[{"start":60,"end":110}]}')"
+expect_eq "remove_ranges ripple from inside a gap: clips" "[[0,50,0,49],[60,140,110,249]]" "$(echo "$R" | rrtrack)"
+expect_eq "remove_ranges ripple from inside a gap: 10 frames of gap left" "blank 50 10" "$(echo "$R" | jq -r '.tracks[0].clips[1] | "\(.kind) \(.start) \(.duration)"')"
+expect_eq "remove_ranges ripple from inside a gap: duration 200" 200 "$(tldur)"
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges ripple from inside a gap: one undo" "$RRL" "$(tool_json get_timeline '{}')"
+R="$(rr '{"tracks":[0],"ranges":[{"start":55,"end":95}],"ripple":false}')"
+expect_eq "remove_ranges ripple:false inside a gap changes nothing" "$RRL" "$(tool_json get_timeline '{}')"
+expect_eq "remove_ranges ripple:false inside a gap adds no undo step" "$RR0" "$(tool_json undo '{}' >/dev/null; tool_json get_timeline '{}')"
+expect_eq "remove_ranges: back to the fixture" "$RR0" "$(tool_json get_timeline '{}')"
+R="$(rr '{"tracks":[0],"ranges":[{"start":240,"end":250}],"ripple":false}')"
+expect_eq "remove_ranges ripple:false at the end: Shotcut drops the trailing gap" 240 "$(tldur)"
+tool_json undo '{}' >/dev/null
+R="$(rr '{"tracks":[0],"ranges":[{"start":0,"end":250}]}')"
+expect_eq "remove_ranges of everything: no clip left" "[]" "$(echo "$R" | rrtrack)"
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges: back to the fixture again" "$RR0" "$(tool_json get_timeline '{}')"
+
+expect_eq "remove_ranges: a range entirely beyond the end is an error" true "$(rerr '{"tracks":[0],"ranges":[{"start":300,"end":400}]}')"
+expect_eq "remove_ranges: beyond the end message" "No range lies inside the timeline." "$(tool_text timeline_remove_ranges '{"tracks":[0],"ranges":[{"start":250,"end":400}]}')"
+RS='{"tracks":[0],"ranges":[{"start":50,"end":100}]}'
+rwith() { echo "$RS" | jq -c "$1"; }
+expect_eq "remove_ranges: 501 ranges is an error" true "$(rerr "$(jq -nc '{tracks:[0],ranges:[range(501) | {start:(.*2),end:(.*2+1)}]}')")"
+expect_eq "remove_ranges: 500 ranges is accepted" false "$(rerr "$(jq -nc '{tracks:[0],ranges:[range(500) | {start:(.*600),end:(.*600+1)}]}')")"
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges: start == end is an error" true "$(rerr "$(rwith '.ranges[0].end=50')")"
+expect_eq "remove_ranges: start > end is an error" true "$(rerr "$(rwith '.ranges[0].end=40')")"
+expect_eq "remove_ranges: negative start is an error" true "$(rerr "$(rwith '.ranges[0].start=-10')")"
+expect_eq "remove_ranges: fractional end is an error" true "$(rerr "$(rwith '.ranges[0].end=99.5')")"
+expect_eq "remove_ranges: string start is an error" true "$(rerr "$(rwith '.ranges[0].start="50"')")"
+expect_eq "remove_ranges: missing end is an error" true "$(rerr "$(rwith 'del(.ranges[0].end)')")"
+expect_eq "remove_ranges: a range as an array is an error" true "$(rerr "$(rwith '.ranges=[[50,100]]')")"
+expect_eq "remove_ranges: a bad range after a good one is an error" true "$(rerr "$(rwith '.ranges+=[{"start":5,"end":1}]')")"
+expect_eq "remove_ranges: empty ranges is an error" true "$(rerr "$(rwith '.ranges=[]')")"
+expect_eq "remove_ranges: missing ranges is an error" true "$(rerr "$(rwith 'del(.ranges)')")"
+expect_eq "remove_ranges: string ranges is an error" true "$(rerr "$(rwith '.ranges="50-100"')")"
+expect_eq "remove_ranges: duplicate tracks is an error" true "$(rerr "$(rwith '.tracks=[0,0]')")"
+expect_eq "remove_ranges: 9 tracks is an error" true "$(rerr "$(rwith '.tracks=[0,1,2,3,4,5,6,7,8]')")"
+expect_eq "remove_ranges: unknown track is an error" true "$(rerr "$(rwith '.tracks=[5]')")"
+expect_eq "remove_ranges: negative track is an error" true "$(rerr "$(rwith '.tracks=[-1]')")"
+expect_eq "remove_ranges: string track is an error" true "$(rerr "$(rwith '.tracks=["0"]')")"
+expect_eq "remove_ranges: tracks as a number is an error" true "$(rerr "$(rwith '.tracks=0')")"
+expect_eq "remove_ranges: empty tracks is an error" true "$(rerr "$(rwith '.tracks=[]')")"
+expect_eq "remove_ranges: missing tracks is an error" true "$(rerr "$(rwith 'del(.tracks)')")"
+expect_eq "remove_ranges: string ripple is an error" true "$(rerr "$(rwith '.ripple="no"')")"
+expect_eq "remove_ranges: the errors changed nothing" "$RR0" "$(tool_json get_timeline '{}')"
+
+# A transition joins two clips: ripple-remove [50,100) first, then 5 frames between clip 0 and 1.
+rr '{"tracks":[0],"ranges":[{"start":50,"end":100}]}' >/dev/null
+tool_json timeline_add_transition '{"track":0,"clip":1,"duration":5}' >/dev/null
+TR="$(tool_json get_timeline '{}' | jq -c '[.tracks[0].clips[] | select(.kind=="transition")][0]')"
+TS="$(echo "$TR" | jq '.start')"; TE="$(( TS + $(echo "$TR" | jq '.duration') ))"
+expect_eq "remove_ranges transition fixture: 5 frames" 5 "$(echo "$TR" | jq '.duration')"
+RRT="$(tool_json get_timeline '{}')"
+expect_eq "remove_ranges: a range crossing a transition is an error" true "$(rerr "{\"tracks\":[0],\"ranges\":[{\"start\":$((TS + 1)),\"end\":$((TE + 10))}]}")"
+expect_eq "remove_ranges: the transition error names it" true "$(tool_text timeline_remove_ranges "{\"tracks\":[0],\"ranges\":[{\"start\":$((TS - 10)),\"end\":$((TS + 2))}]}" | grep -q 'transition' && echo true || echo false)"
+expect_eq "remove_ranges: a range ending at a transition is an error" true "$(rerr "{\"tracks\":[0],\"ranges\":[{\"start\":10,\"end\":$TS}]}")"
+expect_eq "remove_ranges: a range starting at a transition's end is an error" true "$(rerr "{\"tracks\":[0],\"ranges\":[{\"start\":$TE,\"end\":$((TE + 10))}]}")"
+expect_eq "remove_ranges: a bad range with good ones is an error" true "$(rerr "{\"tracks\":[0],\"ranges\":[{\"start\":0,\"end\":5},{\"start\":$((TS + 1)),\"end\":$((TS + 2))},{\"start\":150,\"end\":160}]}")"
+expect_eq "remove_ranges: the transition refusals changed nothing" "$RRT" "$(tool_json get_timeline '{}')"
+R="$(rr '{"tracks":[0],"ranges":[{"start":140,"end":150}]}')"
+expect_eq "remove_ranges: a range away from the transition works" "$(( $(echo "$RRT" | jq '.duration') - 10 ))" "$(tldur)"
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges: undo next to a transition" "$RRT" "$(tool_json get_timeline '{}')"
+tool_json undo '{}' >/dev/null
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges: transition fixture undone" "$RR0" "$(tool_json get_timeline '{}')"
+
+# Lock track 0 in a saved copy and reopen it (Task 10 adds track_set).
+RR_UNLOCKED="$TMP/rr-unlocked.mlt"
+RR_LOCKED="$TMP/rr-locked.mlt"
+tool_json save_project "{\"path\":\"$RR_UNLOCKED\"}" >/dev/null
+cp "$RR_UNLOCKED" "$RR_LOCKED"
+PL5="$(grep -o '<track producer="[^"]*"' "$RR_LOCKED" | grep -v background | head -1 | sed 's/.*producer="//; s/"//')"
+sed -i "0,/<playlist id=\"$PL5\"[^>]*>/s//&\n  <property name=\"shotcut:lock\">1<\/property>/" "$RR_LOCKED"
+tool_json open_project "{\"path\":\"$RR_LOCKED\",\"discard_changes\":true}" >/dev/null
+sleep 1
+expect_eq "remove_ranges locked: track 0 is locked after reopening" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
+RRK="$(tool_json get_timeline '{}')"
+expect_eq "remove_ranges: locked track is an error" true "$(rerr "$RS")"
+expect_eq "remove_ranges: locked track (ripple:false) is an error" true "$(rerr "$(rwith '.ripple=false')")"
+expect_eq "remove_ranges: locked track unchanged" "$RRK" "$(tool_json get_timeline '{}')"
+
+# Two tracks (V1 and A1, written by hand: no tool adds a track before Task 10).
+two_track() { # FILE AUDIO_OUT
+cat > "$1" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="main_bin">
+  <profile description="320x240 25 fps" width="320" height="240" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="4" display_aspect_den="3" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <playlist id="main_bin"><property name="xml_retain">1</property></playlist>
+  <producer id="black" in="0" out="249"><property name="length">250</property><property name="resource">0</property><property name="mlt_service">color</property><property name="set.test_audio">0</property></producer>
+  <playlist id="background"><entry producer="black" in="0" out="249"/></playlist>
+  <chain id="chain0" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
+  <chain id="chain1" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
+  <playlist id="playlist0"><property name="shotcut:video">1</property><property name="shotcut:name">V1</property><entry producer="chain0" in="0" out="249"/></playlist>
+  <playlist id="playlist1"><property name="shotcut:audio">1</property><property name="shotcut:name">A1</property><entry producer="chain1" in="0" out="$2"/></playlist>
+  <tractor id="tractor0" in="0" out="249">
+    <property name="shotcut">1</property>
+    <track producer="background"/>
+    <track producer="playlist0"/>
+    <track producer="playlist1" hide="video"/>
+    <transition id="transition0"><property name="a_track">0</property><property name="b_track">1</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+    <transition id="transition1"><property name="a_track">0</property><property name="b_track">2</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+  </tractor>
+</mlt>
+XML
+}
+two_track "$TMP/two-equal.mlt" 249
+tool_json open_project "{\"path\":\"$TMP/two-equal.mlt\",\"discard_changes\":true}" >/dev/null
+sleep 1
+TT0="$(tool_json get_timeline '{}')"
+expect_eq "remove_ranges two tracks fixture: V1 and A1 of 250 frames" "video [[0,250,0,249]] audio [[0,250,0,249]]" "$(echo "$TT0" | jq -r '[.tracks[] | "\(.type) \(. | [.clips[] | select(.kind=="clip") | [.start,.duration,.in,.out]] | tojson)"] | join(" ")')"
+R="$(rr '{"tracks":[0,1],"ranges":[{"start":50,"end":100},{"start":175,"end":212}]}')"
+expect_eq "remove_ranges two tracks: video clips" "[[0,50,0,49],[50,75,100,174],[125,38,212,249]]" "$(echo "$R" | jq -c '.tracks[0]' | clipf)"
+expect_eq "remove_ranges two tracks: audio clips aligned" "[[0,50,0,49],[50,75,100,174],[125,38,212,249]]" "$(echo "$R" | jq -c '.tracks[1]' | clipf)"
+expect_eq "remove_ranges two tracks: result track indexes" "[0,1]" "$(echo "$R" | jq -c '[.tracks[].index]')"
+expect_eq "remove_ranges two tracks: removed_frames" '{"0":87,"1":87}' "$(echo "$R" | jq -c '.removed_frames')"
+expect_eq "remove_ranges two tracks: duration 163" 163 "$(tldur)"
+expect_eq "remove_ranges two tracks: one undo step" "Remove 2 range(s)" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "remove_ranges two tracks: one undo restores both" "$TT0" "$(tool_json get_timeline '{}')"
+R="$(rr '{"tracks":[1,0],"ranges":[{"start":0,"end":25}]}')"
+expect_eq "remove_ranges two tracks: result follows the listed order" "[1,0]" "$(echo "$R" | jq -c '[.tracks[].index]')"
+tool_json undo '{}' >/dev/null
+R="$(rr '{"tracks":[0],"ranges":[{"start":0,"end":10}]}')"
+expect_eq "remove_ranges: an unlisted track is untouched (no ripple of other tracks)" "$(echo "$TT0" | jq -c '.tracks[1]')" "$(tool_json get_timeline '{}' | jq -c '.tracks[1]')"
+expect_eq "remove_ranges: the listed track rippled" "[[0,240,10,249]]" "$(echo "$R" | jq -c '.tracks[0]' | clipf)"
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges: unlisted-track case undone" "$TT0" "$(tool_json get_timeline '{}')"
+
+two_track "$TMP/two-diff.mlt" 199
+tool_json open_project "{\"path\":\"$TMP/two-diff.mlt\",\"discard_changes\":true}" >/dev/null
+sleep 1
+TD0="$(tool_json get_timeline '{}')"
+R="$(rr '{"tracks":[0,1],"ranges":[{"start":150,"end":230}]}')"
+expect_eq "remove_ranges tracks of different lengths: removed_frames per track" '{"0":80,"1":50}' "$(echo "$R" | jq -c '.removed_frames')"
+expect_eq "remove_ranges tracks of different lengths: video" "[[0,150,0,149],[150,20,230,249]]" "$(echo "$R" | jq -c '.tracks[0]' | clipf)"
+expect_eq "remove_ranges tracks of different lengths: audio" "[[0,150,0,149]]" "$(echo "$R" | jq -c '.tracks[1]' | clipf)"
+tool_json undo '{}' >/dev/null
+R="$(rr '{"tracks":[0,1],"ranges":[{"start":210,"end":300}]}')"
+expect_eq "remove_ranges: a range past the shorter track only cuts the longer one" '{"0":40,"1":0}' "$(echo "$R" | jq -c '.removed_frames')"
+expect_eq "remove_ranges: the shorter track is unchanged" "$(echo "$TD0" | jq -c '.tracks[1]')" "$(echo "$R" | jq -c '.tracks[1]')"
+tool_json undo '{}' >/dev/null
+expect_eq "remove_ranges: different-length case undone" "$TD0" "$(tool_json get_timeline '{}')"
+expect_eq "remove_ranges: the user's ripple-all-tracks setting is unchanged" false "$(tool_json get_timeline '{}' | jq -r '.settings.ripple_all_tracks')"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

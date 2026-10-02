@@ -16,6 +16,7 @@
 #include "mcptools.h"
 #include "mcptoolsutil.h"
 
+#include "commands/timelinecommands.h"
 #include "docks/timelinedock.h"
 #include "mainwindow.h"
 #include "mltcontroller.h"
@@ -25,9 +26,12 @@
 #include <MltPlaylist.h>
 
 #include <QScopedPointer>
+#include <QUndoStack>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
+#include <vector>
 
 using namespace McpTools;
 
@@ -163,6 +167,277 @@ QJsonObject timelineInsertRangeTool(const QJsonObject &arguments)
         QJsonObject{{"track", trackJson(model, track)}, {"inserted", inserted}, {"ripple", ripple}});
 }
 
+// Puts Shotcut's ripple settings back on every exit path. The remove commands read them in their
+// constructors, so commands pushed while they were changed keep their own values on undo/redo.
+class RippleSettingsGuard
+{
+public:
+    RippleSettingsGuard()
+        : m_allTracks(Settings.timelineRippleAllTracks())
+        , m_markers(Settings.timelineRippleMarkers())
+    {}
+    ~RippleSettingsGuard()
+    {
+        if (Settings.timelineRippleAllTracks() != m_allTracks)
+            Settings.setTimelineRippleAllTracks(m_allTracks);
+        if (Settings.timelineRippleMarkers() != m_markers)
+            Settings.setTimelineRippleMarkers(m_markers);
+    }
+    bool markers() const { return m_markers; }
+
+private:
+    const bool m_allTracks;
+    const bool m_markers;
+};
+
+int trackPlaytime(MultitrackModel &model, int track)
+{
+    QScopedPointer<Mlt::Producer> producer(
+        model.tractor()->track(model.trackList().at(track).mlt_index));
+    return producer ? producer->get_playtime() : 0;
+}
+
+// End of the last item that is not a blank; 0 for an empty track (it holds a blank placeholder).
+int contentEnd(MultitrackModel &model, int track)
+{
+    for (int c = model.rowCount(model.index(track)) - 1; c >= 0; --c) {
+        if (kindOf(model, track, c) == "blank")
+            continue;
+        std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, c);
+        return info ? info->start + info->frame_count : 0;
+    }
+    return 0;
+}
+
+int itemFrames(MultitrackModel &model, int track)
+{
+    int frames = 0;
+    for (int c = 0; c < model.rowCount(model.index(track)); ++c) {
+        std::unique_ptr<Mlt::ClipInfo> info = kindOf(model, track, c) == "blank"
+                                                  ? nullptr
+                                                  : model.getClipInfo(track, c);
+        frames += info ? info->frame_count : 0;
+    }
+    return frames;
+}
+
+// Splits the item under position (strictly inside it) so that position starts an item.
+bool splitAt(TimelineDock *dock, MultitrackModel &model, int track, int position)
+{
+    const int clip = dock->clipIndexAtPosition(track, position);
+    std::unique_ptr<Mlt::ClipInfo> info = clip >= 0 ? model.getClipInfo(track, clip) : nullptr;
+    if (!info)
+        return false;
+    if (kindOf(model, track, clip) == "blank") {
+        // TimelineDock::split refuses blanks; the model splits them like clips.
+        MAIN.undoStack()->push(new Timeline::SplitCommand(model,
+                                                          std::vector<int>{track},
+                                                          std::vector<int>{clip},
+                                                          position));
+    } else if (!dock->split(track, clip, position)) {
+        return false;
+    }
+    const int after = dock->clipIndexAtPosition(track, position);
+    info = after >= 0 ? model.getClipInfo(track, after) : nullptr;
+    return info && info->start == position;
+}
+
+// Removes (ripple) or lifts [start, end) on one track from its end backward, so the absolute
+// frames before the piece being removed never move. With ripple, gaps inside the range are
+// removed too, so every listed track loses exactly its part of the range.
+bool cutRange(
+    TimelineDock *dock, MultitrackModel &model, int track, int start, int end, bool ripple)
+{
+    int position = end;
+    while (true) {
+        const int hi = qMin(position, contentEnd(model, track));
+        if (hi <= start)
+            return true;
+        int clip = dock->clipIndexAtPosition(track, hi - 1);
+        std::unique_ptr<Mlt::ClipInfo> info = clip >= 0 ? model.getClipInfo(track, clip)
+                                                        : nullptr;
+        if (!info)
+            return false;
+        const bool blank = kindOf(model, track, clip) == "blank";
+        if (blank && !ripple) {
+            position = info->start;
+            continue;
+        }
+        if ((info->start + info->frame_count > hi && !splitAt(dock, model, track, hi))
+            || (info->start < start && !splitAt(dock, model, track, start)))
+            return false;
+        clip = dock->clipIndexAtPosition(track, hi - 1);
+        info = clip >= 0 ? model.getClipInfo(track, clip) : nullptr;
+        if (!info || info->start + info->frame_count != hi || info->start < start)
+            return false;
+        const int length = info->frame_count;
+        position = info->start;
+        if (blank) {
+            const int before = trackPlaytime(model, track);
+            dock->remove(track, clip, false);
+            if (trackPlaytime(model, track) != before - length)
+                return false;
+        } else {
+            const int before = itemFrames(model, track);
+            if (ripple)
+                dock->remove(track, clip, false);
+            else
+                dock->lift(track, clip, false);
+            if (itemFrames(model, track) != before - length)
+                return false;
+        }
+    }
+}
+
+QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
+{
+    const QJsonValue tracksValue = arguments.value("tracks");
+    const QJsonArray tracksArray = tracksValue.toArray();
+    if (!tracksValue.isArray() || tracksArray.isEmpty() || tracksArray.size() > 8)
+        return textResult("tracks must be an array of 1 to 8 track indexes.", true);
+    QList<int> tracks;
+    for (const QJsonValue &v : tracksArray) {
+        int track = 0;
+        if (readFrame(QJsonObject{{"t", v}}, "t", track) != FrameArg::Ok)
+            return textResult("tracks must hold non-negative integers.", true);
+        if (tracks.contains(track))
+            return textResult(QStringLiteral("Track %1 is listed twice.").arg(track), true);
+        tracks.append(track);
+    }
+    const QJsonValue rangesValue = arguments.value("ranges");
+    const QJsonArray rangesArray = rangesValue.toArray();
+    if (!rangesValue.isArray() || rangesArray.isEmpty() || rangesArray.size() > 500)
+        return textResult("ranges must be an array of 1 to 500 {start, end} objects.", true);
+    std::vector<std::pair<int, int>> ranges;
+    for (const QJsonValue &v : rangesArray) {
+        int start = 0, end = 0;
+        if (!v.isObject() || readFrame(v.toObject(), "start", start) != FrameArg::Ok
+            || readFrame(v.toObject(), "end", end) != FrameArg::Ok || start >= end)
+            return textResult("Each range must be {start, end} with integer frames, 0 <= start "
+                              "< end (end exclusive).",
+                              true);
+        ranges.emplace_back(start, end);
+    }
+    const QJsonValue rippleValue = arguments.value("ripple");
+    if (!rippleValue.isUndefined() && !rippleValue.isBool())
+        return textResult("ripple must be a boolean.", true);
+    const bool ripple = rippleValue.toBool(true);
+    if (!MAIN.isMultitrackValid())
+        return textResult("There is no timeline.", true);
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
+    QString error;
+    QList<int> extents;
+    int longest = 0;
+    for (int track : tracks) {
+        if (!validTrack(model, track, error))
+            return textResult(error, true);
+        extents.append(contentEnd(model, track));
+        longest = qMax(longest, extents.last());
+    }
+
+    std::sort(ranges.begin(), ranges.end());
+    std::vector<std::pair<int, int>> merged;
+    for (const auto &range : ranges) {
+        if (!merged.empty() && range.first <= merged.back().second)
+            merged.back().second = qMax(merged.back().second, range.second);
+        else
+            merged.push_back(range);
+    }
+    std::vector<std::pair<int, int>> applied;
+    for (const auto &range : merged) {
+        if (range.first < longest)
+            applied.emplace_back(range.first, qMin(range.second, longest));
+    }
+    if (applied.empty())
+        return textResult("No range lies inside the timeline.", true);
+
+    QJsonObject removedFrames;
+    for (int i = 0; i < tracks.size(); ++i) {
+        const int track = tracks.at(i);
+        int removed = 0;
+        for (const auto &range : applied) {
+            const int end = qMin(range.second, extents.at(i));
+            removed += qMax(0, end - range.first);
+            if (range.first >= end)
+                continue;
+            // Removing or lifting a clip a transition joins breaks the transition.
+            for (int c = 0; c < model.rowCount(model.index(track)); ++c) {
+                if (kindOf(model, track, c) != "transition")
+                    continue;
+                std::unique_ptr<Mlt::ClipInfo> t = model.getClipInfo(track, c);
+                if (!t || range.first > t->start + t->frame_count || end < t->start)
+                    continue;
+                return textResult(QStringLiteral("The range %1-%2 touches the transition on track "
+                                                 "%3 (item %4, frames %5-%6); keep ranges at "
+                                                 "least one frame away from transitions.")
+                                      .arg(range.first)
+                                      .arg(range.second)
+                                      .arg(track)
+                                      .arg(c)
+                                      .arg(t->start)
+                                      .arg(t->start + t->frame_count - 1),
+                                  true);
+            }
+        }
+        removedFrames[QString::number(track)] = removed;
+    }
+
+    RippleSettingsGuard guard;
+    MLT.pause();
+    QUndoStack *stack = MAIN.undoStack();
+    stack->beginMacro(QObject::tr("Remove %n range(s)", nullptr, int(applied.size())));
+    // Each listed track is cut by itself, so other tracks must not ripple.
+    if (Settings.timelineRippleAllTracks())
+        Settings.setTimelineRippleAllTracks(false);
+    bool ok = true;
+    for (auto range = applied.rbegin(); ok && range != applied.rend(); ++range) {
+        // Markers ripple once per range: with the track that loses the most of it.
+        int markerTrack = -1, most = -1;
+        for (int i = 0; i < tracks.size(); ++i) {
+            const int frames = qMin(range->second, extents.at(i)) - range->first;
+            if (frames > most) {
+                most = frames;
+                markerTrack = tracks.at(i);
+            }
+        }
+        for (int track : tracks) {
+            if (ripple && guard.markers()
+                && Settings.timelineRippleMarkers() != (track == markerTrack))
+                Settings.setTimelineRippleMarkers(track == markerTrack);
+            if (!cutRange(dock, model, track, range->first, range->second, ripple)) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    stack->endMacro();
+    auto *macro = const_cast<QUndoCommand *>(stack->command(stack->index() - 1));
+    if (!ok || macro->childCount() == 0) {
+        // Roll the whole macro back and drop it from the stack (nothing to undo when it is
+        // empty). QUndoStack::undo() skips the undo() of an obsolete command, so the order
+        // matters.
+        macro->undo();
+        macro->setObsolete(true);
+        stack->undo();
+        if (!ok)
+            return textResult("Shotcut did not remove a range; nothing was changed.", true);
+    }
+
+    QJsonArray tracksJson;
+    for (int track : tracks)
+        tracksJson.append(trackJson(model, track));
+    QJsonArray rangesJson;
+    for (const auto &range : applied)
+        rangesJson.append(QJsonObject{{"start", range.first}, {"end", range.second}});
+    return jsonResult(QJsonObject{{"tracks", tracksJson},
+                                  {"removed_frames", removedFrames},
+                                  {"ranges_applied", rangesJson},
+                                  {"ripple",
+                                   QJsonObject{{"all_tracks", false},
+                                               {"markers", ripple && guard.markers()}}}});
+}
+
 } // namespace
 
 QList<McpTool> McpTools::structureTools()
@@ -200,5 +475,30 @@ QList<McpTool> McpTools::structureTools()
              "mode":{"type":"string","enum":["insert","overwrite"]}
            },"required":["track","position"]})"),
          timelineInsertRangeTool},
+        {"timeline_remove_ranges",
+         "Cut the same frame ranges out of every listed track as ONE undo step (to cut audio and "
+         "video together, list both tracks; unlisted tracks are never touched, whatever Shotcut's "
+         "ripple-all-tracks setting is). ranges are absolute timeline frames {start, end} with "
+         "end exclusive (0 <= start < end, up to 500); they are sorted, overlapping or touching "
+         "ones are merged, end is clamped to the end of the longest listed track and ranges past "
+         "it are dropped (error when none is left). All ranges are checked before anything "
+         "changes: a range that overlaps or touches a transition is refused, naming it. ripple "
+         "true (default) closes each range on each listed track, gaps inside it included, so "
+         "listed tracks stay aligned; whether markers move follows Shotcut's ripple-markers "
+         "setting (markers inside a range are deleted, later ones shift once). ripple false lifts "
+         "the clips and leaves gaps of the same length (Shotcut drops a gap at the end of a "
+         "track). Item indexes change; use the returned tracks. Locked tracks are refused. "
+         "Returns {tracks:[...] in the listed order, removed_frames:{\"<track>\": frames of the "
+         "applied ranges inside that track}, ranges_applied:[{start, end}], ripple:{all_tracks, "
+         "markers}}.",
+         schema(R"({"type":"object","properties":{
+             "tracks":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"integer","minimum":0},"description":"Distinct track indexes (0 is the topmost video track)."},
+             "ranges":{"type":"array","minItems":1,"maxItems":500,"items":{"type":"object","properties":{
+               "start":{"type":"integer","minimum":0},
+               "end":{"type":"integer","minimum":1,"description":"Exclusive."}
+             },"required":["start","end"]}},
+             "ripple":{"type":"boolean","description":"Default true."}
+           },"required":["tracks","ranges"]})"),
+         timelineRemoveRangesTool},
     };
 }
