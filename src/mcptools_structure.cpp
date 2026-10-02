@@ -472,18 +472,27 @@ bool finishMacro(QUndoStack *stack, bool ok)
     return ok;
 }
 
-// An optional track name: 1 to 64 characters, not only spaces. A null name when absent.
-bool readTrackName(const QJsonObject &arguments, QString &name, QString &error)
+// A string of 1 to max characters (Unicode code points, so an emoji counts once) that is not only
+// white space.
+bool readText(const QJsonValue &v, const char *key, int max, QString &text, QString &error)
 {
-    const QJsonValue v = arguments.value("name");
-    if (v.isUndefined())
-        return true;
-    name = v.toString();
-    if (!v.isString() || name.trimmed().isEmpty() || name.size() > 64) {
-        error = QStringLiteral("name must be a string of 1 to 64 characters.");
+    text = v.toString();
+    if (!v.isString() || text.isEmpty() || text.toUcs4().size() > max) {
+        error = QStringLiteral("%1 must be a string of 1 to %2 characters.").arg(key).arg(max);
+        return false;
+    }
+    if (text.trimmed().isEmpty()) {
+        error = QStringLiteral("%1 must not be blank.").arg(key);
         return false;
     }
     return true;
+}
+
+// An optional track name. A null name when absent.
+bool readTrackName(const QJsonObject &arguments, QString &name, QString &error)
+{
+    const QJsonValue v = arguments.value("name");
+    return v.isUndefined() || readText(v, "name", 64, name, error);
 }
 
 QJsonObject trackAddTool(const QJsonObject &arguments)
@@ -496,10 +505,15 @@ QJsonObject trackAddTool(const QJsonObject &arguments)
         return textResult(error, true);
     if (!MAIN.isMultitrackValid())
         return textResult("There is no timeline; add a clip first.", true);
-    MultitrackModel &model = *MAIN.timelineDock()->model();
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
     const bool video = type == "video";
     const int before = model.trackList().size();
     MLT.pause();
+    // As TimelineDock::addVideoTrack and addAudioTrack do: a selected track head would point at
+    // another track once the rows shift.
+    if (dock->selectedTrack() != -1)
+        dock->setSelection();
     QUndoStack *stack = MAIN.undoStack();
     stack->beginMacro(video ? QObject::tr("Add video track") : QObject::tr("Add audio track"));
     stack->push(new Timeline::AddTrackCommand(model, video));
@@ -726,10 +740,9 @@ QJsonObject markerAddTool(const QJsonObject &arguments)
     const FrameArg endArg = readFrame(arguments, "end", marker.end);
     if (endArg == FrameArg::Invalid || marker.end < marker.start)
         return textResult("end must be an integer frame at least start.", true);
-    const QJsonValue textValue = arguments.value("text");
-    marker.text = textValue.toString();
-    if (!textValue.isString() || marker.text.trimmed().isEmpty() || marker.text.size() > 200)
-        return textResult("text must be a string of 1 to 200 characters.", true);
+    QString error;
+    if (!readText(arguments.value("text"), "text", 200, marker.text, error))
+        return textResult(error, true);
     const QJsonValue colorValue = arguments.value("color");
     if (colorValue.isUndefined()) {
         marker.color = Settings.markerColor();
@@ -741,6 +754,12 @@ QJsonObject markerAddTool(const QJsonObject &arguments)
     }
     if (!MAIN.isMultitrackValid())
         return textResult("There is no timeline; add a clip first.", true);
+    const int maxFrame = MAIN.multitrack()->get_playtime() + qRound(3600 * MLT.profile().fps());
+    if (marker.end > maxFrame)
+        return textResult(QStringLiteral("start and end must be at most %1 (one hour after the end "
+                                         "of the timeline).")
+                              .arg(maxFrame),
+                          true);
     MarkersModel &markers = *MAIN.timelineDock()->markersModel();
     const int before = markers.getMarkers().size();
     MLT.pause();
@@ -804,7 +823,10 @@ QList<McpTool> McpTools::structureTools()
          "appended at the end of the track (a position on the last frame lands one frame later; "
          "beyond the end a gap is left before it). position may be at most one hour after the end "
          "of the track; a position inside a transition, or an overwrite covering part of one, is "
-         "refused. Item indexes after the new clip shift; the returned track shows them. Track 0 "
+         "refused. Inserting exactly at a transition's start puts the new clip before the "
+         "transition, which then plays after the new clip instead of at the end of the previous "
+         "clip; inserting exactly at its end puts the new clip between the transition and the "
+         "next clip. Item indexes after the new clip shift; the returned track shows them. Track 0 "
          "is the TOPMOST video track; any media may go on video or audio tracks, as in Shotcut. "
          "With no timeline, track must be 0 and a video track is created. With nothing loaded "
          "the file is first opened as playlist_add does (the project then follows its format, "
@@ -855,7 +877,9 @@ QList<McpTool> McpTools::structureTools()
          "it V<n> or A<n>). A new video track goes on TOP, at index 0, so every existing track "
          "index shifts up by one (re-read indexes from the result); a new audio track goes at the "
          "bottom (the last index). Needs a timeline (create one with timeline_insert_range or "
-         "timeline_add_playlist). Returns {tracks:[...all tracks], added:{index, type, name}}.",
+         "timeline_add_playlist). name is 1 to 64 characters, not blank. A track head selected "
+         "in the timeline is deselected, as in Shotcut. Returns {tracks:[...all tracks], "
+         "added:{index, type, name}}.",
          schema(R"({"type":"object","properties":{
              "type":{"type":"string","enum":["video","audio"]},
              "name":{"type":"string","minLength":1,"maxLength":64}
@@ -863,7 +887,9 @@ QList<McpTool> McpTools::structureTools()
          trackAddTool},
         {"track_remove",
          "Remove a track as ONE undo step (undo restores its clips, filters, name, mute, hide, "
-         "gain and compositing). A track that holds clips or transitions is refused unless force "
+         "gain and compositing on/off (not a custom blend mode); a gain with keyframes comes back "
+         "as an ordinary Gain/Volume filter with the same keyframes, so it sounds the same but "
+         "gain_db then reports 0). A track that holds clips or transitions is refused unless force "
          "is true. Locked tracks are refused, and so is the bottom video track (the last video "
          "track listed): a timeline needs one, and Shotcut cannot undo removing it correctly "
          "while other video tracks exist; remove its clips instead. Audio tracks may all be "
@@ -896,9 +922,11 @@ QList<McpTool> McpTools::structureTools()
          trackSetTool},
         {"marker_add",
          "Add a timeline marker as ONE undo step: a point (end omitted or equal to start) or a "
-         "range (end > start, inclusive frames as in Shotcut). Markers are listed in the order "
-         "they were added, not by time; the new one is last. Needs a timeline. Returns {index, "
-         "marker:{index, start, end, text, color}, markers_count}.",
+         "range (end > start, inclusive frames as in Shotcut); start and end may be at most one "
+         "hour of frames after the end of the timeline. text is 1 to 200 characters, not blank. "
+         "Markers are listed in the order they were added, not by time; the new one is last. "
+         "Needs a timeline. Returns {index, marker:{index, start, end, text, color}, "
+         "markers_count}.",
          schema(R"({"type":"object","properties":{
              "start":{"type":"integer","minimum":0,"description":"Timeline frame."},
              "end":{"type":"integer","minimum":0,"description":"Timeline frame, at least start. Default start."},

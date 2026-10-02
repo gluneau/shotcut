@@ -875,6 +875,21 @@ expect_eq "insert_range: insert inside a transition message" true "$(tool_text t
 expect_eq "insert_range: overwrite inside a transition is an error" true "$(ierr "$(with ".position=$((TS + 1)) | .mode=\"overwrite\"")")"
 expect_eq "insert_range: overwrite covering the start of a transition is an error" true "$(ierr "$(with ".position=$((TS - 2)) | .in_s=0 | .out_s=0.16 | .mode=\"overwrite\"")")"
 expect_eq "insert_range: the transition refusals changed nothing" "$TTL" "$(tool_json get_timeline '{}')"
+# items as [kind, start, duration, in, out] of track 0
+items() { jq -c '[.clips[] | [.kind, .start, .duration, .in, .out]]'; }
+expect_eq "insert_range transition fixture: layout" '[["clip",0,5,75,79],["transition",5,5,0,4],["clip",10,10,5,14],["clip",20,50,0,49],["clip",70,10,15,24],["clip",80,40,110,149]]' "$(echo "$TTL" | jq -c '.tracks[0]' | items)"
+R="$(ins "$(with ".position=$TS")")"
+expect_eq "insert at a transition's start: the new clip goes before the transition" '[["clip",0,5,75,79],["clip",5,25,0,24],["transition",30,5,0,4],["clip",35,10,5,14],["clip",45,50,0,49],["clip",95,10,15,24],["clip",105,40,110,149]]' "$(echo "$R" | jq -c '.track' | items)"
+tool_json undo '{}' >/dev/null
+expect_eq "insert at a transition's start: undo restores byte for byte" "$TTL" "$(tool_json get_timeline '{}')"
+R="$(ins "$(with ".position=$((TS + TD))")")"
+expect_eq "insert at a transition's end: the new clip goes between the transition and the next clip" '[["clip",0,5,75,79],["transition",5,5,0,4],["clip",10,25,0,24],["clip",35,10,5,14],["clip",45,50,0,49],["clip",95,10,15,24],["clip",105,40,110,149]]' "$(echo "$R" | jq -c '.track' | items)"
+tool_json undo '{}' >/dev/null
+expect_eq "insert at a transition's end: undo restores byte for byte" "$TTL" "$(tool_json get_timeline '{}')"
+R="$(ins "$(with ".position=$((TS - 2)) | .in_s=0 | .out_s=0.36 | .mode=\"overwrite\"")")"
+expect_eq "overwrite covering a whole transition replaces it" '[["clip",0,3,75,77],["clip",3,9,0,8],["clip",12,8,7,14],["clip",20,50,0,49],["clip",70,10,15,24],["clip",80,40,110,149]]' "$(echo "$R" | jq -c '.track' | items)"
+tool_json undo '{}' >/dev/null
+expect_eq "overwrite covering a whole transition: undo restores byte for byte" "$TTL" "$(tool_json get_timeline '{}')"
 tool_json undo '{}' >/dev/null
 expect_eq "insert_range: transition fixture undone" "$UTL" "$(tool_json get_timeline '{}')"
 
@@ -1202,7 +1217,14 @@ expect_eq "track_add: missing type is an error" true "$(tool_is_error track_add 
 expect_eq "track_add: empty name is an error" true "$(tool_is_error track_add '{"type":"audio","name":""}')"
 expect_eq "track_add: 65-char name is an error" true "$(tool_is_error track_add "$(jq -nc '{type:"audio",name:("n" * 65)}')")"
 expect_eq "track_add: non-string name is an error" true "$(tool_is_error track_add '{"type":"audio","name":5}')"
+expect_eq "track_add: a blank name is an error" true "$(tool_is_error track_add '{"type":"audio","name":"   "}')"
+expect_eq "track_add: the blank name message" "name must not be blank." "$(tool_text track_add '{"type":"audio","name":" \t "}')"
+expect_eq "track_add: 65 emoji (65 characters) is an error" true "$(tool_is_error track_add "$(jq -nc '{type:"audio",name:("😀" * 65)}')")"
 expect_eq "track_add: errors changed nothing" "$TK2" "$(tl)"
+R="$(tool_json track_add "$(jq -nc '{type:"audio",name:("😀" * 64)}')")"
+expect_eq "track_add: 64 emoji (128 UTF-16 units) is accepted" 64 "$(echo "$R" | jq '.added.name | length')"
+tool_json undo '{}' >/dev/null
+expect_eq "track_add emoji name: undone" "$TK2" "$(tl)"
 
 ts() { tool_json track_set "$1"; }
 tserr() { tool_is_error track_set "$1"; }
@@ -1285,6 +1307,7 @@ expect_eq "track_set: missing track is an error" true "$(tserr '{"mute":true}')"
 expect_eq "track_set: string mute is an error" true "$(tserr '{"track":2,"mute":"yes"}')"
 expect_eq "track_set: empty name is an error" true "$(tserr '{"track":2,"name":""}')"
 expect_eq "track_set: 65-char name is an error" true "$(tserr "$(jq -nc '{track:2,name:("n" * 65)}')")"
+expect_eq "track_set: a blank name is an error" "name must not be blank." "$(tool_text track_set '{"track":2,"name":"  "}')"
 expect_eq "track_set: an invalid property among valid ones changes nothing" true "$(tserr '{"track":2,"name":"Bad","gain_db":100}')"
 expect_eq "track_set: errors changed nothing" "$TS0" "$(tl)"
 
@@ -1349,6 +1372,19 @@ tool_json track_remove '{"track":0,"force":true}' >/dev/null
 expect_eq "track_remove: removing the last video track is an error" true "$(tool_is_error track_remove '{"track":0,"force":true}')"
 tool_json undo '{}' >/dev/null
 expect_eq "track_remove of the top track undone" "$TS0" "$(tl)"
+# Three video tracks: removing the middle one (it holds the clip) and undoing restores everything.
+tool_json track_add '{"type":"video","name":"Third"}' >/dev/null
+TV3="$(tl)"
+expect_eq "three video tracks fixture" '[["Third","video"],["V2","video"],["V1","video"],["Music","audio"]]' "$(echo "$TV3" | jq -c '[.tracks[] | [.name, .type]]')"
+R="$(tool_json track_remove '{"track":1,"force":true}')"
+expect_eq "three video tracks: the middle one is removed" '[["Third","video"],["V1","video"],["Music","audio"]]' "$(echo "$R" | jq -c '[.tracks[] | [.name, .type]]')"
+tool_json undo '{}' >/dev/null
+expect_eq "three video tracks: one undo restores get_timeline byte for byte" "$TV3" "$(tl)"
+tool_json redo '{}' >/dev/null
+tool_json undo '{}' >/dev/null
+expect_eq "three video tracks: redo then undo restores again" "$TV3" "$(tl)"
+tool_json undo '{}' >/dev/null
+expect_eq "three video tracks: track_add undone" "$TS0" "$(tl)"
 
 echo "== markers"
 ML() { tool_json marker_list '{}'; }
@@ -1393,7 +1429,69 @@ expect_eq "marker_add: string start is an error" true "$(merr '{"start":"1","tex
 expect_eq "marker_remove: unknown index is an error" true "$(tool_is_error marker_remove '{"index":3}')"
 expect_eq "marker_remove: negative index is an error" true "$(tool_is_error marker_remove '{"index":-1}')"
 expect_eq "marker_remove: missing index is an error" true "$(tool_is_error marker_remove '{}')"
+expect_eq "marker_add: blank text message" "text must not be blank." "$(tool_text marker_add '{"start":0,"text":"  "}')"
+expect_eq "marker_add: 201 emoji is an error" true "$(merr "$(jq -nc '{start:0,text:("😀" * 201)}')")"
+# The timeline is 250 frames at 25 fps: start and end may be at most 250 + 3600 * 25 = 90250.
+expect_eq "marker_add: start past the timeline end plus an hour is an error" true "$(merr '{"start":90251,"text":"x"}')"
+expect_eq "marker_add: end past the timeline end plus an hour is an error" true "$(merr '{"start":0,"end":90251,"text":"x"}')"
+expect_eq "marker_add: the bound message" true "$(tool_text marker_add '{"start":90251,"text":"x"}' | grep -q 'at most 90250' && echo true || echo false)"
 expect_eq "markers: errors changed nothing" "$M3" "$(ML)"
+R="$(tool_json marker_add "$(jq -nc '{start:90250,text:("😀" * 200)}')")"
+expect_eq "marker_add: at the bound, with 200 emoji, is accepted" "90250 200" "$(echo "$R" | jq -r '"\(.marker.start) \(.marker.text | length)"')"
+tool_json undo '{}' >/dev/null
+expect_eq "marker_add at the bound: undone" "$M3" "$(ML)"
+
+echo "== track_remove of a track with keyframed gain"
+# A1 has a track volume filter with two keyframes (-10 dB at 0 s, 0 dB at 4 s), written by hand.
+KG="$TMP/keyframed-gain.mlt"
+cat > "$KG" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="main_bin">
+  <profile description="320x240 25 fps" width="320" height="240" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="4" display_aspect_den="3" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <playlist id="main_bin"><property name="xml_retain">1</property></playlist>
+  <producer id="black" in="0" out="249"><property name="length">250</property><property name="resource">0</property><property name="mlt_service">color</property><property name="set.test_audio">0</property></producer>
+  <playlist id="background"><entry producer="black" in="0" out="249"/></playlist>
+  <chain id="chain0" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
+  <chain id="chain1" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
+  <playlist id="playlist0"><property name="shotcut:video">1</property><property name="shotcut:name">V1</property><entry producer="chain0" in="0" out="249"/></playlist>
+  <playlist id="playlist1"><property name="shotcut:audio">1</property><property name="shotcut:name">A1</property><entry producer="chain1" in="0" out="249"/>
+    <filter id="filter0" in="0" out="249"><property name="window">75</property><property name="max_gain">20dB</property><property name="level">00:00:00.000=-10;00:00:04.000=0</property><property name="mlt_service">volume</property><property name="shotcut:filter">audioGain</property><property name="shotcut:trackVolume">Volume</property></filter>
+  </playlist>
+  <tractor id="tractor0" in="0" out="249">
+    <property name="shotcut">1</property>
+    <track producer="background"/>
+    <track producer="playlist0"/>
+    <track producer="playlist1" hide="video"/>
+    <transition id="transition0"><property name="a_track">0</property><property name="b_track">1</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+    <transition id="transition1"><property name="a_track">0</property><property name="b_track">2</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+  </tractor>
+</mlt>
+XML
+tool_json open_project "{\"path\":\"$KG\",\"discard_changes\":true}" >/dev/null
+sleep 1
+# saved_gain [MARKER]: the level of every volume filter of a saved copy, one per line, with
+# MARKER (default: any) in its properties: "shotcut:trackVolume<" marks the track gain filter.
+saved_gain() {
+  tool_json save_project "{\"path\":\"$TMP/kg-saved.mlt\"}" >/dev/null
+  tr -d '\n' < "$TMP/kg-saved.mlt" | sed 's/> *</></g' | grep -o '<filter[^>]*>\(<property[^>]*>[^<]*</property>\)*' | grep '>volume<' | grep "${1:-.}" | grep -o 'name="level">[^<]*' | sed 's/name="level">//'
+}
+TG='name="shotcut:trackVolume">' 
+KT0="$(tl)"
+KL0="$(saved_gain "$TG")"
+expect_eq "keyframed gain fixture: two keyframes in the track gain filter" "00:00:00.000=-10;00:00:04.000=0" "$KL0"
+expect_eq "keyframed gain fixture: gain_db is the level at frame 0" -10 "$(echo "$KT0" | jq '.tracks[1].gain_db')"
+expect_eq "keyframed gain: track_set gain_db is refused" true "$(tserr '{"track":1,"gain_db":-3}')"
+tool_json track_remove '{"track":1,"force":true}' >/dev/null
+expect_eq "keyframed gain: the audio track is removed" '["video"]' "$(tl | jq -c '[.tracks[].type]')"
+tool_json undo '{}' >/dev/null
+# Known limitation (Shotcut's RemoveTrackCommand copies filters without the track-gain marker):
+# the keyframes come back in an ordinary Gain/Volume filter, so the track sounds the same but
+# no longer reports them as its gain.
+expect_eq "keyframed gain: undo restores the clips and the track" "$(echo "$KT0" | jq -c '.tracks | map(del(.gain_db))')" "$(tl | jq -c '.tracks | map(del(.gain_db))')"
+# The same keyframes; MLT writes them as times or as frames (frame 100 = 4 s at 25 fps).
+expect_eq "keyframed gain: undo keeps the keyframes (in a plain volume filter)" "0=-10;100=0" "$(saved_gain | sed 's/00:00:00\.000=/0=/; s/00:00:04\.000=/100=/')"
+expect_eq "keyframed gain: after undo it is no longer the track gain filter" "" "$(saved_gain "$TG")"
+expect_eq "keyframed gain: after undo gain_db reports 0" 0 "$(tl | jq '.tracks[1].gain_db')"
 
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

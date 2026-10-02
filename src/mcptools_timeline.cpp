@@ -505,12 +505,16 @@ QList<McpTool> McpTools::timelineTools()
          getPlaylistTool},
         {"get_timeline",
          "Describe the timeline: fps, playhead position, duration and every track (index 0 is the "
-         "TOPMOST video track) with its clips. Items have kind clip, blank or transition and "
-         "start, duration, in, out, name, path, fade_in, fade_out; items of kind clip also carry "
+         "TOPMOST video track) with its index, name, type, locked, muted, hidden, gain_db (track "
+         "gain in dB, 0 = unchanged; with keyframes the level at the timeline's gain position), "
+         "composite (video tracks only: blends over the tracks below) and clips. Items have "
+         "kind clip, blank or transition and start, duration, in, out, name, path, fade_in, "
+         "fade_out; items of kind clip also carry "
          "the source media's width, height, fps, has_audio and rotation when known (omitted "
          "otherwise; has_audio reflects the producer's selected audio stream, so a user-disabled "
          "audio stream may report false; proxy clips may report the proxy's dimensions). tracks "
-         "is empty when no timeline exists.",
+         "is empty when no timeline exists. settings reports Shotcut's own allow_transitions, "
+         "ripple_all_tracks and ripple_markers timeline settings.",
          schema(R"({"type":"object","properties":{}})"),
          getTimelineTool},
         {"playlist_add",
