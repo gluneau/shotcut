@@ -307,11 +307,11 @@ one is allowed. The last 50 Whisper results are also kept per file for later too
   ranges on 2 tracks); more is refused up front with nothing changed. Every split and remove
   makes Shotcut snapshot the whole track for undo and a split reopens the media, so the cost
   grows faster than the number of cuts (on a debug build 120 cuts take about 12 s and memory
-  grows by roughly 0.6 GB). The cap was measured against the undo-snapshot race described below:
-  75 runs of a 120-cut call plus undo, redo and undo on a debug build gave no crash and no corrupt
-  snapshot. For more ranges send chunks from the END of the timeline to the start, so ripple
-  never shifts a range you have not sent yet (or re-read `get_timeline` between chunks); each
-  call is one undo step, and `save_project` first is a good idea.
+  grows by roughly 0.6 GB). 120 is the previous cap, re-measured against the undo-snapshot race
+  described below with the preview guard in place (see there for the numbers). For more ranges
+  send chunks from the END of the timeline to the start, so ripple never shifts a range you have
+  not sent yet (or re-read `get_timeline` between chunks); each call is one undo step, and
+  `save_project` first is a good idea.
 - `track_add {type, name?}` adds an empty track as one undo step and returns `{tracks, added}`.
   A video track goes on top (index 0, so every index shifts by one), an audio track at the
   bottom. A track head selected in the timeline is deselected, as Shotcut's own Add Track does.
@@ -337,27 +337,53 @@ one is allowed. The last 50 Whisper results are also kept per file for later too
 
 ### Known upstream issue: undo snapshots can be corrupted
 
-Shotcut writes an undo snapshot of the track (and sometimes of the clip) with every split or
-remove, on the GUI thread, while the preview thread may be rendering those same clips; rendering
-rewrites their `meta.media.*` properties, and MLT's XML writer can then copy freed memory into the
-snapshot. Undoing such a step aborts a debug build ("Missing snapshot for restored clip") and, in a
-release build, silently drops the clip or restores it with missing properties. The race is in
-Shotcut and MLT, not in the MCP server: in the Shotcut window alone, pressing Shift+S (Split All
-Tracks At Playhead) every 150 ms during playback crashed 3 of 10 debug sessions of about 135
-splits. A long `timeline_remove_ranges` call (hundreds of commands in one burst, repeated by its
-redo) makes it much more likely.
+Two related Shotcut/MLT thread-safety problems were found while testing; the MCP server works
+around the first one.
 
-The MCP server mitigates it: `timeline_remove_ranges`, `timeline_insert_range`, `track_remove` and
-the `undo`/`redo` tools pause playback, block the preview refresh and, while they run, feed the
-preview a black stand-in at the same position instead of the timeline (Shotcut still seeks the
-player after every duration change, and that seek alone renders the clips being edited); afterwards
-the timeline is reconnected and refreshed once, so the preview may flash black during a long edit.
-Measured on a debug build with a 120-cut call plus undo, redo and undo: without the mitigation 2 of
-20 runs aborted; blocking the refresh alone still left a corrupt snapshot in about 5% of runs at
-every cap from 20 to 120 cuts; with the stand-in, no abort and no corrupt snapshot in 75 runs. This
-narrows the race but cannot rule it out, and it does not cover Undo/Redo pressed in the Shotcut
-window. Call `save_project` before large cuts, send them in chunks, and avoid undoing or redoing
-very large steps from the Shotcut window while it plays.
+- **Undo-snapshot corruption (the path the mitigation targets).** Shotcut writes an undo
+  snapshot of the track (and sometimes of the clip) with every split or remove, on the GUI
+  thread, while the preview thread may be rendering those same clips; rendering rewrites their
+  `meta.media.*` properties, and MLT's XML writer can then copy freed memory into the snapshot.
+  Undoing such a step aborts a debug build ("Missing snapshot for restored clip"); in a release
+  build the code skips the clip, so it would silently disappear or come back with missing
+  properties (inferred from the code, not measured). A long `timeline_remove_ranges` call
+  (hundreds of commands in one burst, repeated by its redo) makes it much more likely: without
+  the guard, 2 of 20 debug runs of a 120-cut call plus undo, redo and undo aborted.
+- **Render-thread crash in the Shotcut window.** Pressing Shift+S (Split All Tracks At
+  Playhead) every 150 ms during playback crashed 3 of 10 debug sessions of about 135 splits with
+  a SIGSEGV in the preview render thread (MLT property and producer state used by two threads).
+  This is a related MLT race in plain GUI use; the MCP server does not touch that path.
+
+The MCP server's preview guard: `timeline_remove_ranges`, `timeline_insert_range`,
+`track_remove` and the `undo`/`redo` tools pause playback and block the preview refresh while
+they run, then refresh once. For large work, `timeline_remove_ranges` always and `undo`/`redo`
+of a step with more than 8 commands (a `timeline_remove_ranges` call of 3 or more cuts), the
+preview is also fed a black stand-in at the same position instead of the timeline, because
+Shotcut still seeks the player after every duration change and that seek alone renders the
+clips being edited; the timeline is reconnected afterwards. Guards do not nest (only the
+outermost acts).
+
+Measured on a debug build (a 120-cut call plus undo, redo and undo per run): blocking the
+refresh alone left a corrupt snapshot in about 3-7% of runs wherever 30 or more runs were made,
+at every cap from 20 to 120 cuts, so a lower cap does not help; with the stand-in, the final
+code gave no abort and no corrupt snapshot in 32 consecutive runs (95% upper bound about 9%;
+earlier, 75 runs pooled over two stand-in variants also gave none). This narrows the race but
+cannot rule it out. Call `save_project` before large cuts and send them in chunks.
+
+Residual risks:
+
+- Undo/Redo and History jumps in the Shotcut window are not guarded.
+- Small MCP edits (`timeline_insert_range`, `track_remove`, small undo/redo steps) get only the
+  refresh block, not the stand-in, so they keep a smaller exposure; so do the other edit tools.
+- Inserting into an empty timeline creates the timeline inside the guard, while the player still
+  shows the old producer; nothing is swapped then.
+- Shotcut's autosave runs on a worker thread and may serialize the project while a guarded call
+  is half done.
+- GPU (Movit) processing mode was not tested.
+- During a guarded large call the preview shows black, the scopes freeze and the audio device is
+  restarted (the preview consumer is stopped and started twice).
+- Unverified: a `seeked` signal emitted by a redone command might move the playhead during the
+  guard.
 
 ### Known limits and residual risks (stage 3A)
 

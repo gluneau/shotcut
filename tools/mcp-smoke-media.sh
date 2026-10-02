@@ -1153,9 +1153,9 @@ expect_eq "remove_ranges across a leading gap: duration 190" 190 "$(tldur)"
 tool_json undo '{}' >/dev/null
 expect_eq "remove_ranges across a leading gap: one undo restores byte for byte" "$TG0" "$(tool_json get_timeline '{}')"
 
-# Work cap: CAP cuts (ranges after merging x tracks), measured as the largest load with no corrupt
-# undo snapshot in 30 runs (Shotcut's snapshot/preview race; see docs/mcp-server.md). CAP/2 ranges
-# of 2 frames on 2 tracks are really applied; one more is refused before any change.
+# Work cap: CAP cuts (ranges after merging x tracks), the previous cap, re-measured with the
+# preview guard against Shotcut's undo-snapshot race (see docs/mcp-server.md). CAP/2 ranges of 2
+# frames on 2 tracks are really applied; one more is refused before any change.
 CAP=120
 HALF=$((CAP / 2))
 tool_json open_project "{\"path\":\"$TMP/two-equal.mlt\",\"discard_changes\":true}" >/dev/null
@@ -1191,26 +1191,64 @@ expect_eq "remove_ranges at the cap: undo puts the playhead back" 100 "$(tool_js
 expect_eq "remove_ranges at the cap: undo within 60 s" true "$([ $((T1 - T0)) -lt 60 ] && echo true || echo false)"
 expect_eq "remove_ranges: the user's ripple-all-tracks setting is unchanged" false "$(tool_json get_timeline '{}' | jq -r '.settings.ripple_all_tracks')"
 
-# The tool blocks preview refreshes while it edits; they must work again afterwards (after a
-# success, an undo/redo and an error), or get_frame would time out or show a stale picture.
+# The guarded tools (EditPreviewGuard) pause, block preview refreshes and, for large edits, feed
+# the preview a stand-in; the preview must work again afterwards, or get_frame would time out or
+# show a stale picture. scenes.mp4 is red 0-74, green 75-149, blue 150-224.
 tool_json open_project "{\"path\":\"$EMPTY\",\"discard_changes\":true}" >/dev/null
 sleep 1
 tool_json timeline_insert_range "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":9,\"track\":0,\"position\":0}" >/dev/null
 gf_call '{"position":10}' "$TMP/rf0.jpg"
-expect_eq "refresh after remove_ranges: fixture frame 10 is red" R "$(rgb_class "$TMP/rf0.jpg" 100 100 110 70)"
+expect_eq "guard: fixture frame 10 is red" R "$(rgb_class "$TMP/rf0.jpg" 100 100 110 70)"
 rr '{"tracks":[0],"ranges":[{"start":0,"end":75}]}' >/dev/null
 gf_call '{"position":10}' "$TMP/rf1.jpg"
-expect_eq "refresh after remove_ranges: frame 10 is now green" G "$(rgb_class "$TMP/rf1.jpg" 100 100 110 70)"
+expect_eq "guard after remove_ranges: frame 10 is now green" G "$(rgb_class "$TMP/rf1.jpg" 100 100 110 70)"
 tool_json undo '{}' >/dev/null
 gf_call '{"position":10}' "$TMP/rf2.jpg"
-expect_eq "refresh after undo: frame 10 is red again" R "$(rgb_class "$TMP/rf2.jpg" 100 100 110 70)"
+expect_eq "guard after undo: frame 10 is red again" R "$(rgb_class "$TMP/rf2.jpg" 100 100 110 70)"
 tool_json redo '{}' >/dev/null
 gf_call '{"position":10}' "$TMP/rf3.jpg"
-expect_eq "refresh after redo: frame 10 is green again" G "$(rgb_class "$TMP/rf3.jpg" 100 100 110 70)"
-expect_eq "refresh after an error: remove_ranges past the end is refused" true "$(rerr '{"tracks":[0],"ranges":[{"start":5000,"end":5001}]}')"
+expect_eq "guard after redo: frame 10 is green again" G "$(rgb_class "$TMP/rf3.jpg" 100 100 110 70)"
 tool_json undo '{}' >/dev/null
-gf_call '{"position":10}' "$TMP/rf4.jpg"
-expect_eq "refresh after an error: the next undo still shows a fresh frame (red)" R "$(rgb_class "$TMP/rf4.jpg" 100 100 110 70)"
+# A refused call returns before the guard is built (no deterministic in-guard error can be made
+# headless); the in-guard rollback path is the empty macro below.
+expect_eq "guard: a refused remove_ranges (past the end) is an error" true "$(rerr '{"tracks":[0],"ranges":[{"start":5000,"end":5001}]}')"
+gf_call '{"position":30}' "$TMP/rf4.jpg"
+expect_eq "guard after a refused call: frame 30 is red" R "$(rgb_class "$TMP/rf4.jpg" 100 100 110 70)"
+# In-guard rollback: a lift inside an existing gap changes nothing, so the tool undoes and drops
+# its empty macro while the guard is active.
+rr '{"tracks":[0],"ranges":[{"start":0,"end":25}],"ripple":false}' >/dev/null
+gf_call '{"position":100}' "$TMP/rf5.jpg"
+expect_eq "guard after a lift: frame 100 is green" G "$(rgb_class "$TMP/rf5.jpg" 100 100 110 70)"
+UNDO_TEXT="$(tool_json get_timeline '{}' | jq -c '.tracks')"
+expect_eq "guard rollback: a lift inside the gap succeeds" false "$(rerr '{"tracks":[0],"ranges":[{"start":5,"end":10}],"ripple":false}')"
+expect_eq "guard rollback: the timeline is unchanged" "$UNDO_TEXT" "$(tool_json get_timeline '{}' | jq -c '.tracks')"
+gf_call '{"position":30}' "$TMP/rf6.jpg"
+expect_eq "guard after the in-guard rollback: frame 30 is red" R "$(rgb_class "$TMP/rf6.jpg" 100 100 110 70)"
+expect_eq "guard rollback: the next undo is the lift" "Remove 1 range(s)" "$(tool_json undo '{}' | jq -r '.text')"
+# A guarded call made while playing ends paused, with a working preview.
+tool_json play '{}' >/dev/null
+sleep 0.5
+rr '{"tracks":[0],"ranges":[{"start":200,"end":210}]}' >/dev/null
+expect_eq "guard while playing: playback is paused afterwards" false "$(tool_json get_state '{}' | jq -r '.playing')"
+gf_call '{"position":10}' "$TMP/rf7.jpg"
+expect_eq "guard while playing: frame 10 is red" R "$(rgb_class "$TMP/rf7.jpg" 100 100 110 70)"
+tool_json undo '{}' >/dev/null
+# timeline_insert_range on an existing timeline (guard without stand-in).
+tool_json timeline_insert_range "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":6,\"out_s\":7,\"track\":0,\"position\":0}" >/dev/null
+gf_call '{"position":10}' "$TMP/rf8.jpg"
+expect_eq "guard after insert_range on an existing timeline: frame 10 is blue" B "$(rgb_class "$TMP/rf8.jpg" 100 100 110 70)"
+# track_remove (guard without stand-in): a red clip on a new top track hides the blue one.
+tool_json track_add '{"type":"video"}' >/dev/null
+tool_json timeline_insert_range "{\"path\":\"$MEDIA/scenes.mp4\",\"in_s\":0,\"out_s\":1,\"track\":0,\"position\":0}" >/dev/null
+gf_call '{"position":10}' "$TMP/rf9.jpg"
+expect_eq "guard: the new top track shows red at frame 10" R "$(rgb_class "$TMP/rf9.jpg" 100 100 110 70)"
+tool_json track_remove '{"track":0,"force":true}' >/dev/null
+gf_call '{"position":10}' "$TMP/rf10.jpg"
+expect_eq "guard after track_remove: frame 10 is blue again" B "$(rgb_class "$TMP/rf10.jpg" 100 100 110 70)"
+# A small undo (no stand-in) also leaves a working preview.
+tool_json undo '{}' >/dev/null
+gf_call '{"position":10}' "$TMP/rf11.jpg"
+expect_eq "guard after a small undo: frame 10 is red (the track is back)" R "$(rgb_class "$TMP/rf11.jpg" 100 100 110 70)"
 
 echo "== track and marker tools"
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[].name]')"

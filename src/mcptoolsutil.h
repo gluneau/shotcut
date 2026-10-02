@@ -55,23 +55,32 @@ int lastFrame();
 // Moves the playhead the same way for a plain clip and for a timeline.
 void movePlayhead(int position);
 
-// While it lives: pauses playback, blocks the preview refresh Shotcut issues after every edit and
-// feeds the preview a black stand-in producer (at the same position) instead of the timeline;
-// when it goes out of scope (on every exit path) it reconnects the timeline and refreshes once.
-// Shotcut serializes clips for undo on the GUI thread while the preview thread may render them,
-// which rewrites their meta.media.* properties; that race can corrupt the undo snapshot so that
-// undo aborts (debug) or drops the clip (release). Blocking the refreshes alone is not enough,
-// because Shotcut also seeks the player after every duration change. Use it around every
-// multi-command edit and undo/redo. Not reentrant.
-class RefreshBlock
+// Wraps long or snapshot-heavy edits (and undo/redo of them). While the outermost guard lives it
+// pauses playback and blocks the preview refresh Shotcut issues after every edit; with standIn it
+// also feeds the preview a black stand-in producer at the same position instead of the timeline
+// (connected even when the preview consumer is stopped, whose state is restored). When it goes out
+// of scope (on every exit path) it reconnects the timeline (or leaves the consumer stopped when
+// there is no producer any more) and refreshes once.
+// Why: Shotcut serializes clips for undo on the GUI thread while the preview thread may render
+// them, which rewrites their meta.media.* properties; that race can corrupt the undo snapshot so
+// that undo aborts (debug) or drops the clip (release). Blocking refreshes alone is not enough,
+// because Shotcut also seeks the player after every duration change; the stand-in is. The
+// stand-in costs a black preview and an audio device restart, so use it only for large work.
+// Nesting: inner guards are no-ops (a static depth counter). Shotcut's own RefreshBlocker and
+// MultitrackModel::endBulkUpdate() also clear the same refresh-block flag when they finish; that
+// only lets a refresh through early, which the stand-in (when used) makes harmless.
+class EditPreviewGuard
 {
 public:
-    RefreshBlock();
-    ~RefreshBlock();
-    RefreshBlock(const RefreshBlock &) = delete;
-    RefreshBlock &operator=(const RefreshBlock &) = delete;
+    explicit EditPreviewGuard(bool standIn);
+    ~EditPreviewGuard();
+    EditPreviewGuard(const EditPreviewGuard &) = delete;
+    EditPreviewGuard &operator=(const EditPreviewGuard &) = delete;
 
 private:
+    static int s_depth;
+    bool m_outer = false;
+    bool m_wasStopped = false;
     std::unique_ptr<Mlt::Producer> m_standIn;
 };
 

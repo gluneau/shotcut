@@ -380,8 +380,11 @@ QJsonObject historyTool(bool undo)
     if (undo ? !stack->canUndo() : !stack->canRedo())
         return textResult(undo ? "There is nothing to undo." : "There is nothing to redo.", true);
     const QString text = undo ? stack->undoText() : stack->redoText();
-    // Undo/redo of a long macro (timeline_remove_ranges) runs all its commands at once.
-    RefreshBlock refreshBlock;
+    // Undoing or redoing a macro runs all its commands at once; one with more than 8 children
+    // (a timeline_remove_ranges call of 3 or more cuts) gets the preview stand-in, smaller steps
+    // only the refresh block, so that many small undos cause no preview flicker.
+    const QUndoCommand *command = stack->command(undo ? stack->index() - 1 : stack->index());
+    EditPreviewGuard previewGuard(command && command->childCount() > 8);
     if (undo)
         stack->undo();
     else

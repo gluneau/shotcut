@@ -347,9 +347,10 @@ QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
     // so the cost grows faster than the number of cuts (debug build: 120 cuts take about 12 s).
     // Shotcut can corrupt such a snapshot when the preview renders the clip meanwhile (an
     // upstream race, docs/mcp-server.md). Measured on a debug build, call plus undo, redo and
-    // undo: with refreshes blocked only, corrupt snapshots in about 5% of runs at every cap from
-    // 20 to 120 cuts; with RefreshBlock (refreshes blocked and the preview fed a stand-in) none
-    // in 75 runs at 120 cuts.
+    // undo: with refreshes blocked only, corrupt snapshots in about 3-7% of runs wherever 30 or
+    // more runs were made, at every cap from 20 to 120 cuts; with EditPreviewGuard's stand-in,
+    // none in 32 consecutive runs of this code at 120 cuts (75 earlier, pooled over two
+    // stand-in variants), so the previous cap of 120 stays.
     const int maxCuts = 120;
     if (int(applied.size()) * tracks.size() > maxCuts)
         return textResult(QStringLiteral("Too much work for one call: %1 ranges (after merging) on "
@@ -402,7 +403,7 @@ QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
     }
 
     RippleSettingsGuard guard;
-    RefreshBlock refreshBlock;
+    EditPreviewGuard previewGuard(true);
     QUndoStack *stack = MAIN.undoStack();
     stack->beginMacro(QObject::tr("Remove %n range(s)", nullptr, int(applied.size())));
     // Each listed track is cut by itself, so other tracks must not ripple.
@@ -575,7 +576,7 @@ QJsonObject trackRemoveTool(const QJsonObject &arguments)
     }
     const QString name = model.data(model.index(track), MultitrackModel::NameRole).toString();
     const int before = model.trackList().size();
-    RefreshBlock refreshBlock;
+    EditPreviewGuard previewGuard(false); // a few commands: no stand-in
     QUndoStack *stack = MAIN.undoStack();
     stack->beginMacro(video ? QObject::tr("Remove video track")
                             : QObject::tr("Remove audio track"));

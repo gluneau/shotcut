@@ -143,39 +143,54 @@ int lastFrame()
     return producer ? qMax(0, producer->get_playtime() - 1) : 0;
 }
 
-RefreshBlock::RefreshBlock()
+int EditPreviewGuard::s_depth = 0;
+
+EditPreviewGuard::EditPreviewGuard(bool standIn)
 {
+    if (s_depth++ > 0)
+        return; // only the outermost guard acts
+    m_outer = true;
     MLT.pause();
     MLT.blockRefresh(true);
     // Shotcut still seeks the player after every duration change (Player::onDurationChanged),
     // which makes the preview fetch the frame under the playhead from the clips being edited.
-    // Feed the preview a black producer at the same position instead, so it renders no clip.
+    // For large edits feed the preview a black producer at the same position instead.
     Mlt::Consumer *consumer = MLT.consumer();
-    if (MLT.isMultitrack() && consumer && consumer->is_valid() && !consumer->is_stopped()) {
-        const int position = MLT.producer()->position();
-        m_standIn = std::make_unique<Mlt::Producer>(MLT.profile(), "color:black");
-        if (m_standIn->is_valid()) {
-            m_standIn->set("length", position + 1000);
-            m_standIn->set_in_and_out(0, position + 999);
-            m_standIn->set_speed(0); // producers play at speed 1 by default
-            m_standIn->seek(position);
-            consumer->stop();
-            consumer->connect(*m_standIn);
-            consumer->start();
-        } else {
-            m_standIn.reset();
-        }
+    if (!standIn || !MLT.isMultitrack() || !consumer || !consumer->is_valid())
+        return;
+    const int position = MLT.producer()->position();
+    m_standIn = std::make_unique<Mlt::Producer>(MLT.profile(), "color:black");
+    if (!m_standIn->is_valid()) {
+        m_standIn.reset();
+        return;
     }
+    m_standIn->set("length", position + 1000);
+    m_standIn->set_in_and_out(0, position + 999);
+    m_standIn->set_speed(0); // producers play at speed 1 by default
+    m_standIn->seek(position);
+    m_wasStopped = consumer->is_stopped();
+    if (!m_wasStopped)
+        consumer->stop();
+    consumer->connect(*m_standIn);
+    if (!m_wasStopped)
+        consumer->start();
 }
 
-RefreshBlock::~RefreshBlock()
+EditPreviewGuard::~EditPreviewGuard()
 {
+    --s_depth;
+    if (!m_outer)
+        return;
     MLT.blockRefresh(false);
     Mlt::Consumer *consumer = MLT.consumer();
-    if (m_standIn && consumer && consumer->is_valid() && MLT.producer()) {
+    if (m_standIn && consumer && consumer->is_valid()) {
         consumer->stop();
-        consumer->connect(*MLT.producer());
-        consumer->start();
+        if (MLT.producer() && MLT.producer()->is_valid()) {
+            consumer->connect(*MLT.producer());
+            if (!m_wasStopped)
+                consumer->start();
+        }
+        // Without a producer the consumer stays stopped rather than running on the stand-in.
     }
     MLT.refreshConsumer();
 }
@@ -458,7 +473,7 @@ int pushClipXml(const QString &mode,
         return -1;
     }
 
-    RefreshBlock refreshBlock;
+    EditPreviewGuard previewGuard(false); // one insert: no stand-in, so no preview flicker
     MAIN.undoStack()->beginMacro(undoText);
     if (create) {
         // The tracks timeline_add_playlist creates on an empty timeline (V1, plus A1 when
