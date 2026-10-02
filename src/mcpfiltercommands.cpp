@@ -32,8 +32,12 @@ namespace McpFilter {
 namespace {
 
 // The target's producer as it is now; invalid when it is gone. For a clip, info receives its
-// ClipInfo, and the producer gets the "clip:track" item property that the timeline model needs
-// to report filter changes on the clip (TimelineDock::emitSelectedFromSelection sets it too).
+// ClipInfo. The clip's producer gets the "clip:track" item property that
+// MultitrackModel::filterAddedOrRemoved/onFilterChanged read to know which timeline item to
+// refresh (TimelineDock::emitSelectedFromSelection sets it the same way). It is written afresh at
+// every use; a stale value left after later edits is harmless, because it only selects which
+// item's FadeIn/FadeOut/IsFiltered/Gain roles get a dataChanged signal (it is not saved: the "_"
+// prefix keeps it out of the XML).
 Mlt::Producer resolve(MultitrackModel &model,
                       const Target &target,
                       std::unique_ptr<Mlt::ClipInfo> *info = nullptr)
@@ -56,16 +60,21 @@ Mlt::Producer resolve(MultitrackModel &model,
     return producer;
 }
 
-// Where an appended user filter belongs: after the last user filter, else before the first
-// hidden post filter (such as a track's level meter), else at the end. This is
-// AttachedFiltersModel's rule for adding a row at the end.
-int appendIndex(Mlt::Service &service)
+// The MLT index where a user filter goes to become user filter userIndex: the index of the
+// current one there, else after the last user filter, else before the first hidden post filter
+// (such as a track's level meter), else the end. AttachedFiltersModel's userFilterInsertIndex.
+int insertIndex(Mlt::Service &service, int userIndex)
 {
+    int seen = 0;
     int lastUser = -1;
     for (int i = 0; i < service.filter_count(); ++i) {
         std::unique_ptr<Mlt::Filter> filter(service.filter(i));
-        if (Util::isUserFilter(filter.get()))
-            lastUser = i;
+        if (!Util::isUserFilter(filter.get()))
+            continue;
+        if (seen == userIndex)
+            return i;
+        lastUser = i;
+        ++seen;
     }
     if (lastUser >= 0)
         return lastUser + 1;
@@ -77,15 +86,44 @@ int appendIndex(Mlt::Service &service)
     return service.filter_count();
 }
 
-// Attaches filter (appended by MLT) and moves it to mltIndex.
-bool attachAt(Mlt::Producer &producer, Mlt::Filter &filter, int mltIndex)
+// Attaches filter (appended by MLT) and moves it to be user filter userIndex; returns its user
+// index or -1.
+int attachAt(Mlt::Producer &producer, Mlt::Filter &filter, int userIndex)
 {
+    const int mltIndex = insertIndex(producer, userIndex);
     if (producer.attach(filter) != 0)
-        return false;
+        return -1;
     const int last = producer.filter_count() - 1;
-    if (mltIndex >= 0 && mltIndex < last)
+    if (mltIndex < last)
         producer.move_filter(last, mltIndex);
-    return true;
+    return userFilterIndices(producer).indexOf(qMin(mltIndex, last));
+}
+
+// The user filter at userIndex when it is the expected one (an empty service accepts any).
+std::unique_ptr<Mlt::Filter> expectedFilter(Mlt::Producer &producer,
+                                            int userIndex,
+                                            const QByteArray &service,
+                                            const QByteArray &shotcutId,
+                                            const QString &what)
+{
+    const QList<int> indices = userFilterIndices(producer);
+    if (userIndex < 0 || userIndex >= indices.size()) {
+        LOG_ERROR() << what << "no filter" << userIndex << "(count" << indices.size() << ")";
+        return nullptr;
+    }
+    std::unique_ptr<Mlt::Filter> filter(producer.filter(indices.at(userIndex)));
+    if (!filter || !filter->is_valid()) {
+        LOG_ERROR() << what << "invalid filter" << userIndex;
+        return nullptr;
+    }
+    if (!service.isEmpty()
+        && (service != filter->get("mlt_service")
+            || shotcutId != QByteArray(filter->get(kShotcutFilterProperty)))) {
+        LOG_ERROR() << what << "filter" << userIndex << "is" << filter->get("mlt_service")
+                    << filter->get(kShotcutFilterProperty) << "not" << service << shotcutId;
+        return nullptr;
+    }
+    return filter;
 }
 
 void notifyAddedOrRemoved(MultitrackModel &model, Mlt::Producer &producer)
@@ -134,47 +172,56 @@ AddCommand::AddCommand(MultitrackModel &model,
 
 void AddCommand::redo()
 {
-    m_userIndex = -1;
+    if (m_attached)
+        return;
     std::unique_ptr<Mlt::ClipInfo> info;
     Mlt::Producer producer = resolve(m_model, m_target, &info);
     if (!producer.is_valid()) {
         LOG_ERROR() << text() << "target not found:" << describe(m_target);
         return;
     }
-    if (!m_filter.is_valid()) {
-        Mlt::Filter filter(MLT.profile(), m_service.toUtf8().constData());
-        if (!filter.is_valid()) {
-            LOG_ERROR() << text() << "could not create the filter" << m_service;
-            return;
-        }
-        filter.inherit(m_props);
-        if (!m_shotcutId.isEmpty())
-            filter.set(kShotcutFilterProperty, m_shotcutId.toUtf8().constData());
-        if (info)
-            filter.set_in_and_out(info->frame_in, info->frame_out);
-        m_filter = filter;
+    Mlt::Filter filter(MLT.profile(), m_service.toUtf8().constData());
+    if (!filter.is_valid()) {
+        LOG_ERROR() << text() << "could not create the filter" << m_service;
+        return;
     }
-    const int mltIndex = appendIndex(producer);
-    if (!attachAt(producer, m_filter, mltIndex)) {
+    filter.inherit(m_props);
+    if (!m_shotcutId.isEmpty())
+        filter.set(kShotcutFilterProperty, m_shotcutId.toUtf8().constData());
+    if (info)
+        filter.set_in_and_out(info->frame_in, info->frame_out);
+    // The first redo appends; later ones put it back where it was.
+    const int userIndex = m_userIndex >= 0 ? m_userIndex
+                                           : int(userFilterIndices(producer).size());
+    const int added = attachAt(producer, filter, userIndex);
+    if (added < 0) {
         LOG_ERROR() << text() << "could not attach the filter to" << describe(m_target);
         return;
     }
-    m_userIndex = userFilterIndices(producer).indexOf(mltIndex);
+    m_userIndex = added;
+    m_attached = true;
     notifyAddedOrRemoved(m_model, producer);
 }
 
 void AddCommand::undo()
 {
-    if (m_userIndex < 0 || !m_filter.is_valid())
+    if (!m_attached)
         return;
-    m_userIndex = -1;
+    m_attached = false;
     Mlt::Producer producer = resolve(m_model, m_target);
     if (!producer.is_valid()) {
         LOG_ERROR() << text() << "target not found:" << describe(m_target);
         return;
     }
-    if (producer.detach(m_filter) != 0) {
-        LOG_ERROR() << text() << "the filter is no longer on" << describe(m_target);
+    std::unique_ptr<Mlt::Filter> filter = expectedFilter(producer,
+                                                         m_userIndex,
+                                                         m_service.toUtf8(),
+                                                         m_shotcutId.toUtf8(),
+                                                         text());
+    if (!filter)
+        return;
+    if (producer.detach(*filter) != 0) {
+        LOG_ERROR() << text() << "could not detach the filter from" << describe(m_target);
         return;
     }
     notifyAddedOrRemoved(m_model, producer);
@@ -189,6 +236,8 @@ SetCommand::SetCommand(MultitrackModel &model,
     : m_model(model)
     , m_target(target)
     , m_userIndex(userIndex)
+    , m_service(before.get("mlt_service"))
+    , m_shotcutId(before.get(kShotcutFilterProperty))
 {
     setText(text);
     m_before.inherit(before);
@@ -213,16 +262,10 @@ void SetCommand::apply(Mlt::Properties &properties)
         LOG_ERROR() << text() << "target not found:" << describe(m_target);
         return;
     }
-    const QList<int> indices = userFilterIndices(producer);
-    if (m_userIndex < 0 || m_userIndex >= indices.size()) {
-        LOG_ERROR() << text() << "no filter" << m_userIndex << "on" << describe(m_target);
+    std::unique_ptr<Mlt::Filter> filter
+        = expectedFilter(producer, m_userIndex, m_service, m_shotcutId, text());
+    if (!filter)
         return;
-    }
-    std::unique_ptr<Mlt::Filter> filter(producer.filter(indices.at(m_userIndex)));
-    if (!filter || !filter->is_valid()) {
-        LOG_ERROR() << text() << "invalid filter" << m_userIndex << "on" << describe(m_target);
-        return;
-    }
     filter->inherit(properties);
     m_applied = true;
     m_model.onFilterChanged(filter.get());
@@ -244,48 +287,48 @@ RemoveCommand::RemoveCommand(MultitrackModel &model,
 
 void RemoveCommand::redo()
 {
-    m_mltIndex = -1;
+    if (m_removed)
+        return;
     Mlt::Producer producer = resolve(m_model, m_target);
     if (!producer.is_valid()) {
         LOG_ERROR() << text() << "target not found:" << describe(m_target);
         return;
     }
-    const QList<int> indices = userFilterIndices(producer);
-    if (m_userIndex < 0 || m_userIndex >= indices.size()) {
-        LOG_ERROR() << text() << "no filter" << m_userIndex << "on" << describe(m_target);
+    // The first redo takes whatever filter is at the index; later ones check it is the same kind.
+    std::unique_ptr<Mlt::Filter> filter
+        = expectedFilter(producer, m_userIndex, m_service, m_shotcutId, text());
+    if (!filter)
         return;
-    }
-    std::unique_ptr<Mlt::Filter> filter(producer.filter(indices.at(m_userIndex)));
-    if (!filter || !filter->is_valid()) {
-        LOG_ERROR() << text() << "invalid filter" << m_userIndex << "on" << describe(m_target);
-        return;
-    }
-    // Keep the detached filter itself (with all its properties) for undo.
-    m_filter = *filter;
-    if (producer.detach(m_filter) != 0) {
+    if (producer.detach(*filter) != 0) {
         LOG_ERROR() << text() << "could not detach the filter from" << describe(m_target);
         return;
     }
-    m_mltIndex = indices.at(m_userIndex);
+    m_service = filter->get("mlt_service");
+    m_shotcutId = filter->get(kShotcutFilterProperty);
+    // The detached filter keeps all its properties for undo.
+    m_filter = *filter;
+    m_removed = true;
     notifyAddedOrRemoved(m_model, producer);
 }
 
 void RemoveCommand::undo()
 {
-    if (m_mltIndex < 0 || !m_filter.is_valid())
+    if (!m_removed || !m_filter.is_valid())
         return;
-    const int mltIndex = m_mltIndex;
-    m_mltIndex = -1;
+    m_removed = false;
     Mlt::Producer producer = resolve(m_model, m_target);
     if (!producer.is_valid()) {
         LOG_ERROR() << text() << "target not found:" << describe(m_target);
         return;
     }
-    if (!attachAt(producer, m_filter, mltIndex)) {
-        LOG_ERROR() << text() << "could not re-attach the filter to" << describe(m_target);
-        return;
-    }
-    notifyAddedOrRemoved(m_model, producer);
+    // Redo finds the filter by index again; no handle is kept while it is attached.
+    const int attached = attachAt(producer, m_filter, m_userIndex);
+    m_filter = Mlt::Filter();
+    if (attached != m_userIndex)
+        LOG_ERROR() << text() << "re-attached the filter to" << describe(m_target) << "at"
+                    << attached << "not" << m_userIndex;
+    if (attached >= 0)
+        notifyAddedOrRemoved(m_model, producer);
 }
 
 } // namespace McpFilter

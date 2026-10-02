@@ -239,6 +239,94 @@ expect_eq "crop set" "$(jn '{"left":4,"right":6,"top":8,"bottom":8}')" "$(fa 0 4
 expect_eq "crop set: undo text" "Set Crop: Source: left=4, right=6" "$(undo_text)"
 expect_eq "crop set: undo restores" "$F4" "$(state)"
 
+echo "== filter edits interleaved with structural edits (Shotcut rebuilds the clip on undo)"
+# V1 now: 0 tone_av [0,100) with gain 4 and brightness, 1 tone_av [100,200) without filters, ...
+expect_eq "interleave fixture: clip 1 has no filters" '{"filters":[]}' "$(fa 0 1)"
+# roundtrip NAME FILTER_OP STRUCT_OP: both ops, then undo x2 (start), redo x2 (after both), undo x2.
+roundtrip() {
+  local s0 s1 s2
+  s0="$(state)"; eval "$2" >/dev/null; s1="$(state)"; eval "$3" >/dev/null; s2="$(state)"
+  if [ "$s0" != "$s1" ] && [ "$s1" != "$s2" ]; then pass "$1: both edits changed something"
+  else fail "$1: both edits changed something" "an edit did nothing"; fi
+  undo_text >/dev/null; expect_eq "$1: undo of the structural edit" "$s1" "$(state)"
+  undo_text >/dev/null; expect_eq "$1: undo of the filter edit gives the start" "$s0" "$(state)"
+  redo_text >/dev/null; expect_eq "$1: redo of the filter edit" "$s1" "$(state)"
+  redo_text >/dev/null; expect_eq "$1: redo of the structural edit" "$s2" "$(state)"
+}
+# The filters of the V1 clip that starts at frame $1.
+fa_at() {
+  local c; c="$(tool_json get_timeline '{}' | jq "[.tracks[0].clips[] | .start == $1 and .kind == \"clip\"] | index(true)")"
+  fa 0 "$c"
+}
+GAIN6='{"track":0,"clip":1,"filter":"gain","params":{"level":6}}'
+ONEGAIN="$(jn '[{"id":"gain","params":{"level":6}}]')"
+S0="$(state)"
+roundtrip "add + transition" "add '$GAIN6'" "tool_json timeline_add_transition '{\"track\":0,\"clip\":1,\"duration\":10}'"
+expect_eq "add + transition: after redo x2 exactly one gain, level 6" "$ONEGAIN" "$(fa 0 2 | jq -cS '[.filters[] | {id, params}]')"
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "add + transition: back to the start" "$S0" "$(state)"
+roundtrip "add + move" "add '$GAIN6'" "tool_json timeline_move '{\"track\":0,\"clip\":1,\"to_start\":400}'"
+expect_eq "add + move: after redo x2 exactly one gain on the moved clip" "$ONEGAIN" "$(fa_at 400 | jq -cS '[.filters[] | {id, params}]')"
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "add + move: back to the start" "$S0" "$(state)"
+FA0="$(fa 0 0)"
+roundtrip "remove + move" "tool_json filter_remove '{\"track\":0,\"clip\":0,\"index\":0}'" "tool_json timeline_move '{\"track\":0,\"clip\":0,\"to_start\":400}'"
+expect_eq "remove + move: after redo x2 only brightness on the moved clip" '["brightness"]' "$(fa_at 400 | jq -c '[.filters[].id]')"
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "remove + move: the gain is back at index 0 with its properties" "$FA0" "$(fa 0 0)"
+expect_eq "remove + move: back to the start" "$S0" "$(state)"
+roundtrip "set + move" "tool_json filter_set '{\"track\":0,\"clip\":0,\"index\":0,\"params\":{\"level\":2}}'" "tool_json timeline_move '{\"track\":0,\"clip\":0,\"to_start\":400}'"
+expect_eq "set + move: after redo x2 the moved clip's gain is 2" 2 "$(fa_at 400 | jq '.filters[0].params.level')"
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "set + move: the value is restored" "$FA0" "$(fa 0 0)"
+expect_eq "set + move: back to the start" "$S0" "$(state)"
+roundtrip "add + split" "add '$GAIN6'" "tool_json timeline_split '{\"track\":0,\"position\":150}'"
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "add + split: no leftover filter" '{"filters":[]}' "$(fa 0 1)"
+expect_eq "add + split: back to the start" "$S0" "$(state)"
+roundtrip "add + trim" "add '$GAIN6'" "tool_json timeline_trim '{\"track\":0,\"clip\":1,\"edge\":\"in\",\"delta\":10}'"
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "add + trim: back to the start" "$S0" "$(state)"
+
+echo "== fit rect on a clip whose shape differs from the video mode; keyframes"
+ffmpeg -loglevel error -y -f lavfi -i "testsrc=size=480x240:rate=25:duration=2" -pix_fmt yuv420p -c:v libx264 "$TMP/wide.mp4"
+# Video mode 320x240 with 4:3 pixels (16:9 display); clip 0 is 480x240 square pixels (2:1);
+# clip 1 is tone_av.mp4 with a gain whose level has keyframes.
+cat > "$TMP/wide.mlt" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="main_bin">
+  <profile description="320x240 4:3 pixels" width="320" height="240" progressive="1" sample_aspect_num="4" sample_aspect_den="3" display_aspect_num="16" display_aspect_den="9" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <playlist id="main_bin"><property name="xml_retain">1</property></playlist>
+  <producer id="black" in="0" out="99"><property name="length">100</property><property name="resource">0</property><property name="mlt_service">color</property><property name="set.test_audio">0</property></producer>
+  <playlist id="background"><entry producer="black" in="0" out="99"/></playlist>
+  <chain id="chain0" out="49"><property name="length">50</property><property name="resource">$TMP/wide.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
+  <chain id="chain1" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property>
+    <filter id="g0"><property name="mlt_service">volume</property><property name="shotcut:filter">audioGain</property><property name="level">0=0;50=6</property></filter>
+  </chain>
+  <playlist id="playlist0"><property name="shotcut:video">1</property><property name="shotcut:name">V1</property><entry producer="chain0" in="0" out="49"/><entry producer="chain1" in="0" out="49"/></playlist>
+  <tractor id="tractor0" in="0" out="99">
+    <property name="shotcut">1</property>
+    <track producer="background"/>
+    <track producer="playlist0"/>
+    <transition id="transition0"><property name="a_track">0</property><property name="b_track">1</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+  </tractor>
+</mlt>
+XML
+open_fixture_project "$TMP/wide.mlt" >/dev/null
+sleep 1
+add '{"track":0,"clip":0,"filter":"size_position"}' >/dev/null
+# SizePositionUI.qml:318-328: clip DAR 2 > 16:9, so w = 320, h = w * SAR / DAR = 213.333 (not
+# rounded), x = 0, y = round((240 - h) / 2) = 13.
+expect_eq "fit rect (size_position): the video mode's SAR is used, size not rounded" "$(jn '{"x":0,"y":13,"w":320,"h":213.333}')" "$(fa 0 0 | jq -cS '.filters[0].params.rect')"
+add '{"track":0,"clip":0,"filter":"blur_pad"}' >/dev/null
+# pillar_echo/ui.qml:29-37: w = 320, h = round(w / DAR) = 160, y = 40 (no SAR).
+expect_eq "fit rect (blur_pad): no SAR, size rounded" "$(jn '{"x":0,"y":40,"w":320,"h":160}')" "$(fa 0 0 | jq -cS '.filters[1].params.rect')"
+expect_eq "keyframes: listed as the raw string" "0=0;50=6" "$(fa 0 1 | jq -r '.filters[0].params.level')"
+SK="$(state_k() { echo "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa 0 0)|$(fa 0 1)"; }; state_k)"
+expect_eq "keyframes: filter_set on a keyframed param is an error" true "$(ferr filter_set '{"track":0,"clip":1,"index":0,"params":{"level":3}}')"
+expect_eq "keyframes: message" true "$(tool_text filter_set '{"track":0,"clip":1,"index":0,"params":{"level":3}}' | grep -q 'has keyframes' && echo true)"
+expect_eq "keyframes: nothing changed" "$SK" "$(echo "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa 0 0)|$(fa 0 1)")"
+
 echo "== filters Shotcut has but the allowlist does not"
 cat > "$TMP/other.mlt" <<XML
 <?xml version="1.0" encoding="utf-8"?>

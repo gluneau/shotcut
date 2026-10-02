@@ -22,6 +22,7 @@
 #include "docks/timelinedock.h"
 #include "mainwindow.h"
 #include "mltcontroller.h"
+#include "models/metadatamodel.h"
 #include "models/multitrackmodel.h"
 #include "qmltypes/qmlmetadata.h"
 #include "shotcut_mlt_properties.h"
@@ -185,6 +186,7 @@ QList<FilterSpec> buildSpecs()
     s.shotcutId = "blur_pad";
     s.label = "Blur: Pad";
     s.params = {number("blur", 0, 10, 4, "%"), rect("rect", "rect")};
+    s.params[1].fit = FilterParam::PillarEchoFit;
     specs.append(s);
 
     // size_position/meta_affine.qml, ui_affine.qml, SizePositionUI.qml: a new filter ends in
@@ -260,6 +262,9 @@ QString unavailableReason(const FilterSpec &spec)
     QScopedPointer<Mlt::Properties> filters(MLT.repository()->filters());
     if (!filters || !filters->get_data(spec.service.toUtf8().constData()))
         return QStringLiteral("this MLT has no %1 service").arg(spec.service);
+    // Shotcut loads its filter list shortly after start; without it GPU-only rows are unknown.
+    if (MAIN.filterController()->metadataModel()->sourceRowCount() == 0)
+        return QStringLiteral("Shotcut's filter list is not loaded yet; try again in a moment");
     QmlMetadata *meta = MAIN.filterController()->metadata(
         spec.shotcutId.isEmpty() ? spec.service : spec.shotcutId);
     if (meta && meta->needsGPU())
@@ -278,9 +283,10 @@ QString num(double v)
     return QString::number(v, 'g', 12);
 }
 
-// The fit rectangle of Shotcut's Size/Position and Blur: Pad UIs: the clip's picture scaled into
-// the video mode, centered, keeping its display aspect ratio.
-QRectF fitRect(Mlt::Producer *clip)
+// The fit rectangle of Shotcut's Size/Position (SizePositionUI.qml:316-328: the video mode's SAR,
+// size not rounded) and Blur: Pad (pillar_echo/ui.qml:29-37: no SAR, size rounded) UIs: the
+// clip's picture scaled into the video mode and centered.
+QRectF fitRect(Mlt::Producer *clip, FilterParam::Fit fit)
 {
     Mlt::Profile &profile = MLT.profile();
     double dar = profile.dar();
@@ -294,15 +300,21 @@ QRectF fitRect(Mlt::Producer *clip)
                   / clip->get_double("meta.media.height");
     }
     double w, h;
-    if (dar > profile.dar()) {
+    if (fit == FilterParam::PillarEchoFit) {
+        if (dar > profile.dar()) {
+            w = profile.width();
+            h = std::round(w / dar);
+        } else {
+            h = profile.height();
+            w = std::round(h * dar);
+        }
+    } else if (dar > profile.dar()) {
         w = profile.width();
         h = w * profile.sar() / dar;
     } else {
         h = profile.height();
         w = h / profile.sar() * dar;
     }
-    w = std::round(w);
-    h = std::round(h);
     return QRectF(std::round((profile.width() - w) / 2),
                   std::round((profile.height() - h) / 2),
                   w,
@@ -489,7 +501,7 @@ void setDefaults(const FilterSpec &spec, Mlt::Producer *clip, Mlt::Properties &p
             props.set(property.constData(), param.defText.toUtf8().constData());
             break;
         case FilterParam::Rect:
-            props.set(property.constData(), rectText(fitRect(clip)).toUtf8().constData());
+            props.set(property.constData(), rectText(fitRect(clip, param.fit)).toUtf8().constData());
             break;
         default:
             props.set(property.constData(), num(param.def * param.scale).toUtf8().constData());
@@ -744,7 +756,10 @@ QJsonObject filterAddTool(const QJsonObject &arguments)
         const QList<int> indices = McpFilter::userFilterIndices(*info->producer);
         for (int i = 0; i < indices.size(); ++i) {
             std::unique_ptr<Mlt::Filter> filter(info->producer->filter(indices.at(i)));
-            if (filter && McpFilters::specOf(*filter) == spec)
+            // Shotcut's GPU crop (objectName movit.crop, service crop) counts as a crop too.
+            if (filter
+                && (McpFilters::specOf(*filter) == spec
+                    || (spec->id == "crop" && uniqueIdOf(*filter) == "movit.crop")))
                 return textResult(QStringLiteral("Clip %1 on track %2 already has a %3 filter "
                                                  "(index %4), which Shotcut allows only once; "
                                                  "change it with filter_set.")
@@ -946,8 +961,9 @@ QList<McpTool> McpTools::filterTools()
          schema(R"({"type":"object","properties":{}})"),
          filterListAvailableTool},
         {"filter_list_applied",
-         "List the filters of a timeline clip in order, as Shotcut's Filters panel shows them "
-         "(hidden internal filters are skipped): {filters:[{index, id, service, disabled, "
+         "List a timeline clip's user filters in their MLT (processing) order; hidden internal "
+         "filters and chain links (which Shotcut's Filters panel lists first) are not included: "
+         "{filters:[{index, id, service, disabled, "
          "params}]}. id is the filter_list_available id for allowlisted filters, else Shotcut's "
          "filter id or MLT service; params uses the tool-facing names and units of "
          "filter_list_available (a value with keyframes is its raw MLT string) and is empty for "
@@ -960,7 +976,8 @@ QList<McpTool> McpTools::filterTools()
          filterListAppliedTool},
         {"filter_add",
          "Add an allowlisted filter (see filter_list_available) to a timeline clip as ONE undo "
-         "step, after its existing filters; the clip's parent producer gets it, as in Shotcut, "
+         "step, after its existing filters, in call order (Shotcut's panel puts video before "
+         "audio filters; they act on different streams, so the result is the same); the clip's parent producer gets it, as in Shotcut, "
          "so it follows the clip when it is moved or trimmed. Missing params take Shotcut's "
          "defaults; unknown names, wrong types and out-of-range values are errors. Refused: a "
          "locked track, a blank or transition, an audio filter on a clip with no audio, a "

@@ -46,6 +46,10 @@ struct FilterParam
     double scale = 1.0;
     MaxFrom maxFrom = FixedMax;
     QString defText; // Color default
+    // Rect default "fit": Size, Position & Rotate's formula (video mode SAR, size not rounded)
+    // or Blur: Pad's (no SAR, size rounded).
+    enum Fit { AffineFit, PillarEchoFit };
+    Fit fit = AffineFit;
 };
 
 struct FilterSpec

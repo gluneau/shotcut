@@ -18,6 +18,7 @@
 
 #include <MltFilter.h>
 #include <MltProperties.h>
+#include <QByteArray>
 #include <QList>
 #include <QString>
 #include <QUndoCommand>
@@ -55,10 +56,14 @@ public:
                const QString &service,
                const QString &shotcutId,
                Mlt::Properties &props);
+    // Every redo creates the filter afresh from props at the same user index; undo detaches the
+    // user filter at that index after checking it is this command's (service and shotcut:filter).
+    // No filter object is kept, because Shotcut's undo of many timeline edits rebuilds the clip's
+    // producer (and its filters) from XML.
     void redo() override;
     void undo() override;
-    // The new filter's user index after the last redo, or -1 when it could not be added.
-    int userIndex() const { return m_userIndex; }
+    // The new filter's user index after the last redo, or -1 when it is not attached.
+    int userIndex() const { return m_attached ? m_userIndex : -1; }
 
 private:
     MultitrackModel &m_model;
@@ -66,8 +71,8 @@ private:
     QString m_service;
     QString m_shotcutId;
     Mlt::Properties m_props;
-    Mlt::Filter m_filter;
     int m_userIndex = -1;
+    bool m_attached = false;
 };
 
 // Replaces the properties of the user filter at userIndex with after (redo) or before (undo).
@@ -92,11 +97,15 @@ private:
     Target m_target;
     int m_userIndex;
     bool m_applied = false;
+    QByteArray m_service;
+    QByteArray m_shotcutId;
     Mlt::Properties m_before;
     Mlt::Properties m_after;
 };
 
-// Detaches the user filter at userIndex and keeps it to put it back at the same place on undo.
+// Detaches the user filter at userIndex (found by index at every redo, and checked against the
+// filter the first redo removed) and keeps the detached filter, with all its properties, to put it
+// back at the same user index on undo.
 class RemoveCommand : public QUndoCommand
 {
 public:
@@ -104,13 +113,15 @@ public:
     void redo() override;
     void undo() override;
     // Whether the last redo detached the filter.
-    bool removed() const { return m_mltIndex >= 0; }
+    bool removed() const { return m_removed; }
 
 private:
     MultitrackModel &m_model;
     Target m_target;
     int m_userIndex;
-    int m_mltIndex = -1;
+    bool m_removed = false;
+    QByteArray m_service;
+    QByteArray m_shotcutId;
     Mlt::Filter m_filter;
 };
 

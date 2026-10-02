@@ -420,14 +420,18 @@ filters on TIMELINE clips:
 | Tool | What it does | Key arguments |
 |------|--------------|---------------|
 | `filter_list_available` | The allowlist below with parameters, ranges, defaults and units | none |
-| `filter_list_applied` | A clip's filters in order (as the Filters panel lists them) | `track`, `clip` |
+| `filter_list_applied` | A clip's user filters in processing order | `track`, `clip` |
 | `filter_add` | Adds an allowlisted filter after the clip's existing filters | `track`, `clip`, `filter`, `params?` |
 | `filter_set` | Changes parameters of an allowlisted filter | `track`, `clip`, `index`, `params` |
 | `filter_remove` | Removes any listed filter (undo puts it back in place) | `track`, `clip`, `index` |
 
 `filter_list_applied` returns `{filters:[{index, id, service, disabled, params}]}`; the edit tools
-return `{index, track}` (the track as `get_timeline` reports it). Hidden internal filters (such
-as the audio level meter) are never listed and keep their place.
+return `{index, track}` (the track as `get_timeline` reports it). `filter_list_applied` lists
+the clip's user filters in MLT (processing) order: hidden internal filters (such as the audio
+level meter) are never listed and keep their place, and chain links, which Shotcut's Filters
+panel lists first, are not included, so its indexes can differ from the panel's rows. Filters are
+appended in call order; Shotcut's panel sorts video filters before audio ones when it adds them,
+which gives the same result because they act on different streams.
 
 ### The allowlist
 
@@ -474,9 +478,15 @@ MLT service) and empty `params`; `filter_set` refuses them, `filter_remove` remo
   does not reset its values to the UI's defaults.
 - A clip's filter is attached to the clip's parent producer, as in Shotcut, with the clip's in
   and out; it follows the clip when it is moved or trimmed.
+- The undo commands find the filter again by the clip's `(track, clip)` and the filter's index
+  at every undo and redo (checking its service and `shotcut:filter`), because Shotcut's undo of
+  many timeline edits (move, insert, transitions, ripple removes, trims, splits) rebuilds the
+  clip and its filters from saved XML.
 - Refused: a locked track (`filter_list_applied` works on one), a blank or a transition, an audio
-  filter on a clip without audio, a picture filter on an audio-only clip or on an audio track, a
-  second filter of a kind that allows only one (`crop`), an index not in `filter_list_applied`.
+  filter on a clip whose media has no audio stream (clips with no audio information at all, such
+  as images and colour clips, accept audio filters as in Shotcut), a picture filter on an
+  audio-only clip or on an audio track, a second filter of a kind that allows only one (`crop`;
+  Shotcut's GPU crop counts), an index not in `filter_list_applied`.
 
 ### Known limits and residual risks (stage 3B filters)
 
