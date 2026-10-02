@@ -317,6 +317,15 @@ QJsonObject getExportStatusTool(const QJsonObject &arguments)
 
 } // namespace
 
+bool McpTools::exportBusy()
+{
+    for (const auto &record : records()) {
+        if (!record->done && record->job)
+            return true;
+    }
+    return false;
+}
+
 QList<McpTool> McpTools::exportTools()
 {
     return {

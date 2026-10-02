@@ -46,6 +46,9 @@ QJsonObject imageResult(const QByteArray &bytes,
                         const QString &mimeType,
                         const QString &text = QString());
 
+// True while an export started by export_video is queued or running.
+bool exportBusy();
+
 // Tool groups, registered by all(). Each lives in its own mcptools_*.cpp.
 QList<McpTool> frameTools();
 QList<McpTool> timelineTools();

@@ -16,6 +16,7 @@
 #ifndef MCPTOOLSUTIL_H
 #define MCPTOOLSUTIL_H
 
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
@@ -53,6 +54,11 @@ int lastFrame();
 
 // Moves the playhead the same way for a plain clip and for a timeline.
 void movePlayhead(int position);
+
+// Pauses, moves the playhead to `position` (a valid frame) and returns that frame as the player
+// displays it, taken only after refreshes issued by this call so it is never a stale picture.
+// A null image and `error` when there is no video widget or the frame is not ready in time.
+QImage fetchSettledFrame(int position, QString &error, int timeoutMs = 3000);
 
 // Adds width, height, has_audio, rotation and fps of the source media from the producer's
 // properties; fields that are unknown are left out.

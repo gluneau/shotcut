@@ -17,13 +17,22 @@
 #include "mcpjobs.h"
 #include "mcptools.h"
 #include "mcptoolsutil.h"
+
+#include "docks/timelinedock.h"
+#include "mainwindow.h"
+#include "mltcontroller.h"
+#include "models/multitrackmodel.h"
 #include "settings.h"
 
+#include <QBuffer>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QPainter>
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QThread>
@@ -1068,6 +1077,155 @@ QJsonObject transcribeTool(const QJsonObject &arguments)
     return jobResult(record, waitMs);
 }
 
+// Every tile waits at most this long for its frame, and the whole sheet at most the budget, so a
+// call stays well below a client's usual 60 s request timeout.
+constexpr int kOverviewTileTimeoutMs = 3000;
+constexpr int kOverviewBudgetMs = 45000;
+
+bool readCount(
+    const QJsonObject &arguments, const char *key, int min, int max, int &value, QString &error)
+{
+    if (readFrame(arguments, key, value) == FrameArg::Invalid || value < min || value > max) {
+        error = QStringLiteral("%1 must be an integer from %2 to %3.").arg(key).arg(min).arg(max);
+        return false;
+    }
+    return true;
+}
+
+// H:MM:SS:FF counting whole frames per second (non-drop-frame for fractional rates).
+QString timecode(int frame, double fps)
+{
+    const int rate = qMax(1, qRound(fps));
+    const int seconds = frame / rate;
+    return QStringLiteral("%1:%2:%3:%4")
+        .arg(seconds / 3600)
+        .arg(seconds / 60 % 60, 2, 10, QChar('0'))
+        .arg(seconds % 60, 2, 10, QChar('0'))
+        .arg(frame % rate, 2, 10, QChar('0'));
+}
+
+QJsonObject getOverviewTool(const QJsonObject &arguments)
+{
+    QString error;
+    int columns = 4;
+    int rows = 4;
+    int tileWidth = 320;
+    if (!readCount(arguments, "columns", 1, 8, columns, error)
+        || !readCount(arguments, "rows", 1, 8, rows, error)
+        || !readCount(arguments, "tile_width", 96, 640, tileWidth, error))
+        return textResult(error, true);
+    QString format = QStringLiteral("jpeg");
+    const QJsonValue formatValue = arguments.value("format");
+    if (!formatValue.isUndefined()) {
+        format = formatValue.toString();
+        if (!formatValue.isString() || (format != "jpeg" && format != "png"))
+            return textResult("format must be \"jpeg\" or \"png\".", true);
+    }
+    Mlt::Producer *tl = timeline();
+    if (!tl)
+        return textResult("There is no timeline; add clips with timeline_add_playlist first.",
+                          true);
+    // A timeline whose clips were all removed keeps a one-frame blank.
+    MultitrackModel &model = *MAIN.timelineDock()->model();
+    bool empty = true;
+    for (int t = 0; t < model.trackList().size() && empty; ++t) {
+        for (int c = 0; c < model.rowCount(model.index(t)) && empty; ++c)
+            empty = kindOf(model, t, c) == "blank";
+    }
+    if (empty || tl->get_playtime() <= 0)
+        return textResult("The timeline is empty.", true);
+    if (exportBusy())
+        return textResult("An export is running; get_overview uses the player, so try again when "
+                          "it has finished.",
+                          true);
+
+    const int last = lastFrame();
+    const int count = qMin(columns * rows, last + 1);
+    columns = qMin(columns, count);
+    rows = (count + columns - 1) / columns;
+    QVector<int> positions;
+    QJsonArray positionsJson;
+    for (int i = 0; i < count; ++i) {
+        positions.append(count == 1 ? 0 : qRound(double(i) * last / (count - 1)));
+        positionsJson.append(positions.last());
+    }
+
+    const int tileHeight = qMax(1, qRound(tileWidth / MLT.profile().dar()));
+    const int gap = 2;
+    QImage sheet(columns * tileWidth + gap * (columns - 1),
+                 rows * tileHeight + gap * (rows - 1),
+                 QImage::Format_RGB32);
+    sheet.fill(Qt::black);
+    QPainter painter(&sheet);
+    QFont font = painter.font();
+    font.setPixelSize(qMax(10, tileHeight / 12));
+    painter.setFont(font);
+    painter.setPen(Qt::white);
+    const int barHeight = font.pixelSize() + 8;
+    const double fps = MLT.profile().fps();
+
+    // The playhead moves for every tile; put it back, and resume playback only when the player
+    // was playing the timeline (a source clip stays replaced by the timeline, as with get_frame).
+    const bool onTimeline = MLT.producer()
+                            && MLT.producer()->get_producer() == tl->get_producer();
+    const bool wasPlaying = onTimeline && !MLT.isPaused();
+    const double speed = wasPlaying ? MLT.producer()->get_speed() : 1.0;
+    const int before = qMin(tl->position(), last);
+    QElapsedTimer clock;
+    clock.start();
+    for (int i = 0; i < count && error.isEmpty(); ++i) {
+        const int remaining = kOverviewBudgetMs - int(clock.elapsed());
+        if (remaining <= 0) {
+            error = QStringLiteral("The overview took longer than %1 s; ask for fewer tiles.")
+                        .arg(kOverviewBudgetMs / 1000);
+            break;
+        }
+        const QImage frame = fetchSettledFrame(positions[i],
+                                               error,
+                                               qMin(kOverviewTileTimeoutMs, remaining));
+        if (frame.isNull()) {
+            error = QStringLiteral("Frame %1: %2").arg(positions[i]).arg(error);
+            break;
+        }
+        const int x = (i % columns) * (tileWidth + gap);
+        const int y = (i / columns) * (tileHeight + gap);
+        painter.drawImage(x,
+                          y,
+                          frame.scaled(tileWidth,
+                                       tileHeight,
+                                       Qt::IgnoreAspectRatio,
+                                       Qt::SmoothTransformation));
+        const QRect bar(x, y + tileHeight - barHeight, tileWidth, barHeight);
+        painter.fillRect(bar, QColor(0, 0, 0, 160));
+        const QRect text = bar.adjusted(4, 0, -4, 0);
+        painter.drawText(text, Qt::AlignVCenter | Qt::AlignLeft, timecode(positions[i], fps));
+        painter.drawText(text, Qt::AlignVCenter | Qt::AlignRight, QString::number(positions[i]));
+    }
+    painter.end();
+    if (timeline()) {
+        movePlayhead(qMin(before, lastFrame()));
+        if (wasPlaying)
+            MLT.play(speed);
+    }
+    if (!error.isEmpty())
+        return textResult(error, true);
+
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    const bool jpeg = format == "jpeg";
+    const bool saved = jpeg ? sheet.save(&buffer, "JPEG", 80) : sheet.save(&buffer, "PNG");
+    if (!saved)
+        return textResult("Could not encode the overview.", true);
+    const QJsonObject info{{"columns", columns},
+                           {"rows", rows},
+                           {"tile_width", tileWidth},
+                           {"positions", positionsJson}};
+    return imageResult(bytes,
+                       jpeg ? "image/jpeg" : "image/png",
+                       QString::fromUtf8(QJsonDocument(info).toJson(QJsonDocument::Compact)));
+}
+
 } // namespace
 
 std::shared_ptr<McpJobs::Record> McpTools::startAudioLevels(const SourceRef &ref,
@@ -1266,5 +1424,26 @@ QList<McpTool> McpTools::analysisTools()
                "description":"A transcript to keep for path instead of running Whisper."}
            }})"),
          transcribeTool},
+        {"get_overview",
+         "One image of the whole timeline (a contact sheet) so you can see it at a glance: "
+         "columns*rows frames evenly spaced from frame 0 to the last frame, left to right then "
+         "top to bottom, each labelled with its timecode (H:MM:SS:FF) and frame number, tiles "
+         "separated by 2 px. columns and rows (1 to 8, default 4), tile_width (96 to 640, "
+         "default 320; the tile height follows the display aspect ratio), format jpeg (default) "
+         "or png. A timeline with fewer frames than tiles gets one tile per frame and fewer "
+         "columns or rows. Returns the image and {columns, rows, tile_width, positions} with the "
+         "columns and rows actually used and the frame of every tile. Each tile is read like "
+         "get_frame with a position (with timeline filters and transitions), so the call takes a "
+         "few seconds: at most 3 s per tile and 45 s in all, else an error. The playhead is put "
+         "back afterwards and playback of the timeline resumes; a source clip shown in the "
+         "player is replaced by the timeline. Refused when there is no timeline, the timeline "
+         "has no clips or an export runs.",
+         schema(R"({"type":"object","properties":{
+             "columns":{"type":"integer","minimum":1,"maximum":8,"default":4},
+             "rows":{"type":"integer","minimum":1,"maximum":8,"default":4},
+             "tile_width":{"type":"integer","minimum":96,"maximum":640,"default":320},
+             "format":{"type":"string","enum":["jpeg","png"],"default":"jpeg"}
+           }})"),
+         getOverviewTool},
     };
 }

@@ -65,8 +65,13 @@ else
   expect_eq "analyze_media: a text file is an error" true "$(tool_is_error analyze_media "{\"path\":\"$TMP/note.txt\"}")"
 fi
 
+echo "== get_overview without a timeline"
+expect_eq "get_overview: nothing loaded is an error" true "$(tool_is_error get_overview '{}')"
+expect_eq "get_overview: no timeline message" "There is no timeline; add clips with timeline_add_playlist first." "$(tool_text get_overview '{}')"
+
 echo "== per-clip media fields"
 tool_json playlist_add "{\"path\":\"$MEDIA/tone_av.mp4\"}" >/dev/null
+expect_eq "get_overview: a clip in the player but no timeline is an error" true "$(tool_is_error get_overview '{}')"
 P="$(tool_json get_playlist '{}')"
 expect_eq "get_playlist item width" 320 "$(echo "$P" | jq -r '.items[0].width')"
 expect_eq "get_playlist item height" 240 "$(echo "$P" | jq -r '.items[0].height')"
@@ -478,6 +483,133 @@ else
     expect_eq "transcribe locked clip: works on a locked track" word "$(echo "$WL" | jq -r '.granularity')"
     expect_eq "transcribe locked clip: in_s about 2.0" true "$(echo "$WL" | jq -r '(.in_s - 2.0) | fabs < 0.01')"
   fi
+fi
+
+echo "== get_overview"
+expect_eq "tools/list has get_overview" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["get_overview"])')"
+# The unlocked project from the scenes block, emptied, then scenes.mp4 alone on track 0:
+# red frames 0-74, green 75-149, blue 150-224.
+tool_json open_project "{\"path\":\"$UNLOCKED\",\"discard_changes\":true}" >/dev/null
+sleep 2
+for _ in $(seq 1 20); do
+  K="$(tool_json get_timeline '{}' | jq -r '[.tracks[0].clips | to_entries[] | select(.value.kind!="blank")] | last | .key // empty')"
+  [ -z "$K" ] && break
+  tool_json timeline_remove "{\"track\":0,\"clip\":$K}" >/dev/null
+done
+expect_eq "get_overview: an empty timeline is an error" true "$(tool_is_error get_overview '{}')"
+expect_eq "get_overview: empty timeline message" "The timeline is empty." "$(tool_text get_overview '{}')"
+tool_json playlist_add "{\"path\":\"$MEDIA/scenes.mp4\"}" >/dev/null
+tool_json timeline_add_playlist '{}' >/dev/null
+for _ in $(seq 1 20); do
+  K="$(tool_json get_timeline '{}' | jq -r '[.tracks[0].clips | to_entries[] | select(.value.kind!="blank" and (((.value.path // .value.name) | test("/scenes.mp4$")) | not))] | first | .key // empty')"
+  [ -z "$K" ] && break
+  tool_json timeline_remove "{\"track\":0,\"clip\":$K}" >/dev/null
+done
+for _ in $(seq 1 5); do # extra scenes.mp4 clips, if any
+  K="$(tool_json get_timeline '{}' | jq -r '[.tracks[0].clips | to_entries[] | select(.value.kind!="blank")] | if length > 1 then last.key else empty end')"
+  [ -z "$K" ] && break
+  tool_json timeline_remove "{\"track\":0,\"clip\":$K}" >/dev/null
+done
+expect_eq "get_overview fixture: scenes.mp4 alone, frames 0-224" "1 0 225 225" "$(tool_json get_timeline '{}' | jq -r '"\([.tracks[0].clips[] | select(.kind!="blank")] | length) \(.tracks[0].clips[0].start) \(.tracks[0].clips[0].duration) \(.duration)"')"
+ov_call() { call_tool get_overview "$1" > "$TMP/ov.json"; jq -r '.result.content[0].data // empty' "$TMP/ov.json" | base64 -d > "$2"; }
+ov_info() { jq -c '.result.content[1].text | fromjson' "$TMP/ov.json"; }
+img_size() { ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$1"; }
+gf_call() { call_tool get_frame "$1" | jq -r '.result.content[0].data' | base64 -d > "$2"; }
+# rgb_class FILE W H X Y: R, G, B or ? for the mean colour of that rectangle
+rgb_class() {
+  local hex r g b
+  hex="$(ffmpeg -v error -i "$1" -vf "crop=$2:$3:$4:$5,scale=1:1" -f rawvideo -pix_fmt rgb24 - | xxd -p)"
+  r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
+  if [ "$r" -gt 150 ] && [ "$g" -lt 90 ] && [ "$b" -lt 90 ]; then echo R
+  elif [ "$g" -gt 150 ] && [ "$r" -lt 90 ] && [ "$b" -lt 90 ]; then echo G
+  elif [ "$b" -gt 150 ] && [ "$r" -lt 90 ] && [ "$g" -lt 90 ]; then echo B
+  else echo "?($hex)"; fi
+}
+gf_call '{"position":40}' "$TMP/gf40a.jpg"
+tool_json pause '{"position":37}' >/dev/null
+T0=$(date +%s%N)
+ov_call '{}' "$TMP/ov.jpg"
+T1=$(date +%s%N)
+echo "      (get_overview 4x4 took $(( (T1 - T0) / 1000000 )) ms)"
+expect_eq "get_overview: not an error" false "$(jq -r '.result.isError' "$TMP/ov.json")"
+expect_eq "get_overview: image content" image "$(jq -r '.result.content[0].type' "$TMP/ov.json")"
+expect_eq "get_overview: jpeg by default" image/jpeg "$(jq -r '.result.content[0].mimeType' "$TMP/ov.json")"
+expect_eq "get_overview: JPEG signature" ffd8 "$(head -c 2 "$TMP/ov.jpg" | xxd -p)"
+expect_eq "get_overview: size 4*320+2*3 by 4*240+2*3" 1286x966 "$(img_size "$TMP/ov.jpg")"
+OI="$(ov_info)"
+expect_eq "get_overview: text reports columns rows tile_width" "4 4 320" "$(echo "$OI" | jq -r '"\(.columns) \(.rows) \(.tile_width)"')"
+expect_eq "get_overview: 16 positions" 16 "$(echo "$OI" | jq -r '.positions | length')"
+expect_eq "get_overview: positions from 0 to the last frame" "0 224" "$(echo "$OI" | jq -r '"\(.positions[0]) \(.positions[-1])"')"
+expect_eq "get_overview: positions strictly increasing" true "$(echo "$OI" | jq -r '[.positions as $p | range(1; $p | length) | $p[.] > $p[. - 1]] | all')"
+expect_eq "get_overview: positions are round(i*224/15)" "0,15,30,45,60,75,90,105,119,134,149,164,179,194,209,224" "$(echo "$OI" | jq -r '.positions | join(",")')"
+CLASSES=""
+for i in $(seq 0 15); do
+  CLASSES="$CLASSES$(rgb_class "$TMP/ov.jpg" 160 120 $(( (i % 4) * 322 + 80 )) $(( (i / 4) * 242 + 40 )))"
+done
+expect_eq "get_overview: tile colours follow the clip (red, green, blue)" RRRRRGGGGGGBBBBB "$CLASSES"
+expect_eq "get_overview: label bar darkens the bottom of the first tile" true "$(c="$(rgb_class "$TMP/ov.jpg" 300 6 10 230)"; [ "$c" != R ] && echo true || echo false)"
+ST="$(tool_json get_state '{}')"
+expect_eq "get_overview: playhead restored" 37 "$(echo "$ST" | jq -r '.position')"
+expect_eq "get_overview: still paused" false "$(echo "$ST" | jq -r '.playing')"
+gf_call '{"position":40}' "$TMP/gf40b.jpg"
+expect_eq "get_frame after get_overview: same position gives the identical image" true "$([ "$(md5sum < "$TMP/gf40a.jpg")" = "$(md5sum < "$TMP/gf40b.jpg")" ] && echo true || echo false)"
+expect_eq "get_frame after get_overview: frame 40 is red" R "$(rgb_class "$TMP/gf40b.jpg" 100 100 110 70)"
+gf_call '{"position":200}' "$TMP/gf200.jpg"
+expect_eq "get_frame after get_overview: frame 200 is blue" B "$(rgb_class "$TMP/gf200.jpg" 100 100 110 70)"
+gf_call '{"position":100}' "$TMP/gf100.jpg"
+expect_eq "get_frame after get_overview: frame 100 is green" G "$(rgb_class "$TMP/gf100.jpg" 100 100 110 70)"
+ov_call '{}' "$TMP/ov2.jpg"
+expect_eq "get_overview: a second call gives the same image" true "$([ "$(md5sum < "$TMP/ov.jpg")" = "$(md5sum < "$TMP/ov2.jpg")" ] && echo true || echo false)"
+expect_eq "get_overview: playhead stays where get_frame left it" 100 "$(tool_json get_state '{}' | jq -r '.position')"
+ov_call '{"columns":2,"rows":1}' "$TMP/ov21.jpg"
+expect_eq "get_overview 2x1: two positions" "0,224" "$(ov_info | jq -r '.positions | join(",")')"
+expect_eq "get_overview 2x1: size" 642x240 "$(img_size "$TMP/ov21.jpg")"
+expect_eq "get_overview 2x1: red then blue" RB "$(rgb_class "$TMP/ov21.jpg" 160 120 80 40)$(rgb_class "$TMP/ov21.jpg" 160 120 402 40)"
+ov_call '{"columns":1,"rows":1,"tile_width":96,"format":"png"}' "$TMP/ov11.png"
+expect_eq "get_overview 1x1: one position at 0" 0 "$(ov_info | jq -r '.positions | join(",")')"
+expect_eq "get_overview png: mime" image/png "$(jq -r '.result.content[0].mimeType' "$TMP/ov.json")"
+expect_eq "get_overview png: signature" 89504e47 "$(head -c 4 "$TMP/ov11.png" | xxd -p)"
+expect_eq "get_overview png: tile_width 96 gives 96x72" 96x72 "$(img_size "$TMP/ov11.png")"
+T0=$(date +%s%N)
+ov_call '{"columns":8,"rows":8,"tile_width":96}' "$TMP/ov88.jpg"
+T1=$(date +%s%N)
+echo "      (get_overview 8x8 took $(( (T1 - T0) / 1000000 )) ms)"
+expect_eq "get_overview 8x8: 64 positions" 64 "$(ov_info | jq -r '.positions | length')"
+expect_eq "get_overview 8x8: size" 782x590 "$(img_size "$TMP/ov88.jpg")"
+for bad in '{"columns":9}' '{"columns":0}' '{"rows":0}' '{"rows":9}' '{"tile_width":50}' '{"tile_width":641}' '{"format":"gif"}' '{"columns":"4"}' '{"columns":2.5}' '{"tile_width":null}' '{"format":5}'; do
+  expect_eq "get_overview: $bad is an error" true "$(tool_is_error get_overview "$bad")"
+done
+expect_eq "get_overview: columns message" "columns must be an integer from 1 to 8." "$(tool_text get_overview '{"columns":9}')"
+tool_json play '{}' >/dev/null
+sleep 0.5
+ov_call '{"columns":2,"rows":2,"tile_width":96}' "$TMP/ovp.jpg"
+expect_eq "get_overview while playing: succeeds" false "$(jq -r '.result.isError' "$TMP/ov.json")"
+expect_eq "get_overview while playing: still playing afterwards" true "$(tool_json get_state '{}' | jq -r '.playing')"
+tool_json pause '{"position":10}' >/dev/null
+# Fewer frames than tiles: a 5-frame timeline reduces 4x4 to 5 tiles in 4 columns and 2 rows.
+tool_json timeline_trim '{"track":0,"clip":0,"edge":"out","frame":5,"ripple":true}' >/dev/null
+expect_eq "get_overview short fixture: 5 frames" 5 "$(tool_json get_timeline '{}' | jq -r '.duration')"
+ov_call '{}' "$TMP/ovs.jpg"
+expect_eq "get_overview 5 frames: positions 0-4" "0,1,2,3,4" "$(ov_info | jq -r '.positions | join(",")')"
+expect_eq "get_overview 5 frames: 4 columns, 2 rows reported" "4 2" "$(ov_info | jq -r '"\(.columns) \(.rows)"')"
+expect_eq "get_overview 5 frames: size" 1286x482 "$(img_size "$TMP/ovs.jpg")"
+tool_json undo '{}' >/dev/null
+expect_eq "get_overview short fixture: undo restores 225 frames" 225 "$(tool_json get_timeline '{}' | jq -r '.duration')"
+if [ -n "${MCP_APPDATA:-}" ]; then
+  mkdir -p "$MCP_APPDATA/presets/encode"
+  printf '%s\n' f=mp4 vcodec=libx264 preset=slower crf=18 width=1280 height=720 acodec=aac ab=128k \
+    meta.preset.extension=mp4 > "$MCP_APPDATA/presets/encode/mcp-slow"
+  OVJOB="$(tool_json export_video "{\"path\":\"$TMP/ov-export.mp4\",\"preset\":\"mcp-slow\"}" | jq -r '.job_id')"
+  expect_eq "get_overview while an export runs: error" true "$(tool_is_error get_overview '{"columns":1,"rows":1}')"
+  expect_eq "get_overview while an export runs: message" "An export is running; get_overview uses the player, so try again when it has finished." "$(tool_text get_overview '{"columns":1,"rows":1}')"
+  expect_eq "get_overview: the export was still running during those checks" true "$(tool_json get_export_status "{\"job_id\":$OVJOB}" | jq '.state | IN("pending","running")')"
+  for _ in $(seq 1 300); do
+    case "$(tool_json get_export_status "{\"job_id\":$OVJOB}" | jq -r '.state')" in succeeded|failed|stopped|removed) break ;; esac
+    sleep 1
+  done
+  expect_eq "get_overview after the export: works again" false "$(tool_is_error get_overview '{"columns":1,"rows":1}')"
+else
+  echo "SKIP  get_overview while an export runs (needs MCP_APPDATA for the slow preset)"
 fi
 
 # FOOTER (later tasks insert their blocks above this line)

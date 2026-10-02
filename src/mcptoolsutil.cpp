@@ -20,14 +20,18 @@
 #include "mltcontroller.h"
 #include "models/multitrackmodel.h"
 #include "proxymanager.h"
+#include "sharedframe.h"
+#include "videowidget.h"
 
 #include <MltPlaylist.h>
 
 #include <QDir>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QHash>
 #include <QJsonDocument>
 #include <QStringList>
+#include <QTimer>
 
 #include <cmath>
 #include <limits>
@@ -140,6 +144,68 @@ void movePlayhead(int position)
         MAIN.seekTimeline(position);
     else
         MLT.seek(position);
+}
+
+QImage fetchSettledFrame(int position, QString &error, int timeoutMs)
+{
+    auto *widget = qobject_cast<Mlt::VideoWidget *>(MLT.videoWidget());
+    if (!widget) {
+        error = QStringLiteral("There is no video widget to read a frame from.");
+        return QImage();
+    }
+    // After a seek the consumer shows the frame it rendered BEFORE the seek first (the display
+    // lags one request), and Mlt::VideoWidget::requestImage() is consumed by whichever frame is
+    // displayed next, so imageReady can deliver a stale picture. Instead take the first
+    // displayed frame whose position is the requested one (the way a position-less call reads
+    // what is shown), re-pushing the frame while waiting; a timeout is an error, never a
+    // wrong image.
+    bool ready = false;
+    int matches = 0;
+    // Two skipped displays by default; with Player > Realtime off MLT.realTime() is minus the
+    // parallel worker count (-1 to -4), so more frames can be in flight.
+    const int requiredMatches = 3 + qMax(0, -MLT.realTime() - 1);
+    QImage matched;
+    QEventLoop loop;
+    QTimer timeout;
+    QTimer refresh;
+    timeout.setSingleShot(true);
+    QObject::connect(widget,
+                     &Mlt::VideoWidget::frameDisplayed,
+                     &loop,
+                     [&](const SharedFrame &frame) {
+                         if (ready || frame.get_position() != position)
+                             return;
+                         // The first match can predate an edit made just before this call
+                         // (same position, so the seek is a no-op); only a match shown after
+                         // a refresh issued by this call is trusted.
+                         if (++matches < requiredMatches) {
+                             MLT.refreshConsumer();
+                             return;
+                         }
+                         const uint8_t *data = frame.get_image(mlt_image_rgba);
+                         if (!data)
+                             return;
+                         matched = QImage(data,
+                                          frame.get_image_width(),
+                                          frame.get_image_height(),
+                                          QImage::Format_RGBA8888)
+                                       .copy();
+                         ready = true;
+                         loop.quit();
+                     });
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QObject::connect(&refresh, &QTimer::timeout, &loop, []() { MLT.refreshConsumer(); });
+    MLT.pause();
+    movePlayhead(position);
+    MLT.refreshConsumer();
+    timeout.start(timeoutMs);
+    refresh.start(200);
+    loop.exec();
+    if (!ready) {
+        error = QStringLiteral("The frame was not ready in time; try again.");
+        return QImage();
+    }
+    return matched;
 }
 
 QString kindOf(MultitrackModel &model, int track, int clip)

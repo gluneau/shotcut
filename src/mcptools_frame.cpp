@@ -18,14 +18,11 @@
 
 #include "mainwindow.h"
 #include "mltcontroller.h"
-#include "sharedframe.h"
 #include "videowidget.h"
 
 #include <QBuffer>
-#include <QEventLoop>
 #include <QImage>
 #include <QJsonDocument>
-#include <QTimer>
 
 #include <cmath>
 
@@ -65,58 +62,11 @@ QJsonObject getFrameTool(const QJsonObject &arguments)
 
     QImage image;
     if (positionArg == FrameArg::Ok) {
-        // After a seek the consumer shows the frame it rendered BEFORE the seek first (the display
-        // lags one request), and Mlt::VideoWidget::requestImage() is consumed by whichever frame is
-        // displayed next, so imageReady can deliver a stale picture. Instead take the first
-        // displayed frame whose position is the requested one (the way a position-less call reads
-        // what is shown), re-pushing the frame while waiting; a timeout is an error, never a
-        // wrong image.
         position = qMin(position, lastFrame());
-        bool ready = false;
-        int matches = 0;
-        // Two skipped displays by default; with Player > Realtime off MLT.realTime() is minus the
-        // parallel worker count (-1 to -4), so more frames can be in flight.
-        const int requiredMatches = 3 + qMax(0, -MLT.realTime() - 1);
-        QImage matched;
-        QEventLoop loop;
-        QTimer timeout;
-        QTimer refresh;
-        timeout.setSingleShot(true);
-        QObject::connect(widget,
-                         &Mlt::VideoWidget::frameDisplayed,
-                         &loop,
-                         [&](const SharedFrame &frame) {
-                             if (ready || frame.get_position() != position)
-                                 return;
-                             // The first match can predate an edit made just before this call
-                             // (same position, so the seek is a no-op); only a match shown after
-                             // a refresh issued by this call is trusted.
-                             if (++matches < requiredMatches) {
-                                 MLT.refreshConsumer();
-                                 return;
-                             }
-                             const uint8_t *data = frame.get_image(mlt_image_rgba);
-                             if (!data)
-                                 return;
-                             matched = QImage(data,
-                                              frame.get_image_width(),
-                                              frame.get_image_height(),
-                                              QImage::Format_RGBA8888)
-                                           .copy();
-                             ready = true;
-                             loop.quit();
-                         });
-        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-        QObject::connect(&refresh, &QTimer::timeout, &loop, []() { MLT.refreshConsumer(); });
-        MLT.pause();
-        movePlayhead(position);
-        MLT.refreshConsumer();
-        timeout.start(3000);
-        refresh.start(200);
-        loop.exec();
-        if (!ready)
-            return textResult("The frame was not ready in time; try again.", true);
-        image = matched;
+        QString error;
+        image = fetchSettledFrame(position, error);
+        if (!error.isEmpty())
+            return textResult(error, true);
     } else {
         image = widget->image();
     }
