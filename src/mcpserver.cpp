@@ -347,7 +347,9 @@ QByteArray McpServer::callTool(const QJsonValue &id, const QJsonObject &params)
         return rpcError(id, -32000, "A dialog is open in Shotcut; close it and try again.");
 
     m_busy = true;
+    McpTools::setToolCallRunning(true);
     const QJsonObject result = handler(arguments.toObject());
+    McpTools::setToolCallRunning(false);
     m_busy = false;
     return rpcResult(id, result);
 }

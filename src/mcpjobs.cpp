@@ -25,6 +25,7 @@
 #include <QStandardPaths>
 #include <QTimer>
 
+#include <utility>
 #include <vector>
 
 namespace McpJobs {
@@ -121,6 +122,10 @@ void finish(const std::shared_ptr<Runner> &runner,
     }
     if (runner->process && runner->process->state() != QProcess::NotRunning)
         runner->process->kill(); // its finished handler deletes it
+    // Taken out first: the callbacks may hold the record.
+    const QList<std::function<void()>> callbacks = std::exchange(record.onDone, {});
+    for (const auto &callback : callbacks)
+        callback();
 }
 
 void startStep(const std::shared_ptr<Runner> &runner)
@@ -207,6 +212,26 @@ void startStep(const std::shared_ptr<Runner> &runner)
     process->start(step.program, step.args);
 }
 
+// A new running record in the list, after dropping the oldest finished ones beyond the limit.
+std::shared_ptr<Record> newRecord(const QString &kind, const QString &key)
+{
+    auto &list = records();
+    for (auto it = list.begin(); it != list.end() && list.size() >= kMaxRecords;) {
+        if ((*it)->done)
+            it = list.erase(it);
+        else
+            ++it;
+    }
+    static int nextId = 1;
+    auto record = std::make_shared<Record>();
+    record->id = nextId++;
+    record->kind = kind;
+    record->key = key;
+    record->timer.start();
+    list.push_back(record);
+    return record;
+}
+
 } // namespace
 
 QString findProgram(const QString &name)
@@ -233,7 +258,7 @@ std::shared_ptr<Record> run(const QString &kind,
     }
     int running = 0, transcribing = 0;
     for (const auto &record : list) {
-        if (!record->done) {
+        if (!record->done && !record->follower) {
             ++running;
             transcribing += record->kind == "transcribe";
         }
@@ -246,20 +271,7 @@ std::shared_ptr<Record> run(const QString &kind,
         error = QStringLiteral("A transcription is already running; wait for it with get_job.");
         return nullptr;
     }
-    for (auto it = list.begin(); it != list.end() && list.size() >= kMaxRecords;) {
-        if ((*it)->done)
-            it = list.erase(it);
-        else
-            ++it;
-    }
-
-    static int nextId = 1;
-    auto record = std::make_shared<Record>();
-    record->id = nextId++;
-    record->kind = kind;
-    record->key = key;
-    record->timer.start();
-    list.push_back(record);
+    auto record = newRecord(kind, key);
     if (steps.isEmpty()) {
         record->done = true;
         record->state = QStringLiteral("failed");
@@ -283,6 +295,32 @@ std::shared_ptr<Record> run(const QString &kind,
     timer->start(timeoutMs);
     startStep(runner);
     return record;
+}
+
+std::shared_ptr<Record> addFollower(const QString &kind)
+{
+    auto record = newRecord(kind, QString());
+    record->follower = true;
+    return record;
+}
+
+void complete(const std::shared_ptr<Record> &record,
+              const QString &state,
+              const QJsonObject &result,
+              const QString &error)
+{
+    if (!record || record->done)
+        return;
+    record->done = true;
+    record->elapsedMs = record->timer.elapsed();
+    record->state = state;
+    record->result = result;
+    record->error = error;
+    if (state == "succeeded")
+        record->percent = 100;
+    const QList<std::function<void()>> callbacks = std::exchange(record->onDone, {});
+    for (const auto &callback : callbacks)
+        callback();
 }
 
 std::shared_ptr<Record> find(int id)

@@ -49,6 +49,16 @@ QJsonObject imageResult(const QByteArray &bytes,
 // True while an export started by export_video is queued or running.
 bool exportBusy();
 
+// McpServer marks the span of every tools/call handler with these.
+void setToolCallRunning(bool running);
+bool toolCallRunning();
+
+// Runs fn later on the GUI thread, in call order, at a moment when no tool call is executing and
+// no modal dialog or popup is open (checked every 100 ms). For edits that a background job makes
+// when it finishes (clip_normalize): a tool call may be waiting in a nested event loop when the job
+// ends, and an edit there would interleave with that tool's undo macro.
+void runWhenIdle(std::function<void()> fn);
+
 // Tool groups, registered by all(). Each lives in its own mcptools_*.cpp.
 QList<McpTool> frameTools();
 QList<McpTool> timelineTools();

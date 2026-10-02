@@ -22,11 +22,15 @@
 #include "mltcontroller.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QTimer>
+
+#include <deque>
 
 using namespace McpTools;
 
@@ -354,6 +358,61 @@ static QList<McpTool> stage1Tools()
            },"required":["key"]})"),
          triggerAction},
     };
+}
+
+namespace {
+
+bool s_toolCallRunning = false;
+
+std::deque<std::function<void()>> &idleQueue()
+{
+    static std::deque<std::function<void()>> queue;
+    return queue;
+}
+
+void drainIdleQueue()
+{
+    static QTimer *timer = nullptr;
+    auto &queue = idleQueue();
+    const bool idle = !s_toolCallRunning && !QApplication::activeModalWidget()
+                      && !QApplication::activePopupWidget();
+    // One at a time: a queued function may itself open a nested event loop or a tool call may
+    // arrive in between, so idleness is checked again before the next one.
+    if (idle && !queue.empty()) {
+        std::function<void()> fn = std::move(queue.front());
+        queue.pop_front();
+        fn();
+    }
+    if (queue.empty()) {
+        if (timer)
+            timer->stop();
+        return;
+    }
+    if (!timer) {
+        timer = new QTimer(qApp);
+        QObject::connect(timer, &QTimer::timeout, timer, drainIdleQueue);
+    }
+    if (!timer->isActive())
+        timer->start(100);
+}
+
+} // namespace
+
+void McpTools::setToolCallRunning(bool running)
+{
+    s_toolCallRunning = running;
+}
+
+bool McpTools::toolCallRunning()
+{
+    return s_toolCallRunning;
+}
+
+void McpTools::runWhenIdle(std::function<void()> fn)
+{
+    idleQueue().push_back(std::move(fn));
+    // Never run it from inside the caller's stack (which may be a job's finish handler).
+    QTimer::singleShot(0, qApp, drainIdleQueue);
 }
 
 QList<McpTool> McpTools::all()

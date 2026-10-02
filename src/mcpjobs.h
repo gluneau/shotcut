@@ -64,6 +64,11 @@ struct Record
     bool done = false;
     QElapsedTimer timer;
     qint64 elapsedMs = 0;
+    // Called once on the GUI thread when the job ends, possibly inside a nested event loop of a
+    // tool call that waits for it (defer edits with McpTools::runWhenIdle).
+    QList<std::function<void()>> onDone;
+    // A record without a process of its own (addFollower); not counted by the running-job cap.
+    bool follower = false;
 };
 
 // Runs on the GUI thread once every step exited with 0; returns false and an error to fail the job.
@@ -81,6 +86,16 @@ std::shared_ptr<Record> run(const QString &kind,
                             QString &error,
                             const QString &cacheKey = QString(),
                             int timeoutMs = 600000);
+
+// A running record of kind for work that follows another job (clip_normalize applies a gain
+// after its audio_levels job); the caller ends it with complete().
+std::shared_ptr<Record> addFollower(const QString &kind);
+
+// Ends a follower record (state succeeded or failed); no-op when it already ended.
+void complete(const std::shared_ptr<Record> &record,
+              const QString &state,
+              const QJsonObject &result,
+              const QString &error);
 
 std::shared_ptr<Record> find(int id);
 
