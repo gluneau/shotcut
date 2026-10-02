@@ -285,8 +285,8 @@ SCC="$(job_result detect_scenes "{\"track\":0,\"clip\":$SI}")"
 expect_eq "detect_scenes clip: path is the source file" "$MEDIA/scenes.mp4" "$(echo "$SCC" | jq -r '.path')"
 expect_eq "detect_scenes clip: two scenes" 2 "$(echo "$SCC" | jq -r '.scenes | length')"
 expect_eq "detect_scenes clip: source time 3.0 and 6.0" true "$(echo "$SCC" | jq -r '((.scenes[0].time_s - 3.0) | fabs < 0.1) and ((.scenes[1].time_s - 6.0) | fabs < 0.1)')"
-expect_eq "detect_scenes clip: scene 1 timeline frame is clip start + 75" true "$(echo "$SCC" | jq -r "(.scenes[0].timeline_frames - $S0 - 75) | fabs <= 2")"
-expect_eq "detect_scenes clip: scene 2 timeline frame is clip start + 150" true "$(echo "$SCC" | jq -r "(.scenes[1].timeline_frames - $S0 - 150) | fabs <= 2")"
+expect_eq "detect_scenes clip: scene 1 timeline frame is clip start + 75" "$((S0 + 75))" "$(echo "$SCC" | jq -r '.scenes[0].timeline_frames')"
+expect_eq "detect_scenes clip: scene 2 timeline frame is clip start + 150" "$((S0 + 150))" "$(echo "$SCC" | jq -r '.scenes[1].timeline_frames')"
 expect_eq "detect_scenes clip: timeline_frames is a number" number "$(echo "$SCC" | jq -r '.scenes[0].timeline_frames | type')"
 tool_json timeline_trim "{\"track\":0,\"clip\":$SI,\"edge\":\"in\",\"delta\":25,\"ripple\":true}" >/dev/null
 expect_eq "detect_scenes trimmed: in is 25" 25 "$(tool_json get_timeline '{}' | jq -r ".tracks[0].clips[$SI].in")"
@@ -295,8 +295,8 @@ SCT="$(job_result detect_scenes "{\"track\":0,\"clip\":$SI}")"
 expect_eq "detect_scenes trimmed: in_s about 1.0" true "$(echo "$SCT" | jq -r '(.in_s - 1.0) | fabs < 0.01')"
 expect_eq "detect_scenes trimmed: two scenes" 2 "$(echo "$SCT" | jq -r '.scenes | length')"
 expect_eq "detect_scenes trimmed: source time stays 3.0 and 6.0" true "$(echo "$SCT" | jq -r '((.scenes[0].time_s - 3.0) | fabs < 0.1) and ((.scenes[1].time_s - 6.0) | fabs < 0.1)')"
-expect_eq "detect_scenes trimmed: scene 1 timeline frame is clip start + 50" true "$(echo "$SCT" | jq -r "(.scenes[0].timeline_frames - $S1 - 50) | fabs <= 2")"
-expect_eq "detect_scenes trimmed: scene 2 timeline frame is clip start + 125" true "$(echo "$SCT" | jq -r "(.scenes[1].timeline_frames - $S1 - 125) | fabs <= 2")"
+expect_eq "detect_scenes trimmed: scene 1 timeline frame is clip start + 50" "$((S1 + 50))" "$(echo "$SCT" | jq -r '.scenes[0].timeline_frames')"
+expect_eq "detect_scenes trimmed: scene 2 timeline frame is clip start + 125" "$((S1 + 125))" "$(echo "$SCT" | jq -r '.scenes[1].timeline_frames')"
 tool_json timeline_trim "{\"track\":0,\"clip\":$SI,\"edge\":\"in\",\"delta\":75,\"ripple\":true}" >/dev/null
 SCE="$(job_result detect_scenes "{\"track\":0,\"clip\":$SI}")"
 expect_eq "detect_scenes clip trimmed past the first cut: one scene" 1 "$(echo "$SCE" | jq -r '.scenes | length')"
@@ -315,6 +315,36 @@ expect_eq "locked scenes clip: track 0 is locked after reopening" true "$(tool_j
 SL="$(job_result detect_scenes "{\"track\":0,\"clip\":$(scene_clip)}")"
 expect_eq "locked scenes clip: detect_scenes works on a locked track" 1 "$(echo "$SL" | jq -r '.scenes | length')"
 expect_eq "locked scenes clip: timeline_frames present" number "$(echo "$SL" | jq -r '.scenes[0].timeline_frames | type')"
+
+echo "== detect_scenes on a speed-changed clip"
+# scenes.mp4 at 2x speed (timewarp) on V1, written by hand: no tool changes speed yet.
+WARP="$TMP/warp-timeline.mlt"
+cat > "$WARP" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="main_bin">
+  <profile description="320x240 25 fps" width="320" height="240" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="4" display_aspect_den="3" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <playlist id="main_bin"><property name="xml_retain">1</property></playlist>
+  <producer id="black" in="0" out="111"><property name="length">112</property><property name="resource">0</property><property name="mlt_service">color</property><property name="set.test_audio">0</property></producer>
+  <playlist id="background"><entry producer="black" in="0" out="111"/></playlist>
+  <producer id="producer0" in="0" out="111"><property name="length">112</property><property name="resource">2:$MEDIA/scenes.mp4</property><property name="mlt_service">timewarp</property><property name="shotcut:producer">avformat</property><property name="warp_speed">2</property><property name="warp_resource">$MEDIA/scenes.mp4</property></producer>
+  <playlist id="playlist0"><property name="shotcut:video">1</property><property name="shotcut:name">V1</property><entry producer="producer0" in="0" out="111"/></playlist>
+  <tractor id="tractor0" in="0" out="111">
+    <property name="shotcut">1</property>
+    <track producer="background"/>
+    <track producer="playlist0"/>
+    <transition id="transition0"><property name="a_track">0</property><property name="b_track">1</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+  </tractor>
+</mlt>
+XML
+tool_json open_project "{\"path\":\"$WARP\",\"discard_changes\":true}" >/dev/null
+sleep 1
+expect_eq "speed-changed clip fixture: one clip of 112 frames" "[[0,112,0,111]]" "$(tool_json get_timeline '{}' | jq -c '[.tracks[0].clips[] | select(.kind=="clip") | [.start, .duration, .in, .out]]')"
+SW="$(job_result detect_scenes '{"track":0,"clip":0,"wait_ms":20000}')"
+expect_eq "speed-changed clip: the source file is analysed" "$MEDIA/scenes.mp4" "$(echo "$SW" | jq -r '.path')"
+expect_eq "speed-changed clip: scenes found" true "$(echo "$SW" | jq -r '.scenes | length > 0')"
+expect_eq "speed-changed clip: no scene has timeline_frames" 0 "$(echo "$SW" | jq -r '[.scenes[] | select(has("timeline_frames"))] | length')"
+tool_json open_project "{\"path\":\"$LOCKED2\",\"discard_changes\":true}" >/dev/null
+sleep 2
 
 echo "== transcribe: supplied transcripts"
 expect_eq "tools/list has transcribe" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["transcribe"])')"
@@ -381,11 +411,30 @@ expect_eq "transcribe: three-letter language fra is an error" true "$(tool_is_er
 expect_eq "transcribe: one-letter language is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"e"}')")"
 expect_eq "transcribe supplied: a zero-length word is accepted" word "$(tool_json transcribe "$(supply "$TMP/note.txt" '{"segments":[{"start_s":1,"end_s":2,"text":"a b","words":[{"start_s":1,"end_s":1,"text":"a"},{"start_s":1,"end_s":2,"text":"b"}]}]}')" | jq -r '.granularity')"
 bad_transcript "zero-length segment" '{"segments":[{"start_s":1,"end_s":1,"text":"a","words":[{"start_s":1,"end_s":1,"text":"a"}]}]}'
+expect_eq "transcribe: language with a trailing newline is an error" true "$(tool_text transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"en\n"}')" | grep -q '^language must be' && echo true || echo false)"
+expect_eq "transcribe: language auto with a trailing newline is an error" true "$(tool_text transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"auto\n"}')" | grep -q '^language must be' && echo true || echo false)"
 expect_eq "transcribe: language EN is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:"EN"}')")"
 expect_eq "transcribe: numeric language is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,language:5}')")"
 expect_eq "transcribe: wait_ms 20001 is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,wait_ms:20001}')")"
 expect_eq "transcribe: neither path nor track is an error" true "$(tool_is_error transcribe '{}')"
 expect_eq "transcribe: path and track is an error" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p,track:0}')")"
+
+# At most 200 files hold a supplied transcript; audioonly.wav and note.txt hold one already.
+mkdir -p "$TMP/cap"
+ONE='{"segments":[{"start_s":0,"end_s":1,"text":"cap"}]}'
+ok=0
+for i in $(seq 1 198); do
+  : > "$TMP/cap/$i.wav"
+  [ "$(tool_is_error transcribe "$(supply "$TMP/cap/$i.wav" "$ONE")")" = false ] && ok=$((ok + 1))
+done
+expect_eq "transcribe supplied cap: 200 files accepted" 198 "$ok"
+: > "$TMP/cap/199.wav"
+expect_eq "transcribe supplied cap: the 201st file is an error" true "$(tool_is_error transcribe "$(supply "$TMP/cap/199.wav" "$ONE")")"
+expect_eq "transcribe supplied cap: the error names the cap" true "$(tool_text transcribe "$(supply "$TMP/cap/199.wav" "$ONE")" | grep -q '200 files' && echo true || echo false)"
+expect_eq "transcribe supplied cap: nothing stored for the refused file" false "$(call_tool transcribe "$(jq -nc --arg p "$TMP/cap/199.wav" '{path:$p}')" | jq -r '.result.content[0].text | (fromjson? // {}) | .supplied // false')"
+expect_eq "transcribe supplied cap: replacing a stored file is allowed" segment "$(tool_json transcribe "$(supply "$TMP/cap/1.wav" "$TSEG")" | jq -r '.granularity')"
+expect_eq "transcribe supplied cap: the replacement is returned" two "$(tool_json transcribe "$(jq -nc --arg p "$TMP/cap/1.wav" '{path:$p}')" | jq -r '.segments[1].text')"
+expect_eq "transcribe supplied cap: the first supplied file is kept" "Hello there General Kenobi" "$(tool_json transcribe "$(jq -nc --arg p "$AOP" '{path:$p}')" | jq -r '[.segments[].words[].text] | join(" ")')"
 
 echo "== transcribe: Whisper"
 TONE="$(jq -nc --arg p "$MEDIA/tone_av.mp4" '{path:$p}')"
@@ -406,9 +455,20 @@ if [ "${NC#Whisper is not configured}" != "$NC" ]; then
 else
   echo "SKIP (whisper configured): not-configured checks"
   # the call above started a job on tone_av.mp4
-  expect_eq "transcribe tone_av: the job ends" true "$(wait_job "$(echo "$NC" | jq -r '.job_id')" 120 | jq -r '.state != "running"')"
+  NCJ="$(wait_job "$(echo "$NC" | jq -r '.job_id')" 120)"
+  expect_eq "transcribe tone_av: the job ends" true "$(echo "$NCJ" | jq -r '.state != "running"')"
   JFK_SRC="${JFK_WAV:-$HOME/GitHub/whisper.cpp/samples/jfk.wav}"
-  if [ ! -f "$JFK_SRC" ]; then
+  if [ "$(echo "$NCJ" | jq -r '.result.segments[0].text // empty')" = "Hello… world—" ]; then
+    # tools/mcp-fake-whisper.sh is configured: its canned transcript, against tone_av.mp4 (10 s).
+    echo "SKIP (fake whisper): real Whisper checks"
+    FW="$(echo "$NCJ" | jq -c '.result')"
+    expect_eq "fake whisper: granularity word, language en" "word en" "$(echo "$FW" | jq -r '"\(.granularity) \(.language)"')"
+    expect_eq "fake whisper: the segment clamped to nothing at the end is dropped" 1 "$(echo "$FW" | jq '.segments | length')"
+    expect_eq "fake whisper: words keep their Unicode punctuation" '["Hello…","world—"]' "$(echo "$FW" | jq -c '[.segments[0].words[].text]')"
+    expect_eq "fake whisper: an ellipsis does not stretch the word (0-0.5 s)" "0 0.5" "$(echo "$FW" | jq -r '.segments[0].words[0] | "\(.start_s) \(.end_s)"')"
+    expect_eq "fake whisper: an em dash does not stretch the word (3-3.5 s)" "3 3.5" "$(echo "$FW" | jq -r '.segments[0].words[1] | "\(.start_s) \(.end_s)"')"
+    expect_eq "fake whisper: the result round-trips as a supplied transcript" word "$(tool_json transcribe "$(jq -c --arg p "$TMP/note.txt" '{path:$p,transcript:{segments:.segments}}' <<<"$FW")" | jq -r '.granularity')"
+  elif [ ! -f "$JFK_SRC" ]; then
     fail "transcribe whisper" "$JFK_SRC is missing (set JFK_WAV)"
   else
     cp "$JFK_SRC" "$MEDIA/jfk.wav"

@@ -580,24 +580,29 @@ QString keyOf(const QString &path)
 
 } // namespace
 
-void store(const QString &path, const QJsonObject &transcript)
+bool store(const QString &path, const QJsonObject &transcript)
 {
     Store &s = transcriptStore();
     const QString key = keyOf(path);
+    const auto it = s.transcripts.constFind(key);
+    const bool replacesSupplied = it != s.transcripts.constEnd() && it->value("supplied").toBool();
     // Only Whisper results are evicted; a supplied transcript stays until Shotcut quits.
     if (transcript.value("supplied").toBool()) {
+        // Every entry outside order is a supplied one.
+        if (!replacesSupplied && s.transcripts.size() - s.order.size() >= kMaxSupplied)
+            return false;
         s.order.removeOne(key);
         s.transcripts.insert(key, transcript);
-        return;
+        return true;
     }
-    const auto it = s.transcripts.constFind(key);
-    if (it != s.transcripts.constEnd() && it->value("supplied").toBool())
-        return;
+    if (replacesSupplied)
+        return true;
     s.order.removeOne(key);
     s.order.append(key);
     if (s.order.size() > kMaxTranscripts)
         s.transcripts.remove(s.order.takeFirst());
     s.transcripts.insert(key, transcript);
+    return true;
 }
 
 bool get(const QString &path, QJsonObject &transcript)

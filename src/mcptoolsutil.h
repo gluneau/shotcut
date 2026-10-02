@@ -139,10 +139,13 @@ QJsonArray mapRangeToTimeline(const SourceRef &ref, double startSec, double endS
 // Transcripts per source file in memory (until Shotcut quits), as transcribe returns them:
 // {path, granularity, segments:[{start_s, end_s, text, words?}], ...} in source seconds. A
 // supplied transcript carries "supplied": true, is not replaced by a later Whisper result and is
-// never evicted; only the 50 most recent Whisper results are kept.
+// never evicted; only the 50 most recent Whisper results are kept. At most kMaxSupplied paths hold
+// a supplied transcript: store() refuses another path (returns false) but may replace one.
 namespace McpTranscripts {
 
-void store(const QString &path, const QJsonObject &transcript);
+constexpr int kMaxSupplied = 200;
+
+bool store(const QString &path, const QJsonObject &transcript);
 bool get(const QString &path, QJsonObject &transcript);
 
 } // namespace McpTranscripts

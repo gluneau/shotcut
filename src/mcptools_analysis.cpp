@@ -830,11 +830,13 @@ QString whisperDiagnostics(const McpJobs::StepOutput &output)
     return QString::fromUtf8(output.err.right(2048) + output.out.right(2048)).trimmed();
 }
 
-// A token without letters or digits (punctuation) joins the word's text but not its time.
+// A punctuation token (ASCII without letters or digits, or Unicode punctuation such as an
+// ellipsis or a dash) joins the word's text but not its time. A token holding only part of a
+// split UTF-8 character decodes to U+FFFD and counts as a word piece.
 bool isPunctuation(const QString &bytes)
 {
-    for (const QChar c : bytes) {
-        if (c.isLetterOrNumber() || c.unicode() >= 0x80)
+    for (const QChar c : utf8Of(bytes)) {
+        if (c.unicode() < 0x80 ? c.isLetterOrNumber() : !c.isPunct())
             return false;
     }
     return true;
@@ -883,6 +885,10 @@ bool parseWhisper(const SourceRef &ref,
         const double end = qBound(start,
                                   range.in + offsets.value("to").toDouble() / 1000,
                                   range.out);
+        // A segment past the end of the range is clamped to nothing; a zero-length segment would
+        // also be refused when the result is supplied back as a transcript.
+        if (round3(end) <= round3(start))
+            continue;
         QList<Word> words;
         for (const QJsonValue &tokenValue : segment.value("tokens").toArray()) {
             const QJsonObject token = tokenValue.toObject();
@@ -963,7 +969,13 @@ QJsonObject storeTranscript(const QJsonObject &arguments)
         || !readTranscript(arguments.value("transcript"), ref.path, transcript, error)) {
         return textResult(error, true);
     }
-    McpTranscripts::store(ref.path, transcript);
+    if (!McpTranscripts::store(ref.path, transcript)) {
+        return textResult(QStringLiteral("Transcripts are already supplied for %1 files, the "
+                                         "most kept; nothing was stored. Replace the transcript "
+                                         "of one of those files instead.")
+                              .arg(McpTranscripts::kMaxSupplied),
+                          true);
+    }
     return jsonResult(transcript);
 }
 
@@ -976,7 +988,8 @@ QJsonObject transcribeTool(const QJsonObject &arguments)
     const QJsonValue languageValue = arguments.value("language");
     if (!languageValue.isUndefined()) {
         // The shape of Whisper's own codes; whisper-cli itself rejects an unknown one.
-        static const QRegularExpression code(QStringLiteral("^([a-z]{2}|auto|haw|yue)$"));
+        static const QRegularExpression code(
+            QRegularExpression::anchoredPattern(QStringLiteral("[a-z]{2}|auto|haw|yue")));
         language = languageValue.toString();
         if (!languageValue.isString() || !code.match(language).hasMatch()) {
             return textResult("language must be auto or a Whisper language code (ISO 639-1, e.g. "
@@ -1426,9 +1439,11 @@ QList<McpTool> McpTools::analysisTools()
          "[{time_s, score, timeline_frames}]: time_s is the first frame of the new scene in "
          "seconds in the SOURCE file, score (0 to 1, 3 decimals) how different it is from the "
          "frame before, and for a clip source timeline_frames the timeline frame number of that "
-         "time (omitted when it does not map, e.g. speed changed). threshold (0.05 to 0.9, "
-         "default 0.3) is the lowest score reported; a gradual change scores lower than a hard "
-         "cut, so a high threshold misses soft cuts. A source without video is an error. "
+         "time (omitted when it does not map, e.g. speed changed). A cut on the very first frame "
+         "of the analysed range is never reported (there is no frame before it to compare). "
+         "threshold (0.05 to 0.9, default 0.3) is the lowest score reported; a gradual change "
+         "scores lower than a hard cut, so a high threshold misses soft cuts. A source without "
+         "video is an error. "
          "wait_ms (0 to 20000, default 0) waits for the result; without it, or when slower, "
          "{job_id, state} is returned to poll with get_job. Results are cached (\"cached\": true).",
          schema(R"({"type":"object","properties":{
@@ -1446,9 +1461,12 @@ QList<McpTool> McpTools::analysisTools()
          "transcribed; a locked track is fine). Returns {path, in_s, out_s, language, granularity, "
          "segments} where segments is [{start_s, end_s, text, words:[{start_s, end_s, text}]}], "
          "all times in seconds in the SOURCE file (words inside their segment, in order; a word "
-         "may have start_s == end_s). granularity is \"word\", or \"segment\" (no words) when "
-         "the program gave no word times; audio without speech gives segments []. For a clip "
-         "source every segment and word also has timeline_frames, [{start, end (exclusive)}] on "
+         "may have start_s == end_s; a segment that has no length once clamped to the analysed "
+         "range is dropped; punctuation, also Unicode such as an ellipsis or a dash, joins a "
+         "word's text but does not extend its end). granularity is \"word\", or \"segment\" "
+         "(no words) when the program gave no word times; audio without speech gives segments "
+         "[]. For a clip source every segment and word also has timeline_frames, [{start, end "
+         "(exclusive)}] on "
          "the timeline, empty when it does not map (speed changed). language (default auto) is "
          "auto or a Whisper language code (ISO 639-1, e.g. en, fr); the result names the "
          "detected one. A source without audio is an error, and so is Whisper not being "
@@ -1459,7 +1477,8 @@ QList<McpTool> McpTools::analysisTools()
          "transcript (and nothing else) with transcript {segments:[{start_s, end_s, text, "
          "words?}]}: 1 to 5000 segments sorted by start_s, 0 <= start_s < end_s <= 86400 (words "
          "start_s <= end_s), text non-empty (at most 2000 characters), words inside their "
-         "segment and in order. It is kept in memory for that file until Shotcut quits, with "
+         "segment and in order. It is kept in memory for that file until Shotcut quits (for at "
+         "most 200 files: another file is then refused, replacing one is allowed), with "
          "\"supplied\": true and granularity \"word\" when every segment has words, else "
          "\"segment\"; transcribe with only that path then returns it, and "
          "captions_from_transcript uses it. A track and clip call always runs Whisper; it does "
