@@ -129,9 +129,16 @@ void startStep(const std::shared_ptr<Runner> &runner)
     runner->process = process;
     process->setProcessChannelMode(QProcess::SeparateChannels);
     process->setStandardInputFile(QProcess::nullDevice());
-    QObject::connect(process, &QProcess::readyReadStandardOutput, process, [runner, process] {
-        appendCapped(runner->out, process->readAllStandardOutput(), false);
-    });
+    QObject::connect(process,
+                     &QProcess::readyReadStandardOutput,
+                     process,
+                     [runner, process, step] {
+                         const QByteArray data = process->readAllStandardOutput();
+                         if (step.onStdout)
+                             step.onStdout(data);
+                         else
+                             appendCapped(runner->out, data, false);
+                     });
     QObject::connect(process, &QProcess::readyReadStandardError, process, [runner, process] {
         appendCapped(runner->err, process->readAllStandardError(), true);
     });
@@ -155,7 +162,11 @@ void startStep(const std::shared_ptr<Runner> &runner)
                          process->deleteLater();
                          if (runner->record->done)
                              return;
-                         appendCapped(runner->out, process->readAllStandardOutput(), false);
+                         const QByteArray rest = process->readAllStandardOutput();
+                         if (step.onStdout)
+                             step.onStdout(rest);
+                         else
+                             appendCapped(runner->out, rest, false);
                          appendCapped(runner->err, process->readAllStandardError(), true);
                          const QString name = QFileInfo(step.program).fileName();
                          if (status != QProcess::NormalExit || exitCode != 0) {
