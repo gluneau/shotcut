@@ -526,19 +526,29 @@ the same clip) and sets the clip's volume to `target - measured`, rounded to 0.0
 to -70..24, with `clip_set_volume`'s logic and the undo text `Normalize to <t> LUFS`.
 
 - When the measurement is done within `wait_ms` (or cached) the call returns `{measured_lufs,
-  applied_gain_db, target_lufs, changed, track, index?}` and the edit is already made.
+  applied_gain_db, target_lufs, changed, clip, track, index?}` and the edit is already made
+  (`clip` and `track` say where the clip was found, see below).
 - Otherwise it returns `{job_id, state: "running", measure_job_id}` at once (`measure_job_id` is
   the `audio_levels` job). The gain is then applied AUTOMATICALLY when the measurement ends:
   `get_job(job_id)` shows `succeeded` with the same result object, or `failed` with the reason,
-  and the change is an ordinary undo step made at that moment (it lands on top of whatever the
-  user or other tools did meanwhile). The application waits until no tool call is running and
-  no modal dialog or popup menu is open (`McpTools::runWhenIdle`, checked every 100 ms), so it
-  never interleaves with another tool's undo macro or runs inside a waiting call's event loop.
-- Before editing, the call checks that the same project and timeline are open (a timeline that
-  was closed, reopened or replaced fails with "The project was closed or replaced while
-  measuring") and that the clip at `(track, clip)` still has the same start, in, out and source
-  file ("The clip changed while measuring"). Edits elsewhere on the timeline do not matter. In
-  both failure cases nothing is edited.
+  and the change is an ordinary undo step made at that moment: it lands on top of whatever the
+  user or other tools did meanwhile and, like any edit, discards the redo history. The
+  application waits until no tool call is running and no modal dialog or popup menu is open
+  (`McpTools::runWhenIdle`, checked every 100 ms), so it never interleaves with another tool's
+  undo macro or runs inside a waiting call's event loop (the smoke test checks the order of two
+  overlapping normalizations).
+- Before editing, the call checks that the timeline it measured is still open: a timeline that
+  was closed, reopened or replaced by another project fails with "The project was closed or
+  replaced while measuring" (a counter of timeline creations and closings; saving the project,
+  also under a new name, does not count). It then finds the clip again by identity, not by index:
+  the same in, out and source file, and the same start, or, if it was moved, the same Shotcut
+  clip id (the parent producer's `_shotcut:uuid`, stamped at call time as Shotcut's undo helper
+  does; moves keep it). A match on the original track wins; exactly one match is required. So a
+  split of an earlier clip, a new video track shifting the rows, or a move of the clip itself do
+  not matter, while a trim, a removal or a replacement of the clip fails with "The clip changed
+  while measuring". In both failure cases nothing is edited.
+- A computed gain of exactly 0.00 dB removes an existing gain filter of the clip (as
+  `gain_db: 0` does); the indexes of the clip's later filters then shift down by one.
 - Refused: a locked track (also when it is locked by the time the measurement ends), a blank or
   transition, a clip without audio, a clip with a speed change (its source range is not
   measured correctly), and a silent source: `audio_levels` reports -70 LUFS for silence, and a
@@ -563,7 +573,10 @@ when built against it; THIS build uses MLT 7.36.1, where the tool returns "Audio
 7.41 or newer (this is 7.36.1)." and changes nothing, so the editing path is untested here. The
 check is made at run time (`mlt_version_get_int()`), after the track checks. Shotcut's ducking
 commands look the transition up in the player's producer, so the tool switches the player to the
-timeline when it shows a source clip.
+timeline when it shows a source clip. Undo of an `enabled: false` call leaves ducking OFF:
+Shotcut's `ChangeDuckThresholdCommand::undo` reads `shotcut:duck_enabled` after its own redo
+changed it (Shotcut's own enable checkbox has the same bug). Undo of an enabling call restores the
+previous state.
 
 `clip_detach_audio`: Shotcut's Detach Audio (`TimelineDock::detachAudio`, no dialog, explicit
 indexes) as ONE undo step `Detach audio`: the video clip keeps its place with its audio switched
@@ -581,16 +594,22 @@ afterwards.
 - `clip_normalize` measures the clip's source, not the mix: track gain, fades, ducking and other
   filters are ignored. The gain is computed once: trimming the clip later does not update it.
 - A background `clip_normalize` application runs from the GUI event loop when no tool call is
-  running; a Shotcut operation that spins its own event loop without a modal dialog could, in
-  principle, see the edit land in the middle of it (none is known).
-- The timeline identity check counts timeline creations and closings, so a project reopened under
-  the same name is detected; the clip check compares start, in, out and source path, so replacing
-  the clip with another trim of the same file at the same place would be taken for the same clip.
-- `track_set_ducking` is untested end to end (MLT 7.36.1 here). Shotcut's
-  `ChangeDuckThresholdCommand::undo` reads the enabled flag after its own redo set it, so an undo
-  leaves `shotcut:duck_enabled` and `shotcut:duck_threshold` on the transition (the effective
-  `duck_threshold` is restored); `ChangeTransitionPropertyCommand::undo` writes 0 for a property
-  that was not set before. Both are upstream behaviour.
+  running. The idle check sees only QWidget modal dialogs and popups: a QML context menu, a
+  native file dialog or a Shotcut operation that spins its own event loop without a modal
+  QWidget could, in principle, see the edit land in the middle of it.
+- A queued application still runs when the MCP server is stopped in the meantime (the job then
+  ends as usual; it is only visible again through `get_job` once the server runs).
+- A clip removed and put back with the same file, trim and start (without its Shotcut clip id)
+  is taken for the same clip.
+- `track_set_ducking` is untested end to end (MLT 7.36.1 here). Besides the `enabled: false` undo
+  above, Shotcut's `ChangeDuckThresholdCommand::undo` leaves its `shotcut:duck_enabled` and
+  `shotcut:duck_threshold` shadow properties on the transition, and
+  `ChangeTransitionPropertyCommand::undo` writes 0 for a property that was not set before. All
+  upstream behaviour, not compensated by the tool.
+- Test coverage gaps: no test of the "no audio mix transition" error (Shotcut gives every track
+  one), no test of `clip_normalize` refused by the 4-running-jobs cap, the ducking edit path
+  (needs MLT 7.41), and the failure branches of the filter commands' undo (a failed detach or
+  re-attach cannot be provoked through the tools).
 - `clip_detach_audio` uses Shotcut's command, whose undo snapshots are subject to the upstream
   snapshot race described in stage 3A; the tool wraps it in the same preview guard as the other
   structural edits.
@@ -676,9 +695,9 @@ Stage 3B has its own script, also needing a FRESH throwaway Shotcut:
 It needs bash, curl, jq and ffmpeg. It builds a timeline from the generated fixtures, adds,
 changes and removes filters with their undo and redo, saves and reopens a copy of the project,
 and checks the refusals. The audio recipe checks export a normalized clip (`x264-medium`, needs
-`melt-7` as for stage 2) and run two background `clip_normalize` jobs on a generated 2400 s file
-(about 7 s each on a debug build); if a measurement ends before the script can change the clip,
-that check prints SKIP.
+`melt-7` as for stage 2) and run several background `clip_normalize` jobs on generated 2400 s
+and 3600 s files (about 7 and 10 s each on a debug build); if a measurement ends before the script
+can change the clip, that check prints SKIP.
 
 Manual checks (they need a modified project, which the tools cannot create):
 

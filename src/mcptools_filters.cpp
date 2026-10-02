@@ -37,8 +37,10 @@
 #include <QRectF>
 #include <QRegularExpression>
 #include <QScopedPointer>
+#include <QPair>
 #include <QStringList>
 #include <QUndoStack>
+#include <QUuid>
 
 #include <cmath>
 #include <memory>
@@ -969,7 +971,7 @@ struct Normalize
     int track = 0, clip = 0;
     int start = 0, frameIn = 0, frameOut = 0;
     QString path;
-    QString project;
+    QUuid uuid; // of the clip's parent producer, stamped at call time
     int generation = 0;
     double target = -16;
     std::shared_ptr<McpJobs::Record> levels;
@@ -977,24 +979,51 @@ struct Normalize
     bool handled = false;
 };
 
-// The project and timeline the call measured are still open.
+// The timeline the call measured is still open (saving, also under a new name, keeps it).
 bool sameProject(const Normalize &n)
 {
-    return MAIN.isMultitrackValid() && timelineGeneration() == n.generation
-           && MAIN.fileName() == n.project;
+    return MAIN.isMultitrackValid() && timelineGeneration() == n.generation;
 }
 
-// The clip at (track, clip) is still the one the call measured: same source, place and trim.
-bool sameClip(const Normalize &n)
+// Finds the measured clip by identity, so edits elsewhere (a split of an earlier clip, a new
+// video track shifting the rows) do not matter: same in, out and source file, and either the same
+// start (and no other uuid) or, when it was moved, the same parent-producer uuid (Shotcut keeps it
+// across moves). Matches on the recorded track win; exactly one match is required.
+bool findMeasuredClip(const Normalize &n, int &track, int &clip)
 {
     MultitrackModel &model = *MAIN.timelineDock()->model();
-    if (n.track >= model.trackList().size()
-        || n.clip >= model.rowCount(model.index(n.track))
-        || kindOf(model, n.track, n.clip) != "clip")
-        return false;
-    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(n.track, n.clip);
-    return info && info->start == n.start && info->frame_in == n.frameIn
-           && info->frame_out == n.frameOut && clipSourcePath(*info) == n.path;
+    QList<QPair<int, int>> exact, moved;
+    for (int t = 0; t < model.trackList().size(); ++t) {
+        for (int c = 0; c < model.rowCount(model.index(t)); ++c) {
+            if (kindOf(model, t, c) != "clip")
+                continue;
+            std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(t, c);
+            if (!info || !info->producer || info->frame_in != n.frameIn
+                || info->frame_out != n.frameOut || clipSourcePath(*info) != n.path)
+                continue;
+            const QUuid uuid = MLT.uuid(*info->producer);
+            if (info->start == n.start && (uuid.isNull() || uuid == n.uuid))
+                exact.append({t, c});
+            else if (info->start != n.start && !n.uuid.isNull() && uuid == n.uuid)
+                moved.append({t, c});
+        }
+    }
+    for (const QList<QPair<int, int>> &found : {exact, moved}) {
+        QList<QPair<int, int>> onTrack;
+        for (const auto &f : found) {
+            if (f.first == n.track)
+                onTrack.append(f);
+        }
+        const QList<QPair<int, int>> &pick = onTrack.isEmpty() ? found : onTrack;
+        if (pick.size() == 1) {
+            track = pick.first().first;
+            clip = pick.first().second;
+            return true;
+        }
+        if (!pick.isEmpty())
+            return false;
+    }
+    return false;
 }
 
 // Applies the measured gain; the result or an error. Runs on the GUI thread outside any other
@@ -1017,7 +1046,8 @@ bool applyNormalize(Normalize &n, QJsonObject &result, QString &error)
                                "changed.");
         return false;
     }
-    if (!sameClip(n)) {
+    int track = n.track, clip = n.clip;
+    if (!findMeasuredClip(n, track, clip)) {
         error = QStringLiteral("The clip changed while measuring; nothing was changed.");
         return false;
     }
@@ -1026,13 +1056,14 @@ bool applyNormalize(Normalize &n, QJsonObject &result, QString &error)
     bool changed = false;
     int index = -1;
     const QString text = QObject::tr("Normalize to %1 LUFS").arg(num(n.target));
-    if (!setClipGain(n.track, n.clip, gain, text, changed, index, error))
+    if (!setClipGain(track, clip, gain, text, changed, index, error))
         return false;
     result = QJsonObject{{"measured_lufs", measured},
                          {"applied_gain_db", gain},
                          {"target_lufs", n.target},
                          {"changed", changed},
-                         {"track", trackJson(*MAIN.timelineDock()->model(), n.track)}};
+                         {"clip", clip},
+                         {"track", trackJson(*MAIN.timelineDock()->model(), track)}};
     if (index >= 0)
         result["index"] = index;
     return true;
@@ -1083,7 +1114,8 @@ QJsonObject clipNormalizeTool(const QJsonObject &arguments)
     n->frameIn = info->frame_in;
     n->frameOut = info->frame_out;
     n->path = clipSourcePath(*info);
-    n->project = MAIN.fileName();
+    // The same stamp UndoHelper gives every clip it records (not saved: "_" property).
+    n->uuid = MLT.ensureHasUuid(*info->producer);
     n->generation = timelineGeneration();
     info.reset();
     // The default bucket count shares audio_levels' cache.
@@ -1253,7 +1285,6 @@ QJsonObject clipDetachAudioTool(const QJsonObject &arguments)
                               .arg(target),
                           true);
     const int audioTrack = target >= 0 ? target : int(model.trackList().size());
-    const int tracksBefore = model.trackList().size();
     info.reset();
 
     EditPreviewGuard previewGuard(false);
@@ -1261,8 +1292,7 @@ QJsonObject clipDetachAudioTool(const QJsonObject &arguments)
     stack->beginMacro(QObject::tr("Detach audio"));
     dock->detachAudio(track, clip);
     std::unique_ptr<Mlt::ClipInfo> after = model.getClipInfo(track, clip);
-    const bool ok = after && after->producer && after->producer->get_int("audio_index") < 0
-                    && model.trackList().size() >= tracksBefore;
+    const bool ok = after && after->producer && after->producer->get_int("audio_index") < 0;
     if (!finishMacro(stack, ok))
         return textResult("Shotcut did not detach the audio; nothing was changed.", true);
     QJsonArray tracks;
@@ -1425,7 +1455,8 @@ QList<McpTool> McpTools::filterTools()
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},
              "filter":{"type":"string","description":"An id from filter_list_available."},
-             "params":{"type":"object","description":"Parameter values by name; rect params are {x, y, w, h} in pixels."}
+             "params":{"type":"object","description":"Parameter values by name; )"
+                R"(rect params are {x, y, w, h} in pixels."}
            },"required":["track","clip","filter"]})"),
          filterAddTool},
         {"filter_set",
@@ -1475,14 +1506,17 @@ QList<McpTool> McpTools::filterTools()
          "measured, clamped to -70..24 dB, applied like clip_set_volume as ONE undo step "
          "\"Normalize to <t> LUFS\". If the measurement finishes within wait_ms (0 to 20000, "
          "default 0; a cached measurement counts) the call returns {measured_lufs, "
-         "applied_gain_db, target_lufs, changed, track, index?}; otherwise it returns {job_id, "
+         "applied_gain_db, target_lufs, changed, clip, track, index?}; otherwise it returns {job_id, "
          "state, measure_job_id} at once and the gain is applied AUTOMATICALLY when the "
          "measurement ends (as soon as no other tool call is running): get_job(job_id) then "
-         "shows that result, and the change is an ordinary undo step made at that moment. "
+         "shows that result, and the change is an ordinary undo step made at that moment (it "
+         "discards any redo history). The clip is found again by identity (source, trim, and "
+         "start or Shotcut's clip id when it was moved), so edits elsewhere do not matter; the "
+         "result's clip and track give where it was applied. "
          "Nothing is edited (the job fails with \"The clip changed while measuring\") when the "
-         "clip at (track, clip) no longer has the same start, trim and source, or (\"The "
-         "project was closed or replaced while measuring\") the project was closed or "
-         "replaced. Refused: a locked track, a blank or transition, a clip "
+         "clip was trimmed, removed or replaced, or no single clip matches, or (\"The project "
+         "was closed or replaced while measuring\") the timeline was closed or another project "
+         "opened. A gain of exactly 0 dB removes an existing gain filter. Refused: a locked track, a blank or transition, a clip "
          "without audio, a speed-changed clip, and a silent source (integrated loudness at or "
          "below -70 LUFS). Fades, track gain and other filters are not taken into account.",
          schema(R"({"type":"object","properties":{
@@ -1501,8 +1535,11 @@ QList<McpTool> McpTools::filterTools()
          "settings but turns ducking off). ONE undo step. Refused: track 0 (the top track), a "
          "locked track, a track without an audio mix transition, and an MLT older than 7.41 "
          "(which has no ducking). The player is switched to the timeline if it shows a source "
-         "clip. Returns {track, ducking:{enabled, threshold_db, reduction_db, fade_in_ms, "
-         "fade_out_ms, duck_threshold}} (duck_threshold: the value MLT uses, 0 when disabled).",
+         "clip. Undo of an enabled:false call leaves ducking off (Shotcut's ducking undo command "
+         "reads the enabled flag after its own redo changed it; Shotcut's checkbox has the same "
+         "bug); undo of an enabling call works. Returns {track, ducking:{enabled, threshold_db, "
+         "reduction_db, fade_in_ms, fade_out_ms, duck_threshold}} (duck_threshold: the value "
+         "MLT uses, 0 when disabled).",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":1},
              "threshold_db":{"type":"number","minimum":-70,"maximum":0},

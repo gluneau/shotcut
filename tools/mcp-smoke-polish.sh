@@ -489,50 +489,124 @@ EL="$(tool_json audio_levels "$(jq -nc --arg p "$OUTN" '{path:$p,wait_ms:20000}'
 echo "INFO  normalize: measured $(echo "$N" | jq .measured_lufs) LUFS, gain $(echo "$N" | jq .applied_gain_db) dB, export $(echo "$EL" | jq .integrated_lufs) LUFS"
 expect_eq "export normalize: the export's integrated loudness is within 1.5 LU of -16" true "$(echo "$EL" | jq '(.integrated_lufs + 16) | fabs <= 1.5')"
 
-echo "== clip_normalize: the clip changes while measuring"
+echo "== clip_normalize: edits while measuring"
 # 8 kHz 8-bit audio measures at about 350 s of audio per second (job cap test): 2400 s ~ 7 s.
+# A measurement is cached per clip place and trim, so every check first moves the clip to a
+# place not measured yet.
 ffmpeg -v error -nostdin -y -f lavfi -i "sine=frequency=440:duration=2400:sample_rate=8000" -c:a pcm_u8 "$TMP/long_norm.wav"
 AT2="$(tool_json track_add '{"type":"audio"}' | jq '.added.index')"
 ins "$TMP/long_norm.wav" 0 2400 "$AT2" 0
-NS0="$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa "$AT2" 0)"
-J="$(tool_json clip_normalize "{\"track\":$AT2,\"clip\":0}")"
-JID="$(echo "$J" | jq -r '.job_id // empty')"
-if [ -z "$JID" ]; then
-  echo "SKIP: changed-while-measuring: the measurement finished at once ($J)"
+# lclip TRACK [NAME]: index of the clip named NAME (default long_norm.wav) on TRACK.
+lclip() { tool_json get_timeline '{}' | jq "[.tracks[$1].clips[] | .name == \"${2:-long_norm.wav}\"] | index(true)"; }
+lstart() { tool_json get_timeline '{}' | jq ".tracks[$1].clips[$(lclip "$1")].start"; }
+gains() { fa "$1" "$2" | jq -c '[.filters[] | select(.id=="gain") | .params.level]'; }
+tlstate() { echo "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa "$1" "$(lclip "$1")")"; }
+# norm_start TRACK CLIP [TARGET]: clip_normalize with wait_ms 0; sets JID (empty when it finished
+# at once) and MJ (its measure job).
+norm_start() {
+  J="$(tool_json clip_normalize "{\"track\":$1,\"clip\":$2,\"target_lufs\":${3:--16}}")"
+  JID="$(echo "$J" | jq -r '.job_id // empty')"; MJ="$(echo "$J" | jq -r '.measure_job_id // empty')"
+}
+measuring() { [ -n "$JID" ] && [ "$(tool_json get_job "{\"job_id\":$MJ}" | jq -r '.state')" = running ]; }
+lmove() { tool_json timeline_move "{\"track\":$1,\"clip\":$(lclip "$1"),\"to_start\":$(( $(lstart "$1") + 100 ))}" >/dev/null; }
+
+# Trimming the clip during the measurement: nothing is applied.
+NS0="$(tlstate "$AT2")"
+norm_start "$AT2" "$(lclip "$AT2")"
+tool_json timeline_trim "{\"track\":$AT2,\"clip\":$(lclip "$AT2"),\"edge\":\"in\",\"delta\":10}" >/dev/null
+if measuring; then
+  expect_eq "trimmed: wait_ms 0 returned a running job" running "$(echo "$J" | jq -r '.state')"
+  F="$(wait_job "$JID" 120)"
+  expect_eq "trimmed: the job failed" failed "$(echo "$F" | jq -r '.state')"
+  expect_eq "trimmed: the job's error" "The clip changed while measuring; nothing was changed." "$(echo "$F" | jq -r '.error')"
+  expect_eq "trimmed: no gain filter was added" '[]' "$(gains "$AT2" "$(lclip "$AT2")")"
 else
-  expect_eq "changing: wait_ms 0 returns a running job" running "$(echo "$J" | jq -r '.state')"
-  tool_json timeline_move "{\"track\":$AT2,\"clip\":0,\"to_start\":100}" >/dev/null
-  MS="$(tool_json get_job "{\"job_id\":$(echo "$J" | jq '.measure_job_id')}" | jq -r '.state')"
-  if [ "$MS" != running ]; then
-    echo "SKIP: changed-while-measuring: the measurement ended before the move ($MS)"
+  echo "SKIP: trimmed while measuring: the measurement was not running at the trim ($J)"
+fi
+undo_text >/dev/null
+expect_eq "trimmed: undo of the trim gives the start" "$NS0" "$(tlstate "$AT2")"
+
+# Moving the clip during the measurement: it is the same clip (Shotcut's clip id), so it applies.
+lmove "$AT2"
+norm_start "$AT2" "$(lclip "$AT2")" -18
+lmove "$AT2"
+if measuring; then
+  NBM="$(tlstate "$AT2")"
+  F="$(wait_job "$JID" 120)"
+  expect_eq "moved: the job succeeded" succeeded "$(echo "$F" | jq -r '.state')"
+  expect_eq "moved: the job result has the applied gain" true "$(echo "$F" | jq '.result | (.target_lufs == -18) and ((.target_lufs - .measured_lufs - .applied_gain_db) | fabs < 0.1)')"
+  expect_eq "moved: the result names the moved clip" "$AT2 $(lclip "$AT2")" "$(echo "$F" | jq -r '"\(.result.track.index) \(.result.clip)"')"
+  expect_eq "moved: the gain filter is on the moved clip" "$(echo "$F" | jq -c '[.result.applied_gain_db]')" "$(gains "$AT2" "$(lclip "$AT2")")"
+  expect_eq "moved: it is an ordinary undo step" "Normalize to -18 LUFS" "$(undo_text)"
+  expect_eq "moved: undo restores" "$NBM" "$(tlstate "$AT2")"
+else
+  echo "SKIP: moved while measuring: the measurement was not running at the move ($J)"
+fi
+
+# Splitting an EARLIER clip during the measurement shifts the clip's index: it still applies.
+ins "$MEDIA/audioonly.wav" 0 2 "$AT2" 0
+norm_start "$AT2" "$(lclip "$AT2")"
+BEFORE_IDX="$(lclip "$AT2")"
+tool_json timeline_split "{\"track\":$AT2,\"position\":25}" >/dev/null
+if measuring; then
+  expect_eq "split earlier: the clip's index moved up by one" "$(( BEFORE_IDX + 1 ))" "$(lclip "$AT2")"
+  F="$(wait_job "$JID" 120)"
+  expect_eq "split earlier: the job succeeded" succeeded "$(echo "$F" | jq -r '.state')"
+  expect_eq "split earlier: applied to the right clip" "$(echo "$F" | jq -c '[.result.applied_gain_db]')" "$(gains "$AT2" "$(lclip "$AT2")")"
+  expect_eq "split earlier: the split halves have no gain" '[[],[]]' "$(echo "[$(gains "$AT2" 0),$(gains "$AT2" 1)]" | jq -c .)"
+  expect_eq "split earlier: undo text" "Normalize to -16 LUFS" "$(undo_text)"
+else
+  echo "SKIP: split earlier while measuring: the measurement was not running at the split ($J)"
+fi
+
+# A new video track during the measurement shifts every row: it still applies.
+lmove "$AT2"
+norm_start "$AT2" "$(lclip "$AT2")"
+tool_json track_add '{"type":"video"}' >/dev/null
+if measuring; then
+  NT=$(( AT2 + 1 ))
+  F="$(wait_job "$JID" 120)"
+  expect_eq "row shift: the job succeeded" succeeded "$(echo "$F" | jq -r '.state')"
+  expect_eq "row shift: the result names the shifted track" "$NT" "$(echo "$F" | jq '.result.track.index')"
+  expect_eq "row shift: applied to the right clip" "$(echo "$F" | jq -c '[.result.applied_gain_db]')" "$(gains "$NT" "$(lclip "$NT")")"
+  expect_eq "row shift: undo text" "Normalize to -16 LUFS" "$(undo_text)"
+else
+  echo "SKIP: track added while measuring: the measurement was not running at the add ($J)"
+  undo_text >/dev/null
+fi
+undo_text >/dev/null # the track_add
+expect_eq "row shift: back to the original rows" audio "$(tool_json get_timeline '{}' | jq -r ".tracks[$AT2].type")"
+
+echo "== clip_normalize: a background apply waits for the running tool call"
+# A (2400 s) is started with wait_ms 0, then B (3600 s) with wait_ms 20000. A's measurement ends
+# inside B's call; its gain must be applied only after B's call returned, so A's undo step is the
+# newest (without the gate it would land inside B's wait, before B's own step).
+ffmpeg -v error -nostdin -y -f lavfi -i "sine=frequency=440:duration=3600:sample_rate=8000" -c:a pcm_u8 "$TMP/long_b.wav"
+AT3="$(tool_json track_add '{"type":"audio"}' | jq '.added.index')"
+ins "$TMP/long_b.wav" 0 3600 "$AT3" 0
+lmove "$AT2"
+norm_start "$AT2" "$(lclip "$AT2")" -18
+JA="$JID"
+if ! measuring; then
+  echo "SKIP: idle gate: A's measurement was not running when B started ($J)"
+else
+  B="$(tool_json clip_normalize "{\"track\":$AT3,\"clip\":0,\"target_lufs\":-20,\"wait_ms\":20000}")"
+  AMS="$(tool_json get_job "{\"job_id\":$MJ}" | jq -r '.state')"
+  if ! echo "$B" | jq -e 'has("applied_gain_db")' >/dev/null; then
+    echo "SKIP: idle gate: B did not finish within its wait ($B)"
+    wait_job "$(echo "$B" | jq -r '.job_id')" 120 >/dev/null
+    wait_job "$JA" 120 >/dev/null
+  elif [ "$AMS" != succeeded ]; then
+    echo "SKIP: idle gate: A's measurement had not ended when B's call returned ($AMS)"
+    wait_job "$JA" 120 >/dev/null
   else
-    F="$(wait_job "$JID" 120)"
-    expect_eq "changing: the job failed" failed "$(echo "$F" | jq -r '.state')"
-    expect_eq "changing: the job's error" "The clip changed while measuring; nothing was changed." "$(echo "$F" | jq -r '.error')"
-    expect_eq "changing: no gain filter was added" '{"filters":[]}' "$(fa "$AT2" 1)"
-    expect_eq "changing: the last undo step is the move" "Move timeline clip" "$(undo_text)"
-    expect_eq "changing: undo of the move gives the start" "$NS0" "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa "$AT2" 0)"
-    redo_text >/dev/null
+    FA="$(wait_job "$JA" 120)"
+    expect_eq "idle gate: A's job succeeded" succeeded "$(echo "$FA" | jq -r '.state')"
+    expect_eq "idle gate: A's step is the newest (applied after B's call)" "Normalize to -18 LUFS" "$(undo_text)"
+    expect_eq "idle gate: B's step is before it" "Normalize to -20 LUFS" "$(undo_text)"
   fi
 fi
-echo "== clip_normalize: applied in the background"
-# The clip now starts at frame 100 (or 0 after a SKIP): a range not measured yet either way.
-NC="$(tool_json get_timeline '{}' | jq "[.tracks[$AT2].clips[] | .kind == \"clip\"] | index(true)")"
-tool_json timeline_move "{\"track\":$AT2,\"clip\":$NC,\"to_start\":200}" >/dev/null
-NC="$(tool_json get_timeline '{}' | jq "[.tracks[$AT2].clips[] | .kind == \"clip\"] | index(true)")"
-NB0="$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa "$AT2" "$NC")"
-J="$(tool_json clip_normalize "{\"track\":$AT2,\"clip\":$NC,\"target_lufs\":-18}")"
-JID="$(echo "$J" | jq -r '.job_id // empty')"
-if [ -z "$JID" ]; then
-  echo "SKIP: background normalize: the measurement finished at once ($J)"
-else
-  F="$(wait_job "$JID" 120)"
-  expect_eq "background: the job succeeded" succeeded "$(echo "$F" | jq -r '.state')"
-  expect_eq "background: the job result has the applied gain" true "$(echo "$F" | jq '.result | (.target_lufs == -18) and ((.target_lufs - .measured_lufs - .applied_gain_db) | fabs < 0.1)')"
-  expect_eq "background: the gain filter is on the clip" "$(echo "$F" | jq -c '[.result.applied_gain_db]')" "$(fa "$AT2" "$NC" | jq -c '[.filters[] | select(.id=="gain") | .params.level]')"
-  expect_eq "background: it is an ordinary undo step" "Normalize to -18 LUFS" "$(undo_text)"
-  expect_eq "background: undo restores" "$NB0" "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa "$AT2" "$NC")"
-fi
+rm -f "$TMP/long_b.wav"
 
 echo "== track_set_ducking"
 DS0="$(tool_json get_timeline '{}' | jq -c 'del(.position)')"
@@ -554,10 +628,8 @@ for a in '"threshold_db":1' '"reduction_db":-71' '"fade_in_ms":5001' '"fade_out_
 done
 
 echo "== clip_normalize: the project is replaced while measuring"
-NC="$(tool_json get_timeline '{}' | jq "[.tracks[$AT2].clips[] | .kind == \"clip\"] | index(true)")"
-tool_json timeline_move "{\"track\":$AT2,\"clip\":$NC,\"to_start\":300}" >/dev/null
-NC="$(tool_json get_timeline '{}' | jq "[.tracks[$AT2].clips[] | .kind == \"clip\"] | index(true)")"
-J="$(tool_json clip_normalize "{\"track\":$AT2,\"clip\":$NC}")"
+lmove "$AT2"
+J="$(tool_json clip_normalize "{\"track\":$AT2,\"clip\":$(lclip "$AT2")}")"
 JID="$(echo "$J" | jq -r '.job_id // empty')"
 open_fixture_project "$EMPTY" >/dev/null
 sleep 1
