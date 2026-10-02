@@ -176,35 +176,35 @@ double round2(double value)
     return std::round(value * 100) / 100;
 }
 
-// Uses the analyze_media probe (and its cache) to require an audio stream and learn the duration.
-// An uncached probe may be waited on for up to 10 s even when wait_ms is 0.
-bool audioRange(const SourceRef &ref, AudioRange &range, QString &error)
+// Uses the analyze_media probe (and its cache) to learn a source's streams and duration. An
+// uncached probe may be waited on for up to 10 s even when wait_ms is 0.
+bool probeInfo(const SourceRef &ref, QJsonObject &info, QString &error)
 {
     const QString cacheKey = McpJobs::cacheKeyFor(ref.path, "analyze_media", QString());
-    QJsonObject info;
-    if (!McpJobs::cached(cacheKey, info)) {
-        const QString program = McpJobs::findProgram("ffprobe");
-        if (program.isEmpty()) {
-            error = QStringLiteral("ffprobe was not found in Shotcut's application folder or on "
-                                   "PATH; install FFmpeg to analyze media.");
-            return false;
-        }
-        const auto record = startProbe(ref.path, cacheKey, program);
-        if (!McpJobs::waitFor(record, 10000)) {
-            error = QStringLiteral("ffprobe is still probing %1; try again shortly.")
-                        .arg(ref.path);
-            return false;
-        }
-        if (record->state != "succeeded") {
-            error = record->error;
-            return false;
-        }
-        info = record->result;
-    }
-    if (info.value("audio").isNull()) {
-        error = QStringLiteral("%1 has no audio stream.").arg(ref.path);
+    if (McpJobs::cached(cacheKey, info))
+        return true;
+    const QString program = McpJobs::findProgram("ffprobe");
+    if (program.isEmpty()) {
+        error = QStringLiteral("ffprobe was not found in Shotcut's application folder or on "
+                               "PATH; install FFmpeg to analyze media.");
         return false;
     }
+    const auto record = startProbe(ref.path, cacheKey, program);
+    if (!McpJobs::waitFor(record, 10000)) {
+        error = QStringLiteral("ffprobe is still probing %1; try again shortly.").arg(ref.path);
+        return false;
+    }
+    if (record->state != "succeeded") {
+        error = record->error;
+        return false;
+    }
+    info = record->result;
+    return true;
+}
+
+// Fills the range of a source: the trimmed range of a clip, else the whole file.
+bool sourceRange(const SourceRef &ref, const QJsonObject &info, AudioRange &range, QString &error)
+{
     if (ref.isClip) {
         range.in = ref.inSeconds;
         range.out = ref.outSeconds;
@@ -220,6 +220,30 @@ bool audioRange(const SourceRef &ref, AudioRange &range, QString &error)
         range.seek.clear();
     }
     return true;
+}
+
+bool audioRange(const SourceRef &ref, AudioRange &range, QString &error)
+{
+    QJsonObject info;
+    if (!probeInfo(ref, info, error))
+        return false;
+    if (info.value("audio").isNull()) {
+        error = QStringLiteral("%1 has no audio stream.").arg(ref.path);
+        return false;
+    }
+    return sourceRange(ref, info, range, error);
+}
+
+bool videoRange(const SourceRef &ref, AudioRange &range, QString &error)
+{
+    QJsonObject info;
+    if (!probeInfo(ref, info, error))
+        return false;
+    if (info.value("video").isNull()) {
+        error = QStringLiteral("%1 has no video stream.").arg(ref.path);
+        return false;
+    }
+    return sourceRange(ref, info, range, error);
 }
 
 // A cache key part that changes when the clip moves or is retrimmed, as the result maps times to
@@ -399,6 +423,94 @@ QJsonObject detectSilenceTool(const QJsonObject &arguments)
         {{program, args}},
         [ref, range](const QList<McpJobs::StepOutput> &outputs, QJsonObject &out, QString &) {
             return parseSilence(ref, range, outputs.value(0).err, out);
+        },
+        key);
+    return jobResult(record, waitMs);
+}
+
+bool parseScenes(const SourceRef &ref,
+                 const AudioRange &range,
+                 const QByteArray &stdoutText,
+                 QJsonObject &result)
+{
+    static const QRegularExpression timeRe(QStringLiteral("pts_time:(-?[0-9.eE+-]+)"));
+    static const QRegularExpression scoreRe(QStringLiteral("lavfi\\.scene_score=([0-9.eE+-]+)"));
+    QJsonArray scenes;
+    double pending = -1;
+    // ffmpeg times are relative to the seek position.
+    for (const QByteArray &line : stdoutText.split('\n')) {
+        const QString text = QString::fromUtf8(line);
+        const auto time = timeRe.match(text);
+        if (time.hasMatch()) {
+            pending = range.in + qMax(0.0, time.captured(1).toDouble());
+            continue;
+        }
+        const auto score = scoreRe.match(text);
+        if (!score.hasMatch() || pending < 0)
+            continue;
+        QJsonObject scene{{"time_s", round3(pending)},
+                          {"score", round3(score.captured(1).toDouble())}};
+        if (ref.isClip) {
+            const QJsonArray frames = mapRangeToTimeline(ref, pending, range.out);
+            if (!frames.isEmpty())
+                scene["timeline_frames"] = frames.first().toObject().value("start");
+        }
+        scenes.append(scene);
+        pending = -1;
+    }
+    result = QJsonObject{{"path", ref.path},
+                         {"in_s", round3(range.in)},
+                         {"out_s", round3(range.out)},
+                         {"scenes", scenes}};
+    return true;
+}
+
+QJsonObject detectScenesTool(const QJsonObject &arguments)
+{
+    QString error;
+    double threshold = 0.3;
+    int waitMs = 0;
+    if (!readNumber(arguments, "threshold", 0.05, 0.9, threshold, error)
+        || !readWaitMs(arguments, waitMs, error)) {
+        return textResult(error, true);
+    }
+    SourceRef ref;
+    if (!resolveSource(arguments, ref, error))
+        return textResult(error, true);
+    const QString program = McpJobs::findProgram("ffmpeg");
+    if (program.isEmpty()) {
+        return textResult("ffmpeg was not found in Shotcut's application folder or on PATH; "
+                          "install FFmpeg to analyze video.",
+                          true);
+    }
+    AudioRange range;
+    if (!videoRange(ref, range, error))
+        return textResult(error, true);
+
+    const QString key = McpJobs::cacheKeyFor(ref.path,
+                                             "scenes",
+                                             QStringLiteral("%1|%2")
+                                                 .arg(rangeParams(ref, range))
+                                                 .arg(threshold));
+    QJsonObject result;
+    if (McpJobs::cached(key, result))
+        return jsonResult(result);
+    QStringList args{"-hide_banner", "-nostats", "-nostdin"};
+    args += range.seek;
+    args += {"-i",
+             ref.path,
+             "-an",
+             "-vf",
+             QStringLiteral("select='gt(scene,%1)',metadata=print:file=-").arg(threshold),
+             "-f",
+             "null",
+             "-"};
+    const auto record = McpJobs::run(
+        "detect_scenes",
+        key,
+        {{program, args}},
+        [ref, range](const QList<McpJobs::StepOutput> &outputs, QJsonObject &out, QString &) {
+            return parseScenes(ref, range, outputs.value(0).out, out);
         },
         key);
     return jobResult(record, waitMs);
@@ -650,5 +762,25 @@ QList<McpTool> McpTools::analysisTools()
              "wait_ms":{"type":"integer","minimum":0,"maximum":20000,"default":0}
            }})"),
          audioLevelsTool},
+        {"detect_scenes",
+         "Find scene changes (cuts) in a source's video with ffmpeg's scene score. Give path "
+         "(absolute file) or track and clip (a timeline clip: only its trimmed range is "
+         "analysed; a locked track is fine). Returns {path, in_s, out_s, scenes} where scenes is "
+         "[{time_s, score, timeline_frames}]: time_s is the first frame of the new scene in "
+         "seconds in the SOURCE file, score (0 to 1, 3 decimals) how different it is from the "
+         "frame before, and for a clip source timeline_frames the timeline frame number of that "
+         "time (omitted when it does not map, e.g. speed changed). threshold (0.05 to 0.9, "
+         "default 0.3) is the lowest score reported; a gradual change scores lower than a hard "
+         "cut, so a high threshold misses soft cuts. A source without video is an error. "
+         "wait_ms (0 to 20000, default 0) waits for the result; without it, or when slower, "
+         "{job_id, state} is returned to poll with get_job. Results are cached (\"cached\": true).",
+         schema(R"({"type":"object","properties":{
+             "path":{"type":"string","description":"Absolute path of the media file."},
+             "track":{"type":"integer","minimum":0,"description":"Track index (with clip)."},
+             "clip":{"type":"integer","minimum":0,"description":"Clip index on the track."},
+             "threshold":{"type":"number","minimum":0.05,"maximum":0.9,"default":0.3},
+             "wait_ms":{"type":"integer","minimum":0,"maximum":20000,"default":0}
+           }})"),
+         detectScenesTool},
     };
 }

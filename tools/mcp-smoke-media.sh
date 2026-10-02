@@ -221,5 +221,95 @@ VL="$(job_result audio_levels "$(jq -nc --arg p "$TMP/long.wav" '{path:$p,bucket
 expect_eq "audio_levels 600 s: last bucket ends near 600" true "$(echo "$VL" | jq -r '(.buckets[-1].end_s - 600) | fabs < 0.5')"
 expect_eq "audio_levels 600 s: last bucket carries signal (sine 0.125 = -21 dB rms)" true "$(echo "$VL" | jq -r '(.buckets[-1].rms_db + 21) | fabs < 3')"
 
+echo "== detect_scenes"
+expect_eq "tools/list has detect_scenes" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '[.result.tools[].name] | contains(["detect_scenes"])')"
+SC="{\"path\":\"$MEDIA/scenes.mp4\"}"
+D="$(tool_json detect_scenes "$(jq -c '. + {wait_ms:20000}' <<<"$SC")")"
+expect_eq "detect_scenes wait_ms: exactly two scenes" 2 "$(echo "$D" | jq -r '.scenes | length')"
+expect_eq "detect_scenes: path" "$MEDIA/scenes.mp4" "$(echo "$D" | jq -r '.path')"
+expect_eq "detect_scenes: scene 1 near 3.0" true "$(echo "$D" | jq -r '(.scenes[0].time_s - 3.0) | fabs < 0.1')"
+expect_eq "detect_scenes: scene 2 near 6.0" true "$(echo "$D" | jq -r '(.scenes[1].time_s - 6.0) | fabs < 0.1')"
+expect_eq "detect_scenes: scores are 0..1" true "$(echo "$D" | jq -r '[.scenes[].score | . > 0.3 and . <= 1] | all')"
+expect_eq "detect_scenes: hard cut scores 1" true "$(echo "$D" | jq -r '.scenes[1].score == 1')"
+expect_eq "detect_scenes: scores have at most 3 decimals" true "$(echo "$D" | jq -r '[.scenes[].score | (. * 1000 | round) / 1000 == .] | all')"
+expect_eq "detect_scenes: in_s 0" 0 "$(echo "$D" | jq -r '.in_s')"
+expect_eq "detect_scenes: out_s near 9" true "$(echo "$D" | jq -r '(.out_s - 9) | fabs < 0.1')"
+expect_eq "detect_scenes: no bogus scene at the start" true "$(echo "$D" | jq -r '[.scenes[] | select(.time_s < 1)] | length == 0')"
+expect_eq "detect_scenes: path source has no timeline_frames" 0 "$(echo "$D" | jq -r '[.scenes[] | select(has("timeline_frames"))] | length')"
+expect_eq "detect_scenes: first wait_ms call is not cached" null "$(echo "$D" | jq -c '.cached // null')"
+expect_eq "detect_scenes: identical second call is cached" true "$(tool_json detect_scenes "$SC" | jq -r '.cached')"
+expect_eq "detect_scenes: cached call returns the scenes at once" 2 "$(tool_json detect_scenes "$SC" | jq -r '.scenes | length')"
+DJ="$(tool_json detect_scenes "$(jq -c '. + {threshold:0.31}' <<<"$SC")")"
+expect_eq "detect_scenes without wait_ms returns a job" true "$(echo "$DJ" | jq -r 'has("job_id")')"
+expect_eq "detect_scenes: get_job yields the scenes" 2 "$(wait_job "$(echo "$DJ" | jq -r '.job_id')" 60 | jq -r '.result.scenes | length')"
+# the 3 s cut scores 0.64 and the 6 s cut 1.0
+expect_eq "detect_scenes threshold 0.9: only the hard cut at 6 s" true "$(job_result detect_scenes "$(jq -c '. + {threshold:0.9}' <<<"$SC")" | jq -r '(.scenes | length == 1) and ((.scenes[0].time_s - 6.0) | fabs < 0.1)')"
+expect_eq "detect_scenes threshold 0.6: both cuts" 2 "$(job_result detect_scenes "$(jq -c '. + {threshold:0.6}' <<<"$SC")" | jq -r '.scenes | length')"
+expect_eq "detect_scenes threshold 0.05: still two scenes" 2 "$(job_result detect_scenes "$(jq -c '. + {threshold:0.05}' <<<"$SC")" | jq -r '.scenes | length')"
+SPC="{\"path\":\"$MEDIA/space name.mp4\"}"
+expect_eq "detect_scenes space name works" 2 "$(job_result detect_scenes "$(jq -c '. + {wait_ms:20000}' <<<"$SPC")" | jq -r '.scenes | length')"
+AO="{\"path\":\"$MEDIA/audioonly.wav\"}"
+expect_eq "detect_scenes audioonly: error" true "$(tool_is_error detect_scenes "$AO")"
+expect_eq "detect_scenes audioonly: message" "$MEDIA/audioonly.wav has no video stream." "$(tool_text detect_scenes "$AO")"
+expect_eq "detect_scenes: threshold 0.04 is an error" true "$(tool_is_error detect_scenes "$(jq -c '. + {threshold:0.04}' <<<"$SC")")"
+expect_eq "detect_scenes: threshold 0.91 is an error" true "$(tool_is_error detect_scenes "$(jq -c '. + {threshold:0.91}' <<<"$SC")")"
+expect_eq "detect_scenes: string threshold is an error" true "$(tool_is_error detect_scenes "$(jq -c '. + {threshold:"0.3"}' <<<"$SC")")"
+expect_eq "detect_scenes: wait_ms -1 is an error" true "$(tool_is_error detect_scenes "$(jq -c '. + {wait_ms:-1}' <<<"$SC")")"
+expect_eq "detect_scenes: wait_ms 20001 is an error" true "$(tool_is_error detect_scenes "$(jq -c '. + {wait_ms:20001}' <<<"$SC")")"
+expect_eq "detect_scenes: fractional wait_ms is an error" true "$(tool_is_error detect_scenes "$(jq -c '. + {wait_ms:1.5}' <<<"$SC")")"
+expect_eq "detect_scenes: path and track is an error" true "$(tool_is_error detect_scenes "$(jq -c '. + {track:0}' <<<"$SC")")"
+expect_eq "detect_scenes: neither path nor track is an error" true "$(tool_is_error detect_scenes '{}')"
+expect_eq "detect_scenes: relative path is an error" true "$(tool_is_error detect_scenes '{"path":"scenes.mp4"}')"
+expect_eq "detect_scenes: missing file is an error" true "$(tool_is_error detect_scenes "{\"path\":\"$MEDIA/nope.mp4\"}")"
+
+echo "== detect_scenes on clips"
+# Reopen the project of the locked block without its lock, put scenes.mp4 on the timeline.
+UNLOCKED="$TMP/unlocked.mlt"
+grep -v 'shotcut:lock' "$LOCKED" > "$UNLOCKED"
+tool_json open_project "{\"path\":\"$UNLOCKED\",\"discard_changes\":true}" >/dev/null
+sleep 2
+tool_json playlist_add "{\"path\":\"$MEDIA/scenes.mp4\"}" >/dev/null
+tool_json timeline_add_playlist '{}' >/dev/null
+scene_clip() { # the index of the last scenes.mp4 clip on track 0
+  tool_json get_timeline '{}' | jq -r '[.tracks[0].clips | to_entries[] | select(.value.kind=="clip" and ((.value.path // .value.name) | test("scenes.mp4$")))] | last | .key'
+}
+clip_start() { tool_json get_timeline '{}' | jq -r ".tracks[0].clips[$1].start"; }
+SI="$(scene_clip)"
+S0="$(clip_start "$SI")"
+SCC="$(job_result detect_scenes "{\"track\":0,\"clip\":$SI}")"
+expect_eq "detect_scenes clip: path is the source file" "$MEDIA/scenes.mp4" "$(echo "$SCC" | jq -r '.path')"
+expect_eq "detect_scenes clip: two scenes" 2 "$(echo "$SCC" | jq -r '.scenes | length')"
+expect_eq "detect_scenes clip: source time 3.0 and 6.0" true "$(echo "$SCC" | jq -r '((.scenes[0].time_s - 3.0) | fabs < 0.1) and ((.scenes[1].time_s - 6.0) | fabs < 0.1)')"
+expect_eq "detect_scenes clip: scene 1 timeline frame is clip start + 75" true "$(echo "$SCC" | jq -r "(.scenes[0].timeline_frames - $S0 - 75) | fabs <= 2")"
+expect_eq "detect_scenes clip: scene 2 timeline frame is clip start + 150" true "$(echo "$SCC" | jq -r "(.scenes[1].timeline_frames - $S0 - 150) | fabs <= 2")"
+expect_eq "detect_scenes clip: timeline_frames is a number" number "$(echo "$SCC" | jq -r '.scenes[0].timeline_frames | type')"
+tool_json timeline_trim "{\"track\":0,\"clip\":$SI,\"edge\":\"in\",\"delta\":25,\"ripple\":true}" >/dev/null
+expect_eq "detect_scenes trimmed: in is 25" 25 "$(tool_json get_timeline '{}' | jq -r ".tracks[0].clips[$SI].in")"
+S1="$(clip_start "$SI")"
+SCT="$(job_result detect_scenes "{\"track\":0,\"clip\":$SI}")"
+expect_eq "detect_scenes trimmed: in_s about 1.0" true "$(echo "$SCT" | jq -r '(.in_s - 1.0) | fabs < 0.01')"
+expect_eq "detect_scenes trimmed: two scenes" 2 "$(echo "$SCT" | jq -r '.scenes | length')"
+expect_eq "detect_scenes trimmed: source time stays 3.0 and 6.0" true "$(echo "$SCT" | jq -r '((.scenes[0].time_s - 3.0) | fabs < 0.1) and ((.scenes[1].time_s - 6.0) | fabs < 0.1)')"
+expect_eq "detect_scenes trimmed: scene 1 timeline frame is clip start + 50" true "$(echo "$SCT" | jq -r "(.scenes[0].timeline_frames - $S1 - 50) | fabs <= 2")"
+expect_eq "detect_scenes trimmed: scene 2 timeline frame is clip start + 125" true "$(echo "$SCT" | jq -r "(.scenes[1].timeline_frames - $S1 - 125) | fabs <= 2")"
+tool_json timeline_trim "{\"track\":0,\"clip\":$SI,\"edge\":\"in\",\"delta\":75,\"ripple\":true}" >/dev/null
+SCE="$(job_result detect_scenes "{\"track\":0,\"clip\":$SI}")"
+expect_eq "detect_scenes clip trimmed past the first cut: one scene" 1 "$(echo "$SCE" | jq -r '.scenes | length')"
+expect_eq "detect_scenes clip trimmed past the first cut: in_s about 4.0" true "$(echo "$SCE" | jq -r '(.in_s - 4.0) | fabs < 0.01')"
+expect_eq "detect_scenes clip trimmed past the first cut: scene at 6.0" true "$(echo "$SCE" | jq -r '(.scenes[0].time_s - 6.0) | fabs < 0.1')"
+expect_eq "detect_scenes clip trimmed past the first cut: no scene at the clip start" true "$(echo "$SCE" | jq -r '[.scenes[] | select(.time_s < 4.5)] | length == 0')"
+
+echo "== detect_scenes on a clip of a locked track"
+LOCKED2="$TMP/locked2.mlt"
+tool_json save_project "{\"path\":\"$LOCKED2\"}" >/dev/null
+PL2="$(grep -o '<track producer="[^"]*"' "$LOCKED2" | grep -v background | head -1 | sed 's/.*producer="//; s/"//')"
+sed -i "0,/<playlist id=\"$PL2\"[^>]*>/s//&\n  <property name=\"shotcut:lock\">1<\/property>/" "$LOCKED2"
+tool_json open_project "{\"path\":\"$LOCKED2\",\"discard_changes\":true}" >/dev/null
+sleep 2
+expect_eq "locked scenes clip: track 0 is locked after reopening" true "$(tool_json get_timeline '{}' | jq -r '.tracks[0].locked')"
+SL="$(job_result detect_scenes "{\"track\":0,\"clip\":$(scene_clip)}")"
+expect_eq "locked scenes clip: detect_scenes works on a locked track" 1 "$(echo "$SL" | jq -r '.scenes | length')"
+expect_eq "locked scenes clip: timeline_frames present" number "$(echo "$SL" | jq -r '.scenes[0].timeline_frames | type')"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
