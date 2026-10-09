@@ -447,6 +447,7 @@ default `fit` is the clip's picture fitted into the frame and centered.
 | `normalize_one_pass` | `dynamic_loudness` | audio | `target_loudness` -50..-10, -23 LUFS; `window` 2..600, 10 s; `max_gain` 0..30, 15 dB; `min_gain` -30..0, -15 dB; `max_rate` 0.5..9, 3 dB/s | `discontinuity_reset` 1 |
 | `brightness` | `brightness` | video | `level` 0..2, 1 (1 = unchanged) | `rgb_only` 1 |
 | `color_grading` | `lift_gamma_gain` | video | `lift_r/g/b` -1..1, 0; `gamma_r/g/b` and `gain_r/g/b` 0.5..2, 1 (raw MLT values; Shotcut's wheels show other numbers) | `shotcut:filter_version` 1 |
+| `contrast` | `lift_gamma_gain` (`shotcut:filter` `contrast`) | video | `gamma_r/g/b` and `gain_r/g/b` 0..2, 1 (raw MLT values; Shotcut's Contrast slider at level L sets every gain to L x 2 and every gamma to (1 - L) x 2) | |
 | `saturation` | `frei0r.saturat0r` | video | `saturation` 0..3, 1 (a multiplier; stored as multiplier x 0.125 in property `0`) | `threads` 0 |
 | `white_balance` | `frei0r.colgate` | video | `neutral_color` `#rrggbb`, `#7f7f7f`; `temperature_k` 1000..15000, 6500 K (stored as K / 15000 in property `1`) | `threads` 0 |
 | `box_blur` | `box_blur` | video | `hradius`, `vradius` integers 0..100, 5 px | |
@@ -614,6 +615,76 @@ afterwards.
   snapshot race described in stage 3A; the tool wraps it in the same preview guard as the other
   structural edits.
 
+### Picture recipes
+
+Three plain-language picture tools (50 tools in all) built on the filter engine. Each call is ONE
+undo step, changes the clip's first filter of each kind it needs or adds one (repeated calls
+update rather than stack), and returns `{filters:[{id, index}], track}` with the ids and
+indexes `filter_list_applied` reports. All three take picture filters only: refused are a
+locked track, a blank or transition, an audio track or an audio-only clip, a value with
+keyframes, unknown argument names, and filters this Shotcut cannot use (GPU-only rows are never
+offered). Any refusal changes nothing (a failure inside the call rolls the whole call back).
+
+| Tool | What it does | Key arguments |
+|------|--------------|---------------|
+| `clip_set_color` | Brightness, contrast, saturation and colour temperature | `track`, `clip`, `brightness?`, `contrast?`, `saturation?`, `temperature_k?` |
+| `clip_set_transform` | Size, position, rotation and crop | `track`, `clip`, `scale?`, `x?`, `y?`, `rotation?`, `crop?` |
+| `clip_set_blur` | Box blur or a blurred pad behind the picture | `track`, `clip`, `mode`, `radius?` |
+
+`clip_set_color` (undo text `Set clip color: name=value, ...`; give at least one value):
+
+| Argument | Range (unchanged) | Filter and MLT value |
+|----------|-------------------|----------------------|
+| `brightness` | -1..1 (0) | `brightness`, `level` = 1 + brightness |
+| `contrast` | -1..1 (0) | `contrast` (`lift_gamma_gain`, `shotcut:filter` `contrast`): Shotcut's slider level L = (contrast + 1) / 2, every `gain_*` = L x 2, every `gamma_*` = (1 - L) x 2 (`src/qml/filters/contrast/ui.qml`, `gainFactor`/`gammaFactor` 2) |
+| `saturation` | 0..3 (1; 0 is grey) | `saturation` (`frei0r.saturat0r`), property `0` = saturation x 0.125 |
+| `temperature_k` | 2000..15000 (6500) | `white_balance` (`frei0r.colgate`), property `1` = kelvin / 15000 |
+
+`saturation` and `temperature_k` need MLT's frei0r plugins; without them the call is refused
+with the reason ("The saturation filter is not available: this MLT has no frei0r.saturat0r
+service."); the smoke test then checks that refusal and prints SKIP for their value and
+exported-frame checks.
+
+`clip_set_transform` (undo text `Set clip transform: scale=..., x=..., y=..., rotation=...,
+crop left=... top=...`, naming the given values; give at least one):
+
+- `scale` (0.05..8, 1 = the picture fitted into the frame), `x`, `y` (pixels of the video mode:
+  the picture's centre offset from the frame centre, default 0) and `rotation` (-360..360
+  degrees) set `size_position` (the `affine` filter) in Shotcut's Fit mode (`transition.fill` 0,
+  `transition.distort` 0: the picture keeps its shape inside the rect; the transparent
+  background shows lower tracks, or black on the bottom track).
+- The rect is the `fit` rect of the allowlist (the clip's picture fitted into the frame with the
+  formula of `SizePositionUI.qml`) scaled about its centre and moved by `(x, y)`:
+  `w = fit.w x scale`, `h = fit.h x scale`, `x = fit.x + (fit.w - w) / 2 + x`, `y = fit.y +
+  (fit.h - h) / 2 + y`. When any of `scale`, `x`, `y` is given the missing ones take their
+  defaults; `rotation` alone keeps the current rect.
+- `crop` `{left, right, top, bottom}` (integer pixels of the video mode, only the given sides
+  change) sets `crop` (Crop: Source); left + right and top + bottom must leave a picture.
+- When both are new, the crop is added before the size filter. Filters are appended after the
+  clip's existing ones (Shotcut does the same), so a crop added to a clip that already has a
+  size filter processes after it.
+- Picture-in-picture on a 1920x1080 project: `{scale: 0.3, x: 560, y: -300}` on the upper
+  track's clip (a 576x324 picture near the top-right corner).
+
+`clip_set_blur`: `mode` `box` sets `box_blur` with `hradius` = `vradius` = `radius` (integer
+0..100, default 5; undo text `Set clip blur: box radius=<n>`); `mode` `pad` sets `blur_pad`
+(`pillar_echo`) with `blur` 4 and the default fit rect (undo text `Set clip blur: pad`;
+`radius` is refused). A clip that already has that blur gets it replaced with these values.
+
+The smoke test checks the MLT values read back through `filter_list_applied` and the saved
+project, the undo steps, and exported frames of a red 1 s clip: `brightness: -0.5` lowers the
+luma average (ffmpeg `signalstats` YAVG), `saturation: 0` gives equal R, G and B means (skipped
+without frei0r), and `scale: 0.5` leaves the corners black with the centre red.
+
+### Known limits (picture recipes)
+
+- The fit rect uses the clip's media size and sample aspect ratio (`meta.media.width`,
+  `meta.media.height`, `meta.media.sample_aspect_num/den`), falling back to the video mode's
+  aspect; a source with rotation metadata is not taken into account.
+- The tools never add keyframes and refuse values that have them.
+- Brightness, contrast and saturation are separate filters applied in the order they were
+  added, as in Shotcut.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -697,7 +768,8 @@ changes and removes filters with their undo and redo, saves and reopens a copy o
 and checks the refusals. The audio recipe checks export a normalized clip (`x264-medium`, needs
 `melt-7` as for stage 2) and run several background `clip_normalize` jobs on generated 2400 s
 and 3600 s files (about 7 and 10 s each on a debug build); if a measurement ends before the script
-can change the clip, that check prints SKIP.
+can change the clip, that check prints SKIP. The picture recipe checks export four 1 s clips and read pixels with
+ffmpeg and od; without frei0r the saturation and temperature checks print SKIP.
 
 Manual checks (they need a modified project, which the tools cannot create):
 

@@ -683,5 +683,200 @@ R="$(tool_json clip_detach_audio '{"track":0,"clip":0}')"
 expect_eq "detach: the existing empty audio track is used (no new track)" "2 1" "$(echo "$R" | jq -r '"\(.tracks | length) \(.audio_track)"')"
 expect_eq "detach: the audio clip is on it" '["clip",0,100]' "$(echo "$R" | jq -c '.tracks[1].clips[0] | [.kind,.start,.duration]')"
 
+echo "== picture recipes"
+TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[].name]')"
+expect_eq "tools/list has the three picture recipes" true "$(echo "$TOOLS" | jq 'contains(["clip_set_color","clip_set_transform","clip_set_blur"])')"
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+# V1: 0 scenes.mp4 0-1 s (red) [0,25), 1 audioonly.wav [25,75); an audio track: 0 audioonly.wav.
+ins "$MEDIA/scenes.mp4" 0 1 0 0
+ins "$MEDIA/audioonly.wav" 0 2 0 25
+PAT="$(tool_json track_add '{"type":"audio"}' | jq '.added.index')"
+ins "$MEDIA/audioonly.wav" 0 2 "$PAT" 0
+expect_eq "picture fixture: V1 items" '[["clip",0,25],["clip",25,50]]' "$(tool_json get_timeline '{}' | jq -c '[.tracks[0].clips[] | [.kind,.start,.duration]]')"
+pstate() { echo "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa 0 0)|$(fa 0 1)|$(fa "$PAT" 0)"; }
+AV="$(tool_json filter_list_available '{}')"
+has_filter() { echo "$AV" | jq --arg id "$1" '[.filters[].id] | index($id) != null'; }
+
+echo "== clip_set_color"
+P0="$(pstate)"
+R="$(tool_json clip_set_color '{"track":0,"clip":0,"brightness":0.5}')"
+expect_eq "color: brightness 0.5 is level 1.5" "$(jn '[{"id":"brightness","params":{"level":1.5}}]')" "$(fparams 0 0)"
+expect_eq "color: result names the filter and its index" "$(jn '[{"id":"brightness","index":0}]')" "$(echo "$R" | jq -cS '.filters')"
+expect_eq "color: result track is track 0" 0 "$(echo "$R" | jq '.track.index')"
+P1="$(pstate)"
+tool_json clip_set_color '{"track":0,"clip":0,"brightness":-0.25}' >/dev/null
+expect_eq "color: a second call updates the brightness filter (no second filter)" "$(jn '[{"id":"brightness","params":{"level":0.75}}]')" "$(fparams 0 0)"
+expect_eq "color: the second call is one undo step" "Set clip color: brightness=-0.25" "$(undo_text)"
+expect_eq "color: undo goes back to brightness 0.5" "$P1" "$(pstate)"
+expect_eq "color: the first call is one undo step" "Set clip color: brightness=0.5" "$(undo_text)"
+expect_eq "color: undo removes the added filter" "$P0" "$(pstate)"
+redo_text >/dev/null
+expect_eq "color: redo adds it again" "$P1" "$(pstate)"
+R="$(tool_json clip_set_color '{"track":0,"clip":0,"brightness":0.2,"contrast":0.5}')"
+expect_eq "color: contrast 0.5 is gain 1.5 and gamma 0.5 (Shotcut's Contrast at 75 %)" "$(jn '[{"id":"brightness","params":{"level":1.2}},{"id":"contrast","params":{"gamma_r":0.5,"gamma_g":0.5,"gamma_b":0.5,"gain_r":1.5,"gain_g":1.5,"gain_b":1.5}}]')" "$(fparams 0 0)"
+expect_eq "color: result lists both filters" "$(jn '[{"id":"brightness","index":0},{"id":"contrast","index":1}]')" "$(echo "$R" | jq -cS '.filters')"
+P2="$(pstate)"
+tool_json clip_set_color '{"track":0,"clip":0,"contrast":-1}' >/dev/null
+expect_eq "color: contrast -1 is gain 0 and gamma 2, brightness kept" "$(jn '[{"id":"brightness","params":{"level":1.2}},{"id":"contrast","params":{"gamma_r":2,"gamma_g":2,"gamma_b":2,"gain_r":0,"gain_g":0,"gain_b":0}}]')" "$(fparams 0 0)"
+undo_text >/dev/null
+expect_eq "color: two values in one call are one undo step" "Set clip color: brightness=0.2, contrast=0.5" "$(undo_text)"
+expect_eq "color: that undo restores brightness 0.5 without contrast" "$P1" "$(pstate)"
+redo_text >/dev/null
+expect_eq "color: redo of the two-value call" "$P2" "$(pstate)"
+undo_text >/dev/null
+tool_json save_project "{\"path\":\"$TMP/pic_color.mlt\"}" >/dev/null
+expect_eq "color: saved brightness filter has rgb_only 1" 1 "$(grep -c '<property name="rgb_only">1</property>' "$TMP/pic_color.mlt")"
+if [ "$(has_filter saturation)" = true ]; then
+  tool_json clip_set_color '{"track":0,"clip":0,"saturation":2}' >/dev/null
+  expect_eq "color: saturation 2 listed" 2 "$(fa 0 0 | jq '.filters[] | select(.id=="saturation") | .params.saturation')"
+  tool_json save_project "{\"path\":\"$TMP/pic_sat.mlt\"}" >/dev/null
+  expect_eq "color: saturation 2 is frei0r property \"0\" 0.25" 1 "$(grep -c '<property name="0">0.25</property>' "$TMP/pic_sat.mlt")"
+  tool_json clip_set_color '{"track":0,"clip":0,"saturation":1.5}' >/dev/null
+  expect_eq "color: saturation updates, not stacks" '[1.5]' "$(fa 0 0 | jq -c '[.filters[] | select(.id=="saturation") | .params.saturation]')"
+  undo_text >/dev/null; undo_text >/dev/null
+else
+  expect_eq "color: saturation unavailable here is an error" true "$(ferr clip_set_color '{"track":0,"clip":0,"saturation":2}')"
+  expect_eq "color: the error says why" true "$(tool_text clip_set_color '{"track":0,"clip":0,"saturation":2}' | grep -q 'frei0r.saturat0r' && echo true)"
+  echo "SKIP: saturation value checks: this MLT has no frei0r.saturat0r"
+fi
+if [ "$(has_filter white_balance)" = true ]; then
+  tool_json clip_set_color '{"track":0,"clip":0,"temperature_k":7500}' >/dev/null
+  expect_eq "color: temperature 7500 listed" 7500 "$(fa 0 0 | jq '.filters[] | select(.id=="white_balance") | .params.temperature_k')"
+  tool_json save_project "{\"path\":\"$TMP/pic_wb.mlt\"}" >/dev/null
+  expect_eq "color: temperature 7500 K is frei0r property \"1\" 0.5" 1 "$(grep -c '<property name="1">0.5</property>' "$TMP/pic_wb.mlt")"
+  undo_text >/dev/null
+else
+  expect_eq "color: temperature unavailable here is an error" true "$(ferr clip_set_color '{"track":0,"clip":0,"temperature_k":7500}')"
+  expect_eq "color: the error says why" true "$(tool_text clip_set_color '{"track":0,"clip":0,"temperature_k":7500}' | grep -q 'frei0r.colgate' && echo true)"
+  echo "SKIP: temperature value checks: this MLT has no frei0r.colgate"
+fi
+expect_eq "color: back to brightness 0.5 only" "$P1" "$(pstate)"
+for a in '{"track":0,"clip":0}' '{"track":0,"clip":0,"brightness":1.5}' '{"track":0,"clip":0,"brightness":-1.1}' \
+  '{"track":0,"clip":0,"contrast":1.01}' '{"track":0,"clip":0,"saturation":3.5}' '{"track":0,"clip":0,"saturation":-0.1}' \
+  '{"track":0,"clip":0,"temperature_k":1999}' '{"track":0,"clip":0,"temperature_k":15001}' '{"track":0,"clip":0,"brightness":"0.5"}' \
+  '{"track":0,"clip":0,"brightness":0.1,"hue":3}' '{"track":0,"clip":1,"brightness":0.1}' "{\"track\":$PAT,\"clip\":0,\"brightness\":0.1}" \
+  '{"track":0,"clip":9,"brightness":0.1}' '{"track":0,"brightness":0.1}'; do
+  expect_eq "color: error for $a" true "$(ferr clip_set_color "$a")"
+done
+expect_eq "color: an unknown key is named" true "$(tool_text clip_set_color '{"track":0,"clip":0,"brightness":0.1,"hue":3}' | grep -q 'hue' && echo true)"
+expect_eq "color: an audio-only clip on a video track is refused as having no picture" true "$(tool_text clip_set_color '{"track":0,"clip":1,"brightness":0.1}' | grep -qi 'no picture' && echo true)"
+expect_eq "color: brightness plus an unavailable or invalid value changes nothing" true "$(ferr clip_set_color '{"track":0,"clip":0,"brightness":0.9,"contrast":5}')"
+tool_json track_set '{"track":0,"lock":true}' >/dev/null
+expect_eq "color: a locked track is an error" true "$(ferr clip_set_color '{"track":0,"clip":0,"brightness":0.1}')"
+tool_json track_set '{"track":0,"lock":false}' >/dev/null
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "color: errors changed nothing" "$P1" "$(pstate)"
+undo_text >/dev/null
+
+echo "== clip_set_transform"
+T0="$(pstate)"
+R="$(tool_json clip_set_transform '{"track":0,"clip":0,"scale":0.5,"x":40,"y":-30,"rotation":15}')"
+expect_eq "transform: rect from the fit rect, scaled about its centre and offset; rotation" "$(jn '[{"id":"size_position","params":{"rect":{"x":120,"y":30,"w":160,"h":120},"rotation":15}}]')" "$(fparams 0 0)"
+expect_eq "transform: result names the filter" "$(jn '[{"id":"size_position","index":0}]')" "$(echo "$R" | jq -cS '.filters')"
+expect_eq "transform: one undo step" "Set clip transform: scale=0.5, x=40, y=-30, rotation=15" "$(undo_text)"
+expect_eq "transform: undo removes it" "$T0" "$(pstate)"
+redo_text >/dev/null
+T1="$(pstate)"
+tool_json save_project "{\"path\":\"$TMP/pic_tr.mlt\"}" >/dev/null
+expect_eq "transform: Fit mode (transition.fill 0)" 1 "$(grep -c '<property name="transition.fill">0</property>' "$TMP/pic_tr.mlt")"
+expect_eq "transform: Fit mode (transition.distort 0)" 1 "$(grep -c '<property name="transition.distort">0</property>' "$TMP/pic_tr.mlt")"
+expect_eq "transform: transparent background" 1 "$(grep -c '<property name="background">color:#00000000</property>' "$TMP/pic_tr.mlt")"
+tool_json clip_set_transform '{"track":0,"clip":0,"scale":0.25}' >/dev/null
+expect_eq "transform: a second call updates (x, y back to 0; rotation kept)" "$(jn '[{"id":"size_position","params":{"rect":{"x":120,"y":90,"w":80,"h":60},"rotation":15}}]')" "$(fparams 0 0)"
+tool_json clip_set_transform '{"track":0,"clip":0,"rotation":-90}' >/dev/null
+expect_eq "transform: rotation alone keeps the rect" "$(jn '[{"id":"size_position","params":{"rect":{"x":120,"y":90,"w":80,"h":60},"rotation":-90}}]')" "$(fparams 0 0)"
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "transform: two undos go back to the first call" "$T1" "$(pstate)"
+undo_text >/dev/null
+R="$(tool_json clip_set_transform '{"track":0,"clip":0,"scale":2,"crop":{"left":10,"top":20}}')"
+expect_eq "transform: crop is added before the size filter, both in one call" '["crop","size_position"]' "$(fa 0 0 | jq -c '[.filters[].id]')"
+expect_eq "transform: crop values" "$(jn '{"left":10,"right":0,"top":20,"bottom":0}')" "$(fa 0 0 | jq -cS '.filters[0].params')"
+expect_eq "transform: scale 2 rect" "$(jn '{"x":-160,"y":-120,"w":640,"h":480}')" "$(fa 0 0 | jq -cS '.filters[1].params.rect')"
+T2="$(pstate)"
+tool_json clip_set_transform '{"track":0,"clip":0,"crop":{"right":5}}' >/dev/null
+expect_eq "transform: a crop call updates the crop (other sides kept)" "$(jn '{"left":10,"right":5,"top":20,"bottom":0}')" "$(fa 0 0 | jq -cS '.filters[0].params')"
+expect_eq "transform: still two filters" 2 "$(fa 0 0 | jq '.filters | length')"
+undo_text >/dev/null
+expect_eq "transform: crop plus scale was one undo step" "Set clip transform: scale=2, crop left=10 top=20" "$(undo_text)"
+expect_eq "transform: undo removed both" "$T0" "$(pstate)"
+for a in '{"track":0,"clip":0}' '{"track":0,"clip":0,"scale":0.04}' '{"track":0,"clip":0,"scale":8.1}' '{"track":0,"clip":0,"rotation":361}' \
+  '{"track":0,"clip":0,"x":"1"}' '{"track":0,"clip":0,"crop":{"left":-1}}' '{"track":0,"clip":0,"crop":{"left":1.5}}' \
+  '{"track":0,"clip":0,"crop":{"middle":3}}' '{"track":0,"clip":0,"crop":{}}' '{"track":0,"clip":0,"crop":5}' \
+  '{"track":0,"clip":0,"scale":1,"fill":true}' '{"track":0,"clip":1,"scale":0.5}' "{\"track\":$PAT,\"clip\":0,\"scale\":0.5}" \
+  '{"track":0,"clip":0,"crop":{"left":200,"right":200}}' '{"track":0,"clip":0,"scale":0.5,"crop":{"top":120,"bottom":120}}'; do
+  expect_eq "transform: error for $a" true "$(ferr clip_set_transform "$a")"
+done
+expect_eq "transform: errors changed nothing" "$T0" "$(pstate)"
+
+echo "== clip_set_blur"
+B0="$(pstate)"
+R="$(tool_json clip_set_blur '{"track":0,"clip":0,"mode":"box","radius":7}')"
+expect_eq "blur box: radius 7 both ways" "$(jn '[{"id":"box_blur","params":{"hradius":7,"vradius":7}}]')" "$(fparams 0 0)"
+expect_eq "blur box: result" "$(jn '[{"id":"box_blur","index":0}]')" "$(echo "$R" | jq -cS '.filters')"
+expect_eq "blur box: one undo step" "Set clip blur: box radius=7" "$(undo_text)"
+expect_eq "blur box: undo" "$B0" "$(pstate)"
+redo_text >/dev/null
+tool_json clip_set_blur '{"track":0,"clip":0,"mode":"box"}' >/dev/null
+expect_eq "blur box: a second call replaces (default radius 5)" "$(jn '[{"id":"box_blur","params":{"hradius":5,"vradius":5}}]')" "$(fparams 0 0)"
+tool_json clip_set_blur '{"track":0,"clip":0,"mode":"pad"}' >/dev/null
+expect_eq "blur pad: fit rect and blur 4 after the box blur" "$(jn '[{"id":"box_blur","params":{"hradius":5,"vradius":5}},{"id":"blur_pad","params":{"blur":4,"rect":{"x":0,"y":0,"w":320,"h":240}}}]')" "$(fparams 0 0)"
+tool_json clip_set_blur '{"track":0,"clip":0,"mode":"pad"}' >/dev/null
+expect_eq "blur pad: a second call does not stack" 2 "$(fa 0 0 | jq '.filters | length')"
+expect_eq "blur pad: one undo step" "Set clip blur: pad" "$(undo_text)"
+undo_text >/dev/null; undo_text >/dev/null; undo_text >/dev/null
+expect_eq "blur: four undos go back to the start" "$B0" "$(pstate)"
+for a in '{"track":0,"clip":0}' '{"track":0,"clip":0,"mode":"gaussian"}' '{"track":0,"clip":0,"mode":"box","radius":101}' \
+  '{"track":0,"clip":0,"mode":"box","radius":2.5}' '{"track":0,"clip":0,"mode":"pad","radius":5}' '{"track":0,"clip":0,"mode":"box","amount":3}' \
+  '{"track":0,"clip":1,"mode":"box"}' "{\"track\":$PAT,\"clip\":0,\"mode\":\"pad\"}"; do
+  expect_eq "blur: error for $a" true "$(ferr clip_set_blur "$a")"
+done
+expect_eq "blur: errors changed nothing" "$B0" "$(pstate)"
+
+echo "== picture recipes: exported frames"
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+ins "$MEDIA/scenes.mp4" 0 1 0 0
+# export_frame NAME: exports the 1 s timeline and writes the frame at 0.5 s as raw RGB (320x240).
+export_frame() {
+  local out="$TMP/pic_$1.mp4" ej st=""
+  ej="$(tool_json export_video "$(jq -nc --arg p "$out" '{path:$p,preset:"x264-medium"}')" | jq -r '.job_id')"
+  for _ in $(seq 1 120); do
+    st="$(tool_json get_export_status "{\"job_id\":$ej}" | jq -r '.state')"
+    case "$st" in succeeded|failed|stopped|removed) break ;; esac
+    sleep 1
+  done
+  expect_eq "export $1: succeeded" succeeded "$st"
+  ffmpeg -v error -nostdin -y -ss 0.5 -i "$out" -frames:v 1 -f rawvideo -pix_fmt rgb24 "$TMP/pic_$1.rgb"
+}
+yavg() { ffmpeg -v error -nostdin -ss 0.5 -i "$TMP/pic_$1.mp4" -frames:v 1 -vf signalstats,metadata=print:file=- -f null - | sed -n 's/.*YAVG=//p' | head -1; }
+rgbmeans() { od -An -v -tu1 -w3 "$TMP/pic_$1.rgb" | awk '{r+=$1;g+=$2;b+=$3;n++} END {printf "%.1f %.1f %.1f\n", r/n, g/n, b/n}'; }
+pixel() { od -An -v -tu1 -j $(( ($3 * 320 + $2) * 3 )) -N3 "$TMP/pic_$1.rgb" | xargs; }
+export_frame orig
+Y0="$(yavg orig)"
+expect_eq "frame orig: the centre is red" true "$(pixel orig 160 120 | awk '{print ($1 > 180 && $2 < 60 && $3 < 60) ? "true" : "false"}')"
+tool_json clip_set_color '{"track":0,"clip":0,"brightness":-0.5}' >/dev/null
+export_frame dark
+Y1="$(yavg dark)"
+echo "INFO  picture: YAVG original $Y0, brightness -0.5 $Y1"
+expect_eq "frame brightness -0.5: darker than the original (YAVG)" true "$(awk -v a="$Y1" -v b="$Y0" 'BEGIN {print (a != "" && b != "" && a + 0 < b + 0) ? "true" : "false"}')"
+undo_text >/dev/null
+if [ "$(has_filter saturation)" = true ]; then
+  tool_json clip_set_color '{"track":0,"clip":0,"saturation":0}' >/dev/null
+  export_frame grey
+  echo "INFO  picture: saturation 0 RGB means $(rgbmeans grey)"
+  expect_eq "frame saturation 0: R, G and B means within 4 (grey)" true "$(rgbmeans grey | awk '{m=$1; M=$1; for (i=2;i<=3;i++) {if ($i<m) m=$i; if ($i>M) M=$i}; print (M - m <= 4) ? "true" : "false"}')"
+  undo_text >/dev/null
+else
+  echo "SKIP: saturation 0 frame check: this MLT has no frei0r.saturat0r"
+fi
+tool_json clip_set_transform '{"track":0,"clip":0,"scale":0.5}' >/dev/null
+export_frame half
+echo "INFO  picture: scale 0.5 corners $(pixel half 2 2) / $(pixel half 317 237), centre $(pixel half 160 120)"
+for c in "2 2" "317 2" "2 237" "317 237"; do
+  expect_eq "frame scale 0.5: corner $c is black" true "$(pixel half $c | awk '{print ($1 < 30 && $2 < 30 && $3 < 30) ? "true" : "false"}')"
+done
+expect_eq "frame scale 0.5: the centre is red" true "$(pixel half 160 120 | awk '{print ($1 > 180 && $2 < 60 && $3 < 60) ? "true" : "false"}')"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

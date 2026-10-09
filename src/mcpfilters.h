@@ -85,7 +85,8 @@ const FilterSpec *specOf(Mlt::Filter &filter);
 // the params like filter_add/filter_set. Without joinMacro the change is ONE undo step named
 // undoText; with joinMacro the commands join the macro the caller has open, and on false the
 // caller must roll its macro back (McpTools::finishMacro(stack, false)). On success userIndex (if
-// given) receives the filter's index in filter_list_applied.
+// given) receives the filter's index in filter_list_applied. extra (if given) may set further MLT
+// properties after the params are written (the picture recipes' Fit mode of Size/Position).
 bool applyFilter(int track,
                  int clip,
                  const QString &filterId,
@@ -93,7 +94,8 @@ bool applyFilter(int track,
                  const QString &undoText,
                  QString &error,
                  bool joinMacro = false,
-                 int *userIndex = nullptr);
+                 int *userIndex = nullptr,
+                 const std::function<void(Mlt::Properties &)> &extra = {});
 
 // Adds a filter of service (shotcut:filter = shotcutId when not empty) with props to the
 // multitrack output (McpFilter::Target{-1, -1}), appended after the existing output filters,

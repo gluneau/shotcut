@@ -34,10 +34,10 @@
 #include <MltTransition.h>
 #include <framework/mlt_version.h>
 
+#include <QPair>
 #include <QRectF>
 #include <QRegularExpression>
 #include <QScopedPointer>
-#include <QPair>
 #include <QStringList>
 #include <QUndoStack>
 #include <QUuid>
@@ -157,6 +157,17 @@ QList<FilterSpec> buildSpecs()
     for (const char *c : {"gamma_r", "gamma_g", "gamma_b", "gain_r", "gain_g", "gain_b"})
         s.params.append(number(c, 0.5, 2, 1, "x"));
     s.setup = [](Mlt::Properties &p) { p.set("shotcut:filter_version", 1); };
+    specs.append(s);
+
+    // contrast/meta.qml, ui.qml: the Contrast slider (level 0..1, 0.5 unchanged) sets every
+    // gain_* to level * 2 and every gamma_* to (1 - level) * 2 (gainFactor, gammaFactor).
+    s = FilterSpec();
+    s.id = "contrast";
+    s.service = "lift_gamma_gain";
+    s.shotcutId = "contrast";
+    s.label = "Contrast";
+    for (const char *c : {"gamma_r", "gamma_g", "gamma_b", "gain_r", "gain_g", "gain_b"})
+        s.params.append(number(c, 0, 2, 1, "x"));
     specs.append(s);
 
     // saturation/meta_frei0r.qml, ui_frei0r.qml: property "0" = percent / 800, UI 0..300 %.
@@ -609,13 +620,16 @@ bool addFilter(MultitrackModel &model,
                QString text,
                bool joinMacro,
                QString &error,
-               int *userIndex)
+               int *userIndex,
+               const std::function<void(Mlt::Properties &)> &extra = {})
 {
     Mlt::Properties props;
     setDefaults(spec, info.producer, props);
     QStringList summary;
     if (!readParams(spec, params, props, summary, error))
         return false;
+    if (extra)
+        extra(props);
     if (spec.check) {
         error = spec.check(props);
         if (!error.isEmpty())
@@ -646,7 +660,8 @@ bool setFilter(MultitrackModel &model,
                const QJsonObject &params,
                QString text,
                bool joinMacro,
-               QString &error)
+               QString &error,
+               const std::function<void(Mlt::Properties &)> &extra = {})
 {
     Mlt::Properties before, after;
     before.inherit(filter);
@@ -654,6 +669,8 @@ bool setFilter(MultitrackModel &model,
     QStringList summary;
     if (!readParams(spec, params, after, summary, error, &filter))
         return false;
+    if (extra)
+        extra(after);
     if (spec.check) {
         error = spec.check(after);
         if (!error.isEmpty())
@@ -1302,6 +1319,260 @@ QJsonObject clipDetachAudioTool(const QJsonObject &arguments)
                                   {"audio_track", audioTrack}});
 }
 
+// ---- Picture recipes
+
+// Refuses argument names outside allowed (a misspelt value must not be ignored silently).
+bool checkKeys(const QJsonObject &arguments, const QStringList &allowed, QString &error)
+{
+    for (auto it = arguments.begin(); it != arguments.end(); ++it) {
+        if (!allowed.contains(it.key())) {
+            error = QStringLiteral("Unknown argument '%1'; the arguments are: %2.")
+                        .arg(it.key(), allowed.join(", "));
+            return false;
+        }
+    }
+    return true;
+}
+
+// The allowlist row id when it can be used, else null with the reason.
+const FilterSpec *recipeSpec(const QString &id, QString &error)
+{
+    const FilterSpec *spec = McpFilters::findSpec(id);
+    if (!spec) {
+        for (const FilterSpec &s : McpFilters::allSpecs()) {
+            if (s.id == id)
+                error = QStringLiteral("The %1 filter is not available: %2.")
+                            .arg(id, unavailableReason(s));
+        }
+    }
+    return spec;
+}
+
+struct RecipeStep
+{
+    const FilterSpec *spec = nullptr;
+    QJsonObject params;
+    std::function<void(Mlt::Properties &)> extra;
+};
+
+// Applies every step to the clip (set on the first filter of its kind, else added) as ONE undo
+// step named text; any failure rolls the whole call back. Returns {filters:[{id, index}], track}.
+QJsonObject runRecipe(int track, int clip, const QList<RecipeStep> &steps, const QString &text)
+{
+    QString error;
+    QUndoStack *stack = MAIN.undoStack();
+    stack->beginMacro(text);
+    QJsonArray filters;
+    bool ok = true;
+    for (const RecipeStep &step : steps) {
+        int index = -1;
+        ok = McpFilters::applyFilter(track,
+                                     clip,
+                                     step.spec->id,
+                                     step.params,
+                                     text,
+                                     error,
+                                     true,
+                                     &index,
+                                     step.extra);
+        if (!ok)
+            break;
+        filters.append(QJsonObject{{"id", step.spec->id}, {"index", index}});
+    }
+    if (!finishMacro(stack, ok))
+        return textResult(error, true);
+    return jsonResult(
+        QJsonObject{{"filters", filters},
+                    {"track", trackJson(*MAIN.timelineDock()->model(), track)}});
+}
+
+QJsonObject clipSetColorTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0;
+    QString error;
+    if (!checkKeys(arguments,
+                   {"track", "clip", "brightness", "contrast", "saturation", "temperature_k"},
+                   error)
+        || !readTarget(arguments, track, clip, error))
+        return textResult(error, true);
+    double brightness = 0, contrast = 0, saturation = 1, temperature = 6500;
+    const FrameArg b = readNumberArg(arguments, "brightness", -1, 1, brightness, error);
+    const FrameArg c = readNumberArg(arguments, "contrast", -1, 1, contrast, error);
+    const FrameArg s = readNumberArg(arguments, "saturation", 0, 3, saturation, error);
+    const FrameArg t = readNumberArg(arguments, "temperature_k", 2000, 15000, temperature, error);
+    if (b == FrameArg::Invalid || c == FrameArg::Invalid || s == FrameArg::Invalid
+        || t == FrameArg::Invalid)
+        return textResult(error, true);
+    QList<RecipeStep> steps;
+    QStringList summary;
+    const auto step = [&](const char *id, const QJsonObject &params, const QString &named) {
+        RecipeStep r;
+        r.spec = recipeSpec(id, error);
+        r.params = params;
+        steps.append(r);
+        summary << named;
+        return r.spec != nullptr;
+    };
+    if (b == FrameArg::Ok
+        && !step("brightness", {{"level", 1 + brightness}}, "brightness=" + num(brightness)))
+        return textResult(error, true);
+    if (c == FrameArg::Ok) {
+        // The slider level of Shotcut's Contrast UI: 0 -> 0.5 (unchanged).
+        const double level = (contrast + 1) / 2;
+        const double gain = level * 2, gamma = (1 - level) * 2;
+        const QJsonObject params{{"gamma_r", gamma},
+                                 {"gamma_g", gamma},
+                                 {"gamma_b", gamma},
+                                 {"gain_r", gain},
+                                 {"gain_g", gain},
+                                 {"gain_b", gain}};
+        if (!step("contrast", params, "contrast=" + num(contrast)))
+            return textResult(error, true);
+    }
+    if (s == FrameArg::Ok
+        && !step("saturation", {{"saturation", saturation}}, "saturation=" + num(saturation)))
+        return textResult(error, true);
+    if (t == FrameArg::Ok
+        && !step("white_balance",
+                 {{"temperature_k", temperature}},
+                 "temperature_k=" + num(temperature)))
+        return textResult(error, true);
+    if (steps.isEmpty())
+        return textResult("Give at least one of brightness, contrast, saturation, temperature_k.",
+                          true);
+    MultitrackModel &model = *MAIN.timelineDock()->model();
+    if (!checkClip(model, track, clip, *steps.first().spec, error))
+        return textResult(error, true);
+    return runRecipe(track, clip, steps, QObject::tr("Set clip color: %1").arg(summary.join(", ")));
+}
+
+QJsonObject clipSetTransformTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0;
+    QString error;
+    if (!checkKeys(arguments, {"track", "clip", "scale", "x", "y", "rotation", "crop"}, error)
+        || !readTarget(arguments, track, clip, error))
+        return textResult(error, true);
+    double scale = 1, x = 0, y = 0, rotation = 0;
+    const FrameArg sc = readNumberArg(arguments, "scale", 0.05, 8, scale, error);
+    const FrameArg xa = readNumberArg(arguments, "x", -kMaxRectValue, kMaxRectValue, x, error);
+    const FrameArg ya = readNumberArg(arguments, "y", -kMaxRectValue, kMaxRectValue, y, error);
+    const FrameArg ro = readNumberArg(arguments, "rotation", -360, 360, rotation, error);
+    if (sc == FrameArg::Invalid || xa == FrameArg::Invalid || ya == FrameArg::Invalid
+        || ro == FrameArg::Invalid)
+        return textResult(error, true);
+    const QJsonValue cropArg = arguments.value("crop");
+    if (!cropArg.isUndefined() && (!cropArg.isObject() || cropArg.toObject().isEmpty()))
+        return textResult("crop must be an object with at least one of left, right, top, bottom "
+                          "(integer pixels of the video mode).",
+                          true);
+    const bool geometry = sc == FrameArg::Ok || xa == FrameArg::Ok || ya == FrameArg::Ok;
+    if (!geometry && ro != FrameArg::Ok && cropArg.isUndefined())
+        return textResult("Give at least one of scale, x, y, rotation, crop.", true);
+
+    QList<RecipeStep> steps;
+    QStringList summary;
+    if (cropArg.isObject()) {
+        RecipeStep r;
+        if (!(r.spec = recipeSpec("crop", error)))
+            return textResult(error, true);
+        r.params = cropArg.toObject();
+        steps.append(r);
+    }
+    RecipeStep size;
+    if (geometry || ro == FrameArg::Ok) {
+        if (!(size.spec = recipeSpec("size_position", error)))
+            return textResult(error, true);
+        // Shotcut's Fit mode: the picture keeps its shape inside the rect.
+        size.extra = [](Mlt::Properties &p) {
+            p.set("transition.fill", 0);
+            p.set("transition.distort", 0);
+        };
+    }
+    MultitrackModel &model = *MAIN.timelineDock()->model();
+    std::unique_ptr<Mlt::ClipInfo> info
+        = checkClip(model, track, clip, size.spec ? *size.spec : *steps.first().spec, error);
+    if (!info)
+        return textResult(error, true);
+    if (sc == FrameArg::Ok)
+        summary << "scale=" + num(scale);
+    if (xa == FrameArg::Ok)
+        summary << "x=" + num(x);
+    if (ya == FrameArg::Ok)
+        summary << "y=" + num(y);
+    if (ro == FrameArg::Ok)
+        summary << "rotation=" + num(rotation);
+    if (geometry) {
+        // The fit rect scaled about its centre, then moved by (x, y).
+        const QRectF fit = fitRect(info->producer, FilterParam::AffineFit);
+        const double w = fit.width() * scale, h = fit.height() * scale;
+        size.params["rect"] = QJsonObject{{"x", fit.x() + (fit.width() - w) / 2 + x},
+                                          {"y", fit.y() + (fit.height() - h) / 2 + y},
+                                          {"w", w},
+                                          {"h", h}};
+    }
+    if (ro == FrameArg::Ok)
+        size.params["rotation"] = rotation;
+    info.reset();
+    if (size.spec)
+        steps.append(size);
+    if (cropArg.isObject()) {
+        QStringList sides;
+        const QJsonObject crop = cropArg.toObject();
+        for (const char *side : {"left", "right", "top", "bottom"}) {
+            if (crop.value(side).isDouble())
+                sides << QStringLiteral("%1=%2").arg(side, num(crop.value(side).toDouble()));
+        }
+        summary << "crop " + sides.join(' ');
+    }
+    return runRecipe(track,
+                     clip,
+                     steps,
+                     QObject::tr("Set clip transform: %1").arg(summary.join(", ")));
+}
+
+QJsonObject clipSetBlurTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0;
+    QString error;
+    if (!checkKeys(arguments, {"track", "clip", "mode", "radius"}, error)
+        || !readTarget(arguments, track, clip, error))
+        return textResult(error, true);
+    const QString mode = arguments.value("mode").toString();
+    if (mode != "box" && mode != "pad")
+        return textResult("mode must be \"box\" or \"pad\".", true);
+    double radius = 5;
+    const FrameArg ra = readNumberArg(arguments, "radius", 0, 100, radius, error);
+    if (ra == FrameArg::Invalid || radius != std::floor(radius))
+        return textResult("radius must be an integer from 0 to 100.", true);
+    if (mode == "pad" && ra == FrameArg::Ok)
+        return textResult("radius is for mode \"box\" only; the pad blur uses Shotcut's default.",
+                          true);
+    RecipeStep r;
+    if (!(r.spec = recipeSpec(mode == "box" ? "box_blur" : "blur_pad", error)))
+        return textResult(error, true);
+    MultitrackModel &model = *MAIN.timelineDock()->model();
+    std::unique_ptr<Mlt::ClipInfo> info = checkClip(model, track, clip, *r.spec, error);
+    if (!info)
+        return textResult(error, true);
+    QString text;
+    if (mode == "box") {
+        r.params = QJsonObject{{"hradius", radius}, {"vradius", radius}};
+        text = QObject::tr("Set clip blur: box radius=%1").arg(num(radius));
+    } else {
+        const QRectF fit = fitRect(info->producer, FilterParam::PillarEchoFit);
+        r.params = QJsonObject{{"blur", 4},
+                               {"rect",
+                                QJsonObject{{"x", fit.x()},
+                                            {"y", fit.y()},
+                                            {"w", fit.width()},
+                                            {"h", fit.height()}}}};
+        text = QObject::tr("Set clip blur: pad");
+    }
+    info.reset();
+    return runRecipe(track, clip, {r}, text);
+}
+
 } // namespace
 
 namespace McpFilters {
@@ -1340,7 +1611,8 @@ bool applyFilter(int track,
                  const QString &undoText,
                  QString &error,
                  bool joinMacro,
-                 int *userIndex)
+                 int *userIndex,
+                 const std::function<void(Mlt::Properties &)> &extra)
 {
     if (!MAIN.isMultitrackValid()) {
         error = QStringLiteral("There is no timeline.");
@@ -1364,7 +1636,17 @@ bool applyFilter(int track,
             *userIndex = i;
         if (params.isEmpty())
             return true;
-        return setFilter(model, track, clip, i, *filter, *spec, params, undoText, joinMacro, error);
+        return setFilter(model,
+                         track,
+                         clip,
+                         i,
+                         *filter,
+                         *spec,
+                         params,
+                         undoText,
+                         joinMacro,
+                         error,
+                         extra);
     }
     return addFilter(model,
                      track,
@@ -1375,7 +1657,8 @@ bool applyFilter(int track,
                      undoText,
                      joinMacro,
                      error,
-                     userIndex);
+                     userIndex,
+                     extra);
 }
 
 bool addOutputFilter(const QString &service,
@@ -1506,8 +1789,8 @@ QList<McpTool> McpTools::filterTools()
          "measured, clamped to -70..24 dB, applied like clip_set_volume as ONE undo step "
          "\"Normalize to <t> LUFS\". If the measurement finishes within wait_ms (0 to 20000, "
          "default 0; a cached measurement counts) the call returns {measured_lufs, "
-         "applied_gain_db, target_lufs, changed, clip, track, index?}; otherwise it returns {job_id, "
-         "state, measure_job_id} at once and the gain is applied AUTOMATICALLY when the "
+         "applied_gain_db, target_lufs, changed, clip, track, index?}; otherwise it returns "
+         "{job_id, state, measure_job_id} at once and the gain is applied AUTOMATICALLY when the "
          "measurement ends (as soon as no other tool call is running): get_job(job_id) then "
          "shows that result, and the change is an ordinary undo step made at that moment (it "
          "discards any redo history). The clip is found again by identity (source, trim, and "
@@ -1516,9 +1799,10 @@ QList<McpTool> McpTools::filterTools()
          "Nothing is edited (the job fails with \"The clip changed while measuring\") when the "
          "clip was trimmed, removed or replaced, or no single clip matches, or (\"The project "
          "was closed or replaced while measuring\") the timeline was closed or another project "
-         "opened. A gain of exactly 0 dB removes an existing gain filter. Refused: a locked track, a blank or transition, a clip "
-         "without audio, a speed-changed clip, and a silent source (integrated loudness at or "
-         "below -70 LUFS). Fades, track gain and other filters are not taken into account.",
+         "opened. A gain of exactly 0 dB removes an existing gain filter. Refused: a locked "
+         "track, a blank or transition, a clip without audio, a speed-changed clip, and a "
+         "silent source (integrated loudness at or below -70 LUFS). Fades, track gain and other "
+         "filters are not taken into account.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},
@@ -1563,5 +1847,72 @@ QList<McpTool> McpTools::filterTools()
              "clip":{"type":"integer","minimum":0}
            },"required":["track","clip"]})"),
          clipDetachAudioTool},
+        {"clip_set_color",
+         "Adjust a timeline clip's picture as ONE undo step (\"Set clip color: name=value, ...\") "
+         "with Shotcut's CPU filters, one per value: brightness (-1 to 1, 0 unchanged; Brightness "
+         "level = 1 + brightness), contrast (-1 to 1, 0 unchanged; Shotcut's Contrast filter, "
+         "slider level (contrast + 1) / 2, so gain = level * 2 and gamma = (1 - level) * 2), "
+         "saturation (0 to 3 multiplier, 1 unchanged, 0 grey; Saturation), temperature_k (2000 "
+         "to 15000 kelvin, 6500 neutral; White Balance). Give at least one. Each value changes "
+         "the clip's first filter of that kind or adds one, so repeated calls update rather than "
+         "stack. Refused (nothing changed): a filter this Shotcut cannot use (saturation and "
+         "temperature_k need MLT's frei0r plugins; the error says why), unknown arguments, a "
+         "locked track, a blank or transition, an audio track or audio-only clip, a value with "
+         "keyframes. Returns {filters:[{id, index}], track} (ids and indexes as "
+         "filter_list_applied reports them).",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0},
+             "brightness":{"type":"number","minimum":-1,"maximum":1},
+             "contrast":{"type":"number","minimum":-1,"maximum":1},
+             "saturation":{"type":"number","minimum":0,"maximum":3},
+             "temperature_k":{"type":"number","minimum":2000,"maximum":15000}
+           },"required":["track","clip"],"additionalProperties":false})"),
+         clipSetColorTool},
+        {"clip_set_transform",
+         "Size, move, rotate and crop a timeline clip's picture as ONE undo step (\"Set clip "
+         "transform: ...\"). scale (0.05 to 8; 1 = the picture fitted into the frame), x and y "
+         "(pixels of the video mode: the picture's centre offset from the frame centre, default "
+         "0) and rotation (-360 to 360 degrees) set Shotcut's Size, Position & Rotate filter in "
+         "Fit mode (the picture keeps its shape; transparent around it, so lower tracks or "
+         "black show): the rect is the fit rect scaled about its centre and moved by (x, y); "
+         "when any of scale, x, y is given the others take their defaults, and rotation alone "
+         "keeps the rect. crop {left, right, top, bottom} (integer pixels of the video mode, "
+         "given sides only) sets the Crop: Source filter. Give at least one. Each filter is "
+         "changed when the clip has one, else added (a new crop before a new size filter; "
+         "filters are appended after the clip's existing ones, as Shotcut does). "
+         "Picture-in-picture on a 1920x1080 project: {scale: 0.3, x: 560, y: -300} on the upper "
+         "track's clip. Refused (nothing changed): unknown arguments, a crop that removes the "
+         "whole picture, a locked track, a blank or transition, an audio track or audio-only "
+         "clip, values with keyframes. Returns {filters:[{id, index}], track}.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0},
+             "scale":{"type":"number","minimum":0.05,"maximum":8},
+             "x":{"type":"number"},
+             "y":{"type":"number"},
+             "rotation":{"type":"number","minimum":-360,"maximum":360},
+             "crop":{"type":"object","minProperties":1,"properties":{
+               "left":{"type":"integer","minimum":0},
+               "right":{"type":"integer","minimum":0},
+               "top":{"type":"integer","minimum":0},
+               "bottom":{"type":"integer","minimum":0}},"additionalProperties":false}
+           },"required":["track","clip"],"additionalProperties":false})"),
+         clipSetTransformTool},
+        {"clip_set_blur",
+         "Blur a timeline clip's picture as ONE undo step: mode \"box\" sets Shotcut's Blur: Box "
+         "(radius 0 to 100 pixels both ways, default 5); mode \"pad\" sets Blur: Pad (the picture "
+         "fitted into the frame over a blurred, enlarged copy of itself that fills the bars; "
+         "blur 4, no radius). A clip that already has that blur gets it replaced with these "
+         "values (no second filter). Refused (nothing changed): unknown arguments, a locked "
+         "track, a blank or transition, an audio track or audio-only clip, values with "
+         "keyframes. Returns {filters:[{id, index}], track}.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0},
+             "mode":{"type":"string","enum":["box","pad"]},
+             "radius":{"type":"integer","minimum":0,"maximum":100}
+           },"required":["track","clip","mode"],"additionalProperties":false})"),
+         clipSetBlurTool},
     };
 }
