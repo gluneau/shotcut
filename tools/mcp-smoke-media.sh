@@ -986,6 +986,11 @@ open_fixture_project "$EMPTY" >/dev/null
 sleep 1
 tool_json timeline_insert_range "{\"path\":\"$MEDIA/tone_av.mp4\",\"in_s\":0,\"out_s\":10,\"track\":0,\"position\":0}" >/dev/null
 RR0="$(tool_json get_timeline '{}')"
+# Regression: get_timeline read the timeline panel's display cache, which is -1 on a new timeline
+# until the preview shows its first frame (then it agrees with get_state); read right after the
+# insert it reported -1 most of the time.
+expect_eq "get_timeline right after creating a timeline: position is get_state's" \
+  "$(tool_json get_state '{}' | jq '.position')" "$(echo "$RR0" | jq '.position')"
 expect_eq "remove_ranges fixture: one 250-frame clip" "[[0,250,0,249]]" "$(echo "$RR0" | jq -c '.tracks[0]' | clipf)"
 rr() { tool_json timeline_remove_ranges "$1"; }
 rerr() { tool_is_error timeline_remove_ranges "$1"; }
@@ -1312,6 +1317,7 @@ expect_eq "track_set: no timeline is an error" true "$(tool_is_error track_set '
 expect_eq "track_remove: no timeline is an error" true "$(tool_is_error track_remove '{"track":0}')"
 tool_json timeline_insert_range "{\"path\":\"$MEDIA/tone_av.mp4\",\"in_s\":0,\"out_s\":10,\"track\":0,\"position\":0}" >/dev/null
 TK0="$(tl)"
+expect_eq "tracks fixture: get_timeline position is never -1" false "$(echo "$TK0" | jq '.position < 0')"
 V1CLIPS="$(echo "$TK0" | jq -c '.tracks[0]' | clipf)"
 expect_eq "tracks fixture: V1 holds one 250-frame clip" "[[0,250,0,249]]" "$V1CLIPS"
 expect_eq "trackJson: gain_db 0 on a video track" 0 "$(echo "$TK0" | jq '.tracks[0].gain_db')"

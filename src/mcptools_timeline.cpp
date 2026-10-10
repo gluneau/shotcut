@@ -90,7 +90,9 @@ QJsonObject getTimelineTool(const QJsonObject &)
     QJsonArray tracks;
     if (MAIN.isMultitrackValid()) {
         MultitrackModel &model = *MAIN.timelineDock()->model();
-        result["position"] = MAIN.timelineDock()->position();
+        // The engine's playhead, not TimelineDock::position(): that is a display cache, -1 on a
+        // new timeline until the preview shows its first frame.
+        result["position"] = MAIN.multitrack()->position();
         result["duration"] = MAIN.multitrack()->get_playtime();
         for (int t = 0; t < model.trackList().size(); ++t)
             tracks.append(trackJson(model, t));
