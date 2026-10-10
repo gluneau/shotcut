@@ -2149,6 +2149,35 @@ void MainWindow::setProfile(const QString &profile_name)
     emit profileChanged();
 }
 
+bool MainWindow::setVideoMode(int width, int height, int fpsNum, int fpsDen, QString &error)
+{
+    if ((MLT.producer() && MLT.producer()->is_valid()) || isMultitrackValid()
+        || isPlaylistValid()) {
+        error = tr("The project must be empty: start a new project first.");
+        return false;
+    }
+    // Same as an unnamed custom Video Mode (on_actionAddCustomProfile_triggered with
+    // CustomProfileDialog::on_buttonBox_accepted): square pixels, progressive, BT.709, SDR. The
+    // saved Video Mode setting is left alone.
+    const auto gcd = Util::greatestCommonDivisor(width, height);
+    MLT.profile().set_explicit(1);
+    MLT.profile().set_width(width);
+    MLT.profile().set_height(height);
+    MLT.profile().set_display_aspect(width / gcd, height / gcd);
+    MLT.profile().set_sample_aspect(1, 1);
+    MLT.profile().set_frame_rate(fpsNum, fpsDen);
+    MLT.profile().set_progressive(1);
+    MLT.profile().set_colorspace(709);
+    MLT.updatePreviewProfile();
+    MLT.setPreviewScale(Settings.playerPreviewScale());
+    MLT.setColorTrc(QString());
+    // No menu entry matches; this also stops open() from returning to Automatic mode.
+    if (m_profileGroup->checkedAction())
+        m_profileGroup->checkedAction()->setChecked(false);
+    emit profileChanged();
+    return true;
+}
+
 bool MainWindow::isSourceClipMyProject(QString resource, bool withDialog)
 {
     if (m_player->tabIndex() == Player::ProjectTabIndex && MLT.savedProducer()

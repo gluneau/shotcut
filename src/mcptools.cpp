@@ -69,6 +69,10 @@ QJsonObject getState(const QJsonObject &)
     state["position"] = loaded ? MLT.producer()->position() : 0;
     state["duration"] = loaded ? MLT.producer()->get_playtime() : 0;
     state["fps"] = MLT.profile().fps();
+    state["profile"] = QJsonObject{{"width", MLT.profile().width()},
+                                   {"height", MLT.profile().height()},
+                                   {"fps_num", MLT.profile().frame_rate_num()},
+                                   {"fps_den", MLT.profile().frame_rate_den()}};
     return McpTools::jsonResult(state);
 }
 
@@ -297,8 +301,9 @@ static QList<McpTool> stage1Tools()
     return {
         {"get_state",
          "Report the current project: file path (or null), modified flag, whether media is loaded, "
-         "whether it is playing, playhead position and duration in frames, and frame rate. Position "
-         "and duration describe the player's current producer, which can be a source clip while a "
+         "whether it is playing, playhead position and duration in frames, frame rate, and the "
+         "project video format as profile {width, height, fps_num, fps_den}. Position and "
+         "duration describe the player's current producer, which can be a source clip while a "
          "timeline project exists.",
          schema(R"({"type":"object","properties":{}})"),
          getState},
@@ -428,6 +433,7 @@ QList<McpTool> McpTools::all()
     tools += filterTools();
     tools += audioTools();
     tools += pictureTools();
+    tools += formatTools();
     return tools;
 }
 

@@ -70,6 +70,7 @@ QList<McpTool> structureTools();
 QList<McpTool> filterTools();
 QList<McpTool> audioTools();
 QList<McpTool> pictureTools();
+QList<McpTool> formatTools();
 
 } // namespace McpTools
 

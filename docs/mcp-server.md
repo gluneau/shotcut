@@ -29,7 +29,7 @@ revision is not supported.
 
 | Tool | What it does |
 |------|--------------|
-| `get_state` | Project path, modified flag, loaded/playing, position, duration, fps |
+| `get_state` | Project path, modified flag, loaded/playing, position, duration, fps, profile |
 | `open_project` | Open a project or media file (absolute path of an existing file) |
 | `save_project` | Save the project, or write a copy |
 | `play`, `pause`, `seek` | Transport control (frame numbers) |
@@ -807,6 +807,43 @@ The details are in the known-limits lists above; in short:
 - Untested: the proxy and reverse refusals of `clip_set_speed`, ripple-on speed changes, and the
   failure branches of the filter commands' undo.
 
+## Stage 3C: format, text and delivery
+
+### Project format
+
+`project_set_format` (52 tools in all) sets the project's video format (Shotcut's Video Mode) on
+an EMPTY project, so a client can make a vertical short before adding any media.
+
+| Argument | Meaning |
+|----------|---------|
+| `preset?` | `16:9` (1920x1080), `9:16` (1080x1920), `1:1` (1080x1080) or `4:5` (1080x1350) |
+| `width?`, `height?` | Instead of `preset`: both, even integers 64..7680 |
+| `fps?` | 23.976, 24, 25, 29.97, 30, 50, 59.94 or 60; default 30 (the NTSC rates are N/1001) |
+
+Pass exactly one of `preset` or `width` and `height`; unknown argument names are refused. The
+result is `{width, height, fps_num, fps_den, sar, dar}` with `sar` and `dar` as `"num:den"`, and
+`get_state` reports the current format as `profile: {width, height, fps_num, fps_den}`.
+
+- It does what Shotcut's unnamed custom Video Mode does (`CustomProfileDialog`, OK with no name):
+  square pixels, progressive, BT.709, SDR, the display aspect reduced from width and height, then
+  the preview profile refresh. It is a new public `MainWindow::setVideoMode`.
+- Refused, changing nothing, once anything is loaded: a clip in the player, a playlist item or a
+  timeline ("The project must be empty: start a new project first."). Shotcut would reload every
+  producer and clear the undo history on a mid-project change; the tool never does.
+- Call it before adding media: the first file added no longer sets the format (the profile is
+  explicit). It may be called again while the project is still empty.
+- Not an undo step (there is nothing to undo on an empty project), and the project is not marked
+  modified. A saved project keeps the format (it is written into the project file).
+
+### Known limits (project format)
+
+- The saved Video Mode setting (`[player] profile` in `shotcut.ini`) is not changed, so closing
+  the project or starting a new one returns to the saved mode.
+- The Video Mode menu is not synced to the new format: as after Shotcut's own unnamed custom mode,
+  no mode is checked until the project is closed (which re-checks the saved mode). Choosing a
+  Video Mode in the menu afterwards replaces the tool's format as usual.
+- Interlaced, non-square-pixel, BT.601/BT.2020 and HDR formats are not offered.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -893,6 +930,16 @@ and 3600 s files (about 7 and 10 s each on a debug build); if a measurement ends
 script can change the clip, that check prints SKIP. The picture recipe checks export four 1 s
 clips and read pixels with ffmpeg and od; without frei0r the saturation and temperature checks
 print SKIP. The `clip_set_speed` checks export a 10 s clip at speed 2 (`melt-7` again).
+
+Stage 3C has its own script, also needing a FRESH throwaway Shotcut:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] [MCP_APPDATA=<scratch dir>] tools/mcp-smoke-format.sh
+
+It needs bash, curl, jq, ffmpeg and ffprobe. It checks the `project_set_format` refusals and every
+preset on the empty session, then sets 9:16, adds a 320x240 25 fps clip and builds a timeline,
+checks the format is kept, the tool is refused, and an export (`x264-medium`, `melt-7`) is
+1080x1920 at 30 fps. With `MCP_APPDATA` it also checks that `shotcut.ini` has no saved
+`[player] profile`.
 
 Manual checks (they need a modified project, which the tools cannot create):
 

@@ -99,6 +99,7 @@ add_executable(shotcut WIN32 MACOSX_BUNDLE
   mcptools_audio.cpp
   mcptools_export.cpp
   mcptools_filters.cpp
+  mcptools_format.cpp
   mcptools_frame.cpp
   mcptools_overview.cpp
   mcptools_picture.cpp

@@ -89,6 +89,7 @@ public:
     void setFullScreen(bool isFullScreen);
     QString untitledFileName() const;
     void setProfile(const QString &profile_name);
+    bool setVideoMode(int width, int height, int fpsNum, int fpsDen, QString &error);
     QString fileName() const { return m_currentFile; }
     bool isSourceClipMyProject(QString resource = MLT.resource(), bool withDialog = true);
     bool keyframesDockIsVisible() const;
