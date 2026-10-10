@@ -414,8 +414,23 @@ Residual risks:
 
 ## Stage 3B: filters
 
-Stage 3B starts with five generic filter tools (43 tools in all) that add, change and remove
-filters on TIMELINE clips:
+Stage 3B adds 13 tools (51 in all) that change how TIMELINE clips look and sound: five generic
+filter tools over an allowlist of Shotcut filters, and eight plain-language recipes built on them
+and on Shotcut's own commands.
+
+| Group | Tools | Section |
+|-------|-------|---------|
+| Filters | `filter_list_available`, `filter_list_applied`, `filter_add`, `filter_set`, `filter_remove` | below |
+| Audio | `clip_set_volume`, `clip_normalize`, `track_set_ducking`, `clip_detach_audio` | Audio recipes |
+| Picture | `clip_set_color`, `clip_set_transform`, `clip_set_blur` | Picture recipes |
+| Speed | `clip_set_speed` | Clip speed |
+
+Every 3B edit is at most ONE undo step with its own text, finds its clip by `(track, clip)` from
+`get_timeline` (never through the selection or the Filters panel), and changes nothing when it
+is refused. The residual risks of the whole part are summed up at the end of this section.
+
+The five generic filter tools (43 tools in all at that point) add, change and remove filters on
+timeline clips:
 
 | Tool | What it does | Key arguments |
 |------|--------------|---------------|
@@ -747,6 +762,28 @@ set by `shotcut:animIn` alone and a `.mlt` project clip), and an export of a 10 
   `ripple` and `rippleAllTracks` on, "nothing else moves" was checked by hand only.
 - The speed change re-reads the clip's file; the audio waveform is redrawn later, as in Shotcut.
 
+### Residual risks (stage 3B)
+
+The details are in the known-limits lists above; in short:
+
+- Keyframes are never edited, moved or rescaled. `filter_set` and the recipes refuse a value that
+  has keyframes, and `clip_set_speed` refuses a clip with fades or keyframed filters, because
+  neither the tool nor Shotcut would rescale them to the new length.
+- GPU (Movit) filters are never offered, and the tools are untested in Shotcut's GPU mode. A GPU
+  crop on a clip counts as its one crop.
+- Only timeline clips are reachable: filters on the clip open in the Source player (Shotcut has
+  no undo there), on tracks and on the timeline output are not supported. The output target
+  exists in the filter commands for a later stage but is untested.
+- `track_set_ducking` is untested end to end: MLT's mix transition gained ducking in 7.41, and on
+  this build (MLT 7.36.1) the tool refuses with "Audio ducking needs MLT 7.41 or newer". Undo of
+  `enabled: false` leaves ducking off (an upstream Shotcut bug).
+- `saturation` and `white_balance` (and so `clip_set_color`'s `saturation` and `temperature_k`)
+  need MLT's frei0r plugins; without them they are listed as unavailable and refused.
+- A background `clip_normalize` edit lands when Shotcut is idle; the idle check sees only QWidget
+  modal dialogs and popups.
+- Untested: the proxy and reverse refusals of `clip_set_speed`, ripple-on speed changes, and the
+  failure branches of the filter commands' undo.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -832,7 +869,7 @@ and checks the refusals. The audio recipe checks export a normalized clip (`x264
 and 3600 s files (about 7 and 10 s each on a debug build); if a measurement ends before the
 script can change the clip, that check prints SKIP. The picture recipe checks export four 1 s
 clips and read pixels with ffmpeg and od; without frei0r the saturation and temperature checks
-print SKIP.
+print SKIP. The `clip_set_speed` checks export a 10 s clip at speed 2 (`melt-7` again).
 
 Manual checks (they need a modified project, which the tools cannot create):
 
