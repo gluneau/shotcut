@@ -374,13 +374,15 @@ around the first one.
 The MCP server's preview guard: `timeline_remove_ranges`, `timeline_insert_range`,
 `track_remove`, `clip_detach_audio`, `clip_set_speed` and the `undo`/`redo` tools pause
 playback, block the preview refresh and stop the preview consumer (which waits for a frame it
-is rendering) while they run, then restart it and refresh once. For large work,
-`timeline_remove_ranges` always and `undo`/`redo` of a step with more than 8 commands (a
-`timeline_remove_ranges` call of 3 or more cuts), the preview is fed a black stand-in at the
-same position instead of the timeline, because Shotcut still seeks the player after every
-duration change and that seek alone renders the clips being edited; the timeline is reconnected
-afterwards. Guards do not nest (only the
-outermost acts).
+is rendering) while they run, then restart it and refresh once. The stopped consumer does not
+stay stopped: Shotcut seeks the player after every duration change, and that seek starts a
+stopped consumer again DURING the guard (seen in 21 of 24 guarded calls of the smoke test's
+longest-track loop). So on a timeline the guard also connects the consumer to a black stand-in
+at the same position, and the seek renders that instead of the clips being edited. For large
+work, `timeline_remove_ranges` always and `undo`/`redo` of a step with more than 8 commands (a
+`timeline_remove_ranges` call of 3 or more cuts), the consumer is started on the stand-in at
+once, so the preview shows black while they run. The timeline is reconnected afterwards. Guards
+do not nest (only the outermost acts).
 
 Measured on a debug build (a 120-cut call plus undo, redo and undo per run): blocking the
 refresh alone left a corrupt snapshot in about 3-7% of runs wherever 30 or more runs were made,
@@ -392,10 +394,7 @@ cannot rule it out. Call `save_project` before large cuts and send them in chunk
 Residual risks:
 
 - Undo/Redo and History jumps in the Shotcut window are not guarded.
-- Small MCP edits (`timeline_insert_range`, `track_remove`, small undo/redo steps) get the
-  stopped consumer, not the stand-in, so Shotcut's seek after a duration change can still render
-  a clip once the guard restarts the consumer; the other edit tools (filters, markers, track
-  properties) are not guarded.
+- The edit tools that are not guarded (filters, markers, track properties) keep the exposure.
 - Every guarded call restarts the audio device when the preview was running.
 - Inserting into an empty timeline creates the timeline inside the guard, while the player still
   shows the old producer; nothing is swapped then.

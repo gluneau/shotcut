@@ -170,9 +170,6 @@ EditPreviewGuard::EditPreviewGuard(bool standIn)
     m_outer = true;
     MLT.pause();
     MLT.blockRefresh(true);
-    // Shotcut still seeks the player after every duration change (Player::onDurationChanged),
-    // which makes the preview fetch the frame under the playhead from the clips being edited.
-    // For large edits feed the preview a black producer at the same position instead.
     Mlt::Consumer *consumer = MLT.consumer();
     if (!consumer || !consumer->is_valid())
         return;
@@ -184,8 +181,12 @@ EditPreviewGuard::EditPreviewGuard(bool standIn)
     if (!m_wasStopped)
         consumer->stop();
     m_consumer = true;
-    if (!standIn || !MLT.isMultitrack())
+    if (!MLT.isMultitrack())
         return;
+    // A stopped consumer does not stay stopped: every duration change makes Shotcut seek the
+    // player (Player::onDurationChanged), and Controller::seek starts a stopped consumer, on
+    // whatever it is connected to. So it is always connected to a black stand-in at the same
+    // position while the guard lives; only large work also starts it on the stand-in.
     const int position = MLT.producer()->position();
     m_standIn = std::make_unique<Mlt::Producer>(MLT.profile(), "color:black");
     if (!m_standIn->is_valid()) {
@@ -197,7 +198,7 @@ EditPreviewGuard::EditPreviewGuard(bool standIn)
     m_standIn->set_speed(0); // producers play at speed 1 by default
     m_standIn->seek(position);
     consumer->connect(*m_standIn);
-    if (!m_wasStopped)
+    if (standIn && !m_wasStopped)
         consumer->start();
 }
 

@@ -1300,6 +1300,29 @@ expect_eq "guard after track_remove: frame 10 is blue again" B "$(rgb_class "$TM
 tool_json undo '{}' >/dev/null
 gf_call '{"position":10}' "$TMP/rf11.jpg"
 expect_eq "guard after a small undo: frame 10 is red (the track is back)" R "$(rgb_class "$TMP/rf11.jpg" 100 100 110 70)"
+# Stress check: removing the LONGEST of three unequal tracks changes the duration every time, and
+# Shotcut's seek after a duration change restarts a stopped preview consumer during the guard (it
+# must then run on the stand-in, not on the graph being edited). V3 green 0-24, V2 red 300-374,
+# V1 red/green/blue 0-224.
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+sins() { tool_json timeline_insert_range "$(jq -nc --arg p "$MEDIA/scenes.mp4" --argjson i "$1" --argjson o "$2" --argjson t "$3" --argjson q "$4" '{path:$p,in_s:$i,out_s:$o,track:$t,position:$q}')" >/dev/null; }
+sins 0 9 0 0
+tool_json track_add '{"type":"video"}' >/dev/null
+tool_json track_add '{"type":"video"}' >/dev/null
+sins 0 3 1 300
+sins 3 4 0 0
+LT0="$(tool_json get_timeline '{}')"
+expect_eq "longest-track fixture: track ends and duration" '[375,[25,375,225]]' "$(echo "$LT0" | jq -c '[.duration, [.tracks[] | [.clips[] | .start + .duration] | max]]')"
+for _ in $(seq 1 25); do
+  tool_json track_remove '{"track":1,"force":true}' >/dev/null
+  tool_json undo '{}' >/dev/null; tool_json redo '{}' >/dev/null; tool_json undo '{}' >/dev/null
+done
+expect_eq "stress check: 25 rounds of removing the longest track restore it" "$LT0" "$(tool_json get_timeline '{}')"
+gf_call '{"position":320}' "$TMP/rf12.jpg"
+expect_eq "stress check: frame 320 is the longest track's red (fresh preview)" R "$(rgb_class "$TMP/rf12.jpg" 100 100 110 70)"
+gf_call '{"position":10}' "$TMP/rf13.jpg"
+expect_eq "stress check: frame 10 is the top track's green" G "$(rgb_class "$TMP/rf13.jpg" 100 100 110 70)"
 
 echo "== track and marker tools"
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[].name]')"

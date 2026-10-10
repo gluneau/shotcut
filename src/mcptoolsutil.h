@@ -65,23 +65,24 @@ int lastFrame();
 // Moves the playhead the same way for a plain clip and for a timeline.
 void movePlayhead(int position);
 
-// Wraps long or snapshot-heavy edits (and undo/redo of them). While the outermost guard lives it
-// pauses playback, blocks the preview refresh Shotcut issues after every edit and stops the
-// preview consumer, which joins its read-ahead thread so no frame renders while the edit changes
-// the graph (an in-flight frame crashed RemoveTrackCommand::undo); with standIn it instead feeds
-// the preview a black stand-in producer at the same position (connected even when the preview
-// consumer was stopped, whose state is restored). When it goes out of scope (on every exit path)
-// it reconnects the timeline if needed, restarts a consumer that was running (it stays stopped
-// when there is no producer any more) and refreshes once.
+// Wraps timeline edits (and undo/redo of them). While the outermost guard lives it pauses
+// playback, blocks the preview refresh Shotcut issues after every edit and stops the preview
+// consumer, which joins its read-ahead thread so no frame renders while the edit changes the
+// graph (an in-flight frame crashed RemoveTrackCommand::undo). On a timeline it also connects the
+// stopped consumer to a black stand-in producer at the same position, because the consumer does
+// not stay stopped: a duration change makes Shotcut seek the player (Player::onDurationChanged)
+// and Controller::seek starts a stopped consumer on whatever it is connected to. With standIn
+// (large work) the consumer is also started on the stand-in, which shows black; without it the
+// stand-in is only rendered if such a seek restarts the consumer. When the guard goes out of
+// scope (on every exit path) it reconnects the timeline, restarts a consumer that was running (it
+// stays stopped when there is no producer any more) and refreshes once.
 // Why: Shotcut serializes clips for undo on the GUI thread while the preview thread may render
 // them, which rewrites their meta.media.* properties; that race can corrupt the undo snapshot so
-// that undo aborts (debug) or drops the clip (release). Blocking refreshes alone is not enough,
-// because Shotcut also seeks the player after every duration change; the stand-in is. The
-// stand-in costs a black preview, so use it only for large work. Every guard costs an audio
-// device restart when the consumer was running.
+// that undo aborts (debug) or drops the clip (release). Every guard costs an audio device restart
+// when the consumer was running.
 // Nesting: inner guards are no-ops (a static depth counter). Shotcut's own RefreshBlocker and
 // MultitrackModel::endBulkUpdate() also clear the same refresh-block flag when they finish; that
-// only lets a refresh through early, which the stand-in (when used) makes harmless.
+// only lets a refresh through early, which the stand-in makes harmless.
 class EditPreviewGuard
 {
 public:
