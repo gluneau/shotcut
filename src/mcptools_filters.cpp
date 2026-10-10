@@ -943,11 +943,24 @@ bool setClipGain(int track,
     return true;
 }
 
+bool checkKeys(const QJsonObject &arguments, const QStringList &allowed, QString &error)
+{
+    for (auto it = arguments.begin(); it != arguments.end(); ++it) {
+        if (!allowed.contains(it.key())) {
+            error = QStringLiteral("Unknown argument '%1'; the arguments are: %2.")
+                        .arg(it.key(), allowed.join(", "));
+            return false;
+        }
+    }
+    return true;
+}
+
 QJsonObject clipSetVolumeTool(const QJsonObject &arguments)
 {
     int track = 0, clip = 0;
     QString error;
-    if (!readTarget(arguments, track, clip, error))
+    if (!checkKeys(arguments, {"track", "clip", "gain_db"}, error)
+        || !readTarget(arguments, track, clip, error))
         return textResult(error, true);
     double gain = 0;
     if (readNumberArg(arguments, "gain_db", -70, 24, gain, error) != FrameArg::Ok)
@@ -1104,7 +1117,8 @@ QJsonObject clipNormalizeTool(const QJsonObject &arguments)
 {
     int track = 0, clip = 0, waitMs = 0;
     QString error;
-    if (!readTarget(arguments, track, clip, error))
+    if (!checkKeys(arguments, {"track", "clip", "target_lufs", "wait_ms"}, error)
+        || !readTarget(arguments, track, clip, error))
         return textResult(error, true);
     auto n = std::make_shared<Normalize>();
     if (readNumberArg(arguments, "target_lufs", -30, -6, n->target, error) == FrameArg::Invalid
@@ -1179,9 +1193,13 @@ std::unique_ptr<Mlt::Transition> mixTransition(MultitrackModel &model, int mltIn
 QJsonObject trackSetDuckingTool(const QJsonObject &arguments)
 {
     int track = 0;
+    QString error;
+    const QStringList keys{"track", "threshold_db", "reduction_db", "fade_in_ms", "fade_out_ms",
+                           "enabled"};
+    if (!checkKeys(arguments, keys, error))
+        return textResult(error, true);
     if (readFrame(arguments, "track", track) != FrameArg::Ok)
         return textResult("track must be a non-negative integer.", true);
-    QString error;
     double threshold = -12, reduction = -12, fadeIn = 1500, fadeOut = 250;
     if (readNumberArg(arguments, "threshold_db", -70, 0, threshold, error) == FrameArg::Invalid
         || readNumberArg(arguments, "reduction_db", -70, 0, reduction, error) == FrameArg::Invalid
@@ -1279,7 +1297,8 @@ QJsonObject clipDetachAudioTool(const QJsonObject &arguments)
 {
     int track = 0, clip = 0;
     QString error;
-    if (!readTarget(arguments, track, clip, error))
+    if (!checkKeys(arguments, {"track", "clip"}, error)
+        || !readTarget(arguments, track, clip, error))
         return textResult(error, true);
     TimelineDock *dock = MAIN.timelineDock();
     MultitrackModel &model = *dock->model();
@@ -1324,18 +1343,6 @@ QJsonObject clipDetachAudioTool(const QJsonObject &arguments)
 // ---- Picture recipes
 
 // Refuses argument names outside allowed (a misspelt value must not be ignored silently).
-bool checkKeys(const QJsonObject &arguments, const QStringList &allowed, QString &error)
-{
-    for (auto it = arguments.begin(); it != arguments.end(); ++it) {
-        if (!allowed.contains(it.key())) {
-            error = QStringLiteral("Unknown argument '%1'; the arguments are: %2.")
-                        .arg(it.key(), allowed.join(", "));
-            return false;
-        }
-    }
-    return true;
-}
-
 // The allowlist row id when it can be used, else null with the reason.
 const FilterSpec *recipeSpec(const QString &id, QString &error)
 {
@@ -1679,6 +1686,12 @@ QJsonObject clipSetSpeedTool(const QJsonObject &arguments)
                           true);
 
     const double oldSpeed = Util::GetSpeedFromProducer(&producer);
+    if (std::abs(speed - oldSpeed) < 1e-6) // already at that speed: no undo step
+        return jsonResult(QJsonObject{{"track", trackJson(model, track)},
+                                      {"clip", clip},
+                                      {"speed", speed},
+                                      {"duration", info->frame_count},
+                                      {"changed", false}});
     const QString filename = Util::GetFilenameFromProducer(&producer, false);
     std::unique_ptr<Mlt::Producer> np;
     if (speed == 1.0) {
@@ -1766,7 +1779,8 @@ QJsonObject clipSetSpeedTool(const QJsonObject &arguments)
     return jsonResult(QJsonObject{{"track", trackJson(model, track)},
                                   {"clip", clip},
                                   {"speed", speed},
-                                  {"duration", frames}});
+                                  {"duration", frames},
+                                  {"changed", true}});
 }
 
 } // namespace
@@ -1976,7 +1990,7 @@ QList<McpTool> McpTools::filterTools()
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},
              "gain_db":{"type":"number","minimum":-70,"maximum":24}
-           },"required":["track","clip","gain_db"]})"),
+           },"required":["track","clip","gain_db"],"additionalProperties":false})"),
          clipSetVolumeTool},
         {"clip_normalize",
          "Measure the loudness of a timeline clip's source range (the audio_levels measurement, "
@@ -2004,7 +2018,7 @@ QList<McpTool> McpTools::filterTools()
              "clip":{"type":"integer","minimum":0},
              "target_lufs":{"type":"number","minimum":-30,"maximum":-6},
              "wait_ms":{"type":"integer","minimum":0,"maximum":20000}
-           },"required":["track","clip"]})"),
+           },"required":["track","clip"],"additionalProperties":false})"),
          clipNormalizeTool},
         {"track_set_ducking",
          "Make a track (usually music) dip automatically while the tracks above it are louder "
@@ -2027,7 +2041,7 @@ QList<McpTool> McpTools::filterTools()
              "fade_in_ms":{"type":"number","minimum":0,"maximum":5000},
              "fade_out_ms":{"type":"number","minimum":0,"maximum":5000},
              "enabled":{"type":"boolean"}
-           },"required":["track"]})"),
+           },"required":["track"],"additionalProperties":false})"),
          trackSetDuckingTool},
         {"clip_detach_audio",
          "Split a video clip's sound onto an audio track, as Shotcut's Detach Audio does, as ONE "
@@ -2041,7 +2055,7 @@ QList<McpTool> McpTools::filterTools()
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0}
-           },"required":["track","clip"]})"),
+           },"required":["track","clip"],"additionalProperties":false})"),
          clipDetachAudioTool},
         {"clip_set_color",
          "Adjust a timeline clip's picture as ONE undo step (\"Set clip color: name=value, ...\") "
@@ -2125,7 +2139,8 @@ QList<McpTool> McpTools::filterTools()
          "non-file clip, a proxy clip (turn proxy editing off first), a clip playing in reverse, "
          "a clip with fades or keyframed filters (\"Remove fades and keyframes first\": Shotcut "
          "does not move keyframes either). Returns {track (as get_timeline), clip, speed, "
-         "duration (the clip's new frames)}.",
+         "duration (the clip's new frames), changed (false, with no undo step, when the clip "
+         "already plays at that speed)}.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},

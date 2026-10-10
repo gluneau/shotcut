@@ -385,6 +385,11 @@ undo_text >/dev/null
 expect_eq "hidden filters: undo removes only the new filter" "audiolevel sepia volume volume audiolevel " "$(order)"
 
 echo "== audio recipes: clip_set_volume"
+for a in 'clip_set_volume {"track":0,"clip":0,"gain_db":1,"extra":1}' \
+  'clip_normalize {"track":0,"clip":0,"target":-16}' 'track_set_ducking {"track":1,"threshold":-10}' \
+  'clip_detach_audio {"track":0,"clip":0,"force":true}'; do
+  expect_eq "${a%% *}: an unknown argument is refused by name" true "$(tool_text "${a%% *}" "${a#* }" | grep -q '^Unknown argument' && echo true)"
+done
 expect_eq "tools/list has the four audio recipes" true "$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq '[.result.tools[].name] | contains(["clip_set_volume","clip_normalize","track_set_ducking","clip_detach_audio"])')"
 # V1: 0 tone_av [0,100) with a 10-frame fade in, 1 noaudio [100,150); A1: audio-only clip [0,50).
 open_fixture_project "$EMPTY" >/dev/null
@@ -1040,6 +1045,12 @@ tool_json save_project "{\"path\":\"$TMP/speed0u.mlt\"}" >/dev/null
 expect_eq "speed 2: the project saved after undo is identical (but for the panel-written caption)" true "$(same_file_exact "$TMP/speed0.mlt" "$TMP/speed0u.mlt")"
 redo_text >/dev/null
 expect_eq "speed 2: redo applies it again" "$S1" "$(sstate)"
+R="$(speed "$V1" 0 2)"
+expect_eq "speed 2 again: changed false" false "$(echo "$R" | jq '.changed')"
+expect_eq "speed 2 again: nothing changed" "$S1" "$(sstate)"
+expect_eq "speed 2 again: no undo step (the next undo is the first 2x)" "Set clip speed: 2x" "$(undo_text)"
+expect_eq "speed 2 again: that undo restores the start" "$S0" "$(sstate)"
+redo_text >/dev/null
 expect_eq "speed 0.5 after 2: lengthening into the next clip is an error" true "$(ferr clip_set_speed "{\"track\":$V1,\"clip\":0,\"speed\":0.5}")"
 expect_eq "speed 0.5 after 2: the error names the free frames (275)" true "$(tool_text clip_set_speed "{\"track\":$V1,\"clip\":0,\"speed\":0.5}" | grep -q '275' && echo true)"
 expect_eq "speed 0.5 after 2: nothing changed" "$S1" "$(sstate)"

@@ -441,7 +441,10 @@ and on Shotcut's own commands.
 
 Every 3B edit is at most ONE undo step with its own text, finds its clip by `(track, clip)` from
 `get_timeline` (never through the selection or the Filters panel), and changes nothing when it
-is refused. The residual risks of the whole part are summed up at the end of this section.
+is refused. The eight recipes refuse an unknown argument name ("Unknown argument 'x'; the
+arguments are: ..."; their schemas say `additionalProperties: false`); the five generic filter
+tools ignore unknown top-level argument names (unknown names inside `params` are errors). The
+residual risks of the whole part are summed up at the end of this section.
 
 The five generic filter tools (43 tools in all at that point) add, change and remove filters on
 timeline clips:
@@ -747,7 +750,9 @@ panel or the selection.
   clip must fit the gap before the next clip on its track; otherwise the call is refused with the
   frames it needs and the free frames ("make room first"); Shotcut's own panel instead cuts the
   clip short (`limitClipOut`), which the tool never does.
-- Result `{track, clip, speed, duration}` (`duration` = the clip's new frames).
+- Result `{track, clip, speed, duration, changed}` (`duration` = the clip's new frames). A clip
+  that already plays at `speed` (within 1e-6) is left alone: `changed: false` and no undo step
+  (`keep_pitch` is not applied then).
 - Refused, nothing changed: unknown arguments, a missing or out-of-range `speed`, a non-boolean
   `keep_pitch`, a locked track, a blank or transition, a clip next to a transition, a still
   image, generator, `.mlt` or other non-file clip, a proxy clip (turn proxy editing off first),
@@ -781,6 +786,9 @@ set by `shotcut:animIn` alone and a `.mlt` project clip), and an export of a 10 
 
 The details are in the known-limits lists above; in short:
 
+- The filter commands find their filter again at undo and redo by the clip, the filter's index,
+  its MLT service and `shotcut:filter`. If the user reorders two filters of the same kind in
+  the Filters panel between a call and its undo, the undo can act on the other one.
 - Keyframes are never edited, moved or rescaled. `filter_set` and the recipes refuse a value that
   has keyframes, and `clip_set_speed` refuses a clip with fades or keyframed filters, because
   neither the tool nor Shotcut would rescale them to the new length.
