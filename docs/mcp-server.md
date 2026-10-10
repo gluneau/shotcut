@@ -286,9 +286,10 @@ transcription is already running; wait for it with get_job."). A cached result a
 identical to a running job (which returns that job) are never refused.
 
 Programs are looked up in Shotcut's application folder first, then on `PATH`: `ffmpeg` and
-`ffprobe` (both ship with Shotcut). A missing program is a tool error. Arguments are passed as a
-list, never through a shell. Temporary files (`transcribe`'s decoded audio) are deleted when the
-job ends.
+`ffprobe` (both ship with Shotcut). A missing program is a tool error naming the program and where
+it looked (untested: the smoke scripts always run with both installed, and Whisper's "not
+configured" error is tested instead). Arguments are passed as a list, never through a shell.
+Temporary files (`transcribe`'s decoded audio) are deleted when the job ends.
 
 Results are cached in memory, keyed by the file's path, size and modification time, the tool and
 its parameters (and for a clip, its position and trim, since `timeline_frames` depend on them). A
@@ -329,7 +330,8 @@ changing its size or modification time is not noticed.
   most 45 s, else an error. The playhead is put back and playback resumes; a source clip shown
   in the player is replaced by the timeline. Refused with no timeline, an empty timeline, or
   while an export started with `export_video` runs; stopped with an error if the timeline
-  changes meanwhile.
+  changes meanwhile (detected as a different timeline object or a different length: a timeline
+  replaced by another of the same length at the same address is not noticed).
 
 ### transcribe and Whisper
 
@@ -500,6 +502,10 @@ Residual risks:
 - Memory grows with every split `timeline_remove_ranges` makes (each split reopens the media);
   a long session of many cuts can use several GB on a debug build.
 - The analysis cache and Whisper results have no size budget beyond their entry counts.
+- Transcripts are kept under the file's absolute, cleaned path, not its canonical one: a clip
+  whose resource is a symbolic link and a transcript supplied under the link's target (or the
+  other way round) never meet; supply it under the path the clip uses.
+- The "missing program" errors of the analysis tools are untested (see Background jobs).
 
 ## Stage 3B: filters
 
@@ -848,12 +854,13 @@ The smoke test checks a 250-frame clip at speed 2 (125 frames, in 0 out 124, fil
 `warp_speed` 2 and `warp_pitch` 1 in the saved project), undo restoring `get_timeline` exactly and
 the saved project apart from `shotcut:caption` lines (Shotcut's undo selects the clip, and the
 Properties panel writes its caption on its own timer, before or after the save), redo, a refused
-lengthening into the next clip (the error names the 275 free frames), speed 1 after 2 undone
-(the saved project equal apart from `meta.media.*` probe caches, which MLT can add to a clip
-Shotcut's undo rebuilds), a trimmed clip at speed 2 and 0.5 (last on its track), `keep_pitch:
-false`, an audio clip, the refusals (among them a fade set by `shotcut:animIn` alone and a
-`.mlt` project clip), and an export of a 10 s clip at speed 2 (5 s within 0.2 s, with an audio
-stream).
+lengthening into the next clip (the error names the 275 free frames), speed 1 after 2 undone (the
+saved project equal apart from `meta.media.*` probe caches, which MLT can add to a clip Shotcut's
+undo rebuilds; those are exactly the lines the upstream snapshot race corrupts, so that saved-file
+compare cannot see the race, while the `get_timeline` compare stays exact), a trimmed clip at speed
+2 and 0.5 (last on its track), `keep_pitch: false`, an audio clip, the refusals (among them a fade
+set by `shotcut:animIn` alone and a `.mlt` project clip), and an export of a 10 s clip at speed 2 (5
+s within 0.2 s, with an audio stream).
 
 ### Known limits (clip speed)
 
@@ -1318,7 +1325,10 @@ changes and removes filters with their undo and redo, saves and reopens a copy o
 and checks the refusals. The audio recipe checks export a normalized clip (`x264-medium`, needs
 `melt-7` as for stage 2) and run several background `clip_normalize` jobs on generated 2400 s
 and 3600 s files (about 7 and 10 s each on a debug build); if a measurement ends before the
-script can change the clip, that check prints SKIP. The picture recipe checks export four 1 s
+script can change the clip, that check prints SKIP. The idle-gate check (a background apply waits
+for a running tool call) is probabilistic for the same reason: it depends on the two
+measurements overlapping, prints SKIP when they do not (once in four recent debug-build runs) and
+may skip every time on a faster release build. The picture recipe checks export four 1 s
 clips and read pixels with ffmpeg and od; without frei0r the saturation and temperature checks
 print SKIP. The `clip_set_speed` checks export a 10 s clip at speed 2 (`melt-7` again). Last,
 it calls every tool whose schema says `additionalProperties: false` with an unknown name and
