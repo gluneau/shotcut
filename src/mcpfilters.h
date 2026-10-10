@@ -107,7 +107,7 @@ bool applyFilter(int track,
 // Adds a filter of service (shotcut:filter = shotcutId when not empty) with props to the
 // multitrack output (McpFilter::Target{-1, -1}), appended after the existing output filters,
 // with no in and out (it covers the whole timeline). Undo and joinMacro as applyFilter.
-// Not used by any tool yet (the caption burn-in will be the first).
+// Used by captions_from_transcript's burn-in.
 bool addOutputFilter(const QString &service,
                      const QString &shotcutId,
                      Mlt::Properties &props,

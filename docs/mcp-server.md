@@ -609,8 +609,8 @@ MLT service) and empty `params`; `filter_set` refuses them, `filter_remove` remo
 
 - Keyframes are not edited: `filter_set` refuses a parameter that has keyframes.
 - Filters on the clip opened in the Source player, on tracks and on the timeline output are not
-  reachable through the tools. The commands can target the timeline output (for the caption
-  burn-in of a later stage), but no tool uses that path yet, so it is untested.
+  reachable through the filter tools. The commands' timeline-output target is used only by
+  `captions_from_transcript`'s burn-in (stage 3C), which the format smoke script tests.
 - If the Filters panel shows a filter that `filter_set` changes, the panel reloads it; other
   panel state (the selected filter) may reset when a tool adds or removes a filter of the clip it
   shows.
@@ -879,9 +879,9 @@ The details are in the known-limits lists above; in short:
   neither the tool nor Shotcut would rescale them to the new length.
 - GPU (Movit) filters are never offered, and the tools are untested in Shotcut's GPU mode. A GPU
   crop on a clip counts as its one crop.
-- Only timeline clips are reachable: filters on the clip open in the Source player (Shotcut has
-  no undo there), on tracks and on the timeline output are not supported. The output target
-  exists in the filter commands for a later stage but is untested.
+- Only timeline clips are reachable by the filter tools: filters on the clip open in the Source
+  player (Shotcut has no undo there), on tracks and on the timeline output are not supported.
+  The output target of the filter commands is used only by the caption burn-in of stage 3C.
 - `track_set_ducking` is untested end to end: MLT's mix transition gained ducking in 7.41, and on
   this build (MLT 7.36.1) the tool refuses with "Audio ducking needs MLT 7.41 or newer". Undo of
   `enabled: false` leaves ducking off (an upstream Shotcut bug).
@@ -1422,7 +1422,6 @@ Manual checks for stage 2 (GUI only; the headless script cannot cover them):
 
 ## Known limits
 
-Not covered by the tools or not tested headless: locked tracks (refused, tested by hand only), GPU
-mode, proxies, generators (other than the text clips of `title_add` and `lower_third_add`),
-filters outside the stage 3B allowlist, subtitles (other than `captions_from_transcript`),
-two-pass encoding and export ranges.
+Not covered by the tools or not tested headless: GPU mode, proxies, generators (other than the text
+clips of `title_add` and `lower_third_add`), filters outside the stage 3B allowlist, subtitles
+(other than `captions_from_transcript`), two-pass encoding and export ranges.
