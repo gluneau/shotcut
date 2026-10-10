@@ -110,7 +110,8 @@ const Guide kGuides[] = {
           R"({"track":0,"clip":0,"max_words":7})",
           "Burn in captions of at most 7 words from the transcript. It captions ONE clip per "
           "call and adds a subtitle track (Captions N) with its own burn-in each time: after the "
-          "cuts, call it for every clip of track 0 (get_timeline lists them)."},
+          "cuts, call it for every clip of track 0 (get_timeline lists them); a clip in which no "
+          "word starts is refused, so skip it."},
          {"export_video",
           R"({"path":"/path/to/interview-edit.mp4","preset":"x264-medium"})",
           "Render H.264 and AAC in an MP4 at the project's size and frame rate; poll "
@@ -123,7 +124,9 @@ const Guide kGuides[] = {
      R"("loudness_target_lufs":-16,"loudness_tolerance_lu":1.5,"caption_max_words":7,)"
      R"("export_preset":"x264-medium"})",
      {
-         "detect_silence boundaries are approximate (about 0.1 s): keep the 0.15 s pads.",
+         "detect_silence boundaries are approximate (about 0.1 s): keep the 0.15 s pads. A "
+         "pause at the very start or end of the recording is cut whole: a pad there would leave "
+         "a stub of a few frames.",
          "Captions are times on the timeline and do not follow later edits: caption last, after "
          "every cut and move.",
          "Whisper's word times are approximate, so captions can lead or lag the speech by a few "
@@ -165,13 +168,13 @@ const Guide kGuides[] = {
           "Find dead air; a short is cut tighter than an interview."},
          {"timeline_remove_ranges",
           R"({"tracks":[0],"ranges":[{"start":212,"end":236}]})",
-          "Cut the dead air (shrink each range by about 3 frames at both ends); ripple is on by "
-          "default."},
+          "Cut the dead air (shrink each range by about 3 frames at both ends, except at the "
+          "clip's own start or end, where a pad would leave a stub); ripple is on by default."},
          {"captions_from_transcript",
           R"({"track":0,"clip":0,"max_words":4,"style":{"size":120,"position":"middle"}})",
           "Few, large words read well on a phone, and the middle stays clear of the app's "
           "buttons. One clip per call (each makes a subtitle track): repeat for every clip the "
-          "cuts left."},
+          "cuts left (a clip in which no word starts is refused: skip it)."},
          {"track_add",
           R"({"type":"video","name":"Hook"})",
           "A new top video track (index 0) for the hook title; the clip moves to track 1."},
@@ -249,7 +252,8 @@ const Guide kGuides[] = {
           "description."},
          {"captions_from_transcript",
           R"({"track":1,"clip":0})",
-          "Captions from the narration clip (track 1 now), one call per clip the cuts left."},
+          "Captions from the narration clip (track 1 now), one call per clip the cuts left (a "
+          "clip in which no word starts is refused: skip it)."},
          {"export_video",
           R"({"path":"/path/to/tutorial.mp4","preset":"x264-medium"})",
           "Render the MP4; poll get_export_status."}
@@ -289,8 +293,10 @@ const Guide kGuides[] = {
          {"clip_set_speed",
           R"({"track":0,"clip":3,"speed":0.5})",
           "While placing the shots, slow an accent shot BEFORE placing the next one: speed 0.5 "
-          "doubles its length and nothing else moves, so it is refused once the next shot "
-          "touches it. Insert half the source range you want to show, then slow it."},
+          "doubles its length less one frame (Shotcut's rounding) and nothing else moves, so it "
+          "is refused once the next shot touches it. Insert half the source range you want to "
+          "show, slow it, then place the next shot at its end (start + the duration the result "
+          "gives)."},
          {"clip_set_color",
           R"({"track":0,"clip":0,"saturation":1.15,"temperature_k":6000,"contrast":0.05})",
           "The same look on every shot (one call per clip; calling it again updates the values "
@@ -299,7 +305,10 @@ const Guide kGuides[] = {
           R"({"track":0,"clip":1,"duration":10})",
           "A short dissolve into a shot (clip is the incoming clip). Each transition overlaps "
           "two clips and makes the timeline shorter by its duration, so later clips move "
-          "earlier: add them after the shots, speeds and colours, from the last clip backwards."},
+          "earlier: add them after the shots, speeds and colours, from the first clip forwards "
+          "(a clip that already has a transition after it cannot get one before it). Each "
+          "transition is a new item: the next incoming clip is then 2 indexes further (clip 1, "
+          "then 3, then 5)."},
          {"track_add",
           R"({"type":"audio","name":"Music"})",
           "An audio track for the music; it goes at the bottom (read its index from the result)."},
@@ -332,8 +341,8 @@ const Guide kGuides[] = {
          "A transition's duration must be shorter than both clips it joins.",
          "Each transition makes the timeline shorter by its duration, so after N transitions the "
          "cuts drift N times that duration off a beat grid: lengthen each shot by the transition "
-         "duration to stay on the beat. A shot slowed to 0.5 lasts twice as long: insert half the "
-         "source range before slowing it."
+         "duration to stay on the beat. A shot slowed to 0.5 lasts twice as long less one frame: "
+         "insert half the source range before slowing it."
      }},
 };
 

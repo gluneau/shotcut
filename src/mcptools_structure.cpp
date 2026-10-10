@@ -653,7 +653,8 @@ QJsonObject trackSetTool(const QJsonObject &arguments)
     QJsonArray changed;
     if (!changes.empty()) {
         MLT.pause();
-        // Compositing swaps the track's transition: guard it like the structural edits.
+        // Compositing only sets "disable" on the track's existing blend transition (like hide,
+        // which stays unguarded); it is guarded like the structural edits all the same.
         std::unique_ptr<EditPreviewGuard> previewGuard;
         if (flags.contains("composite"))
             previewGuard = std::make_unique<EditPreviewGuard>(false);
