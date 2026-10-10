@@ -211,9 +211,12 @@ const Guide kGuides[] = {
           R"({"type":"video","name":"Face"})",
           "A new top video track (index 0) for the camera; the screen moves to track 1."},
          {"timeline_insert_range",
-          R"({"path":"/path/to/face.mp4","in_s":2.5,"out_s":602.5,"track":0,"position":0})",
+          R"({"path":"/path/to/face.mp4","in_s":2.5,"out_s":602.5,"track":0,"position":0,)"
+          R"("mode":"overwrite"})",
           "Put the camera recording on track 0, trimmed with in_s so it is in sync with the "
-          "screen (match a clap or a click heard in both)."},
+          "screen (match a clap or a click heard in both). mode overwrite: the default insert "
+          "would, with Shotcut's ripple-all-tracks setting on, push the screen recording later "
+          "by the camera clip's length."},
          {"clip_set_transform",
           R"({"track":0,"clip":0,"scale":0.25,"x":672,"y":378})",
           "Shrink the face to a quarter and put it in the lower-right corner: on 1920x1080 the "
@@ -256,8 +259,9 @@ const Guide kGuides[] = {
      R"("export_preset":"x264-medium"})",
      {
          "The face, the lower thirds (76% to 90% of the height) and the captions all use the "
-         "bottom of the frame: check with get_frame, and move the face up (clip_set_transform y "
-         "-378) or the captions to the top (style position top) when they overlap.",
+         "bottom of the frame: check with get_frame, and move the face up (clip_set_transform with "
+         "scale 0.25, x 672, y -378: an omitted one of the three goes back to its default) or "
+         "the captions to the top (style position top) when they overlap.",
          "Always cut both tracks in one timeline_remove_ranges call; cutting one track at a time "
          "puts the face out of sync.",
          "Captions are times on the timeline and do not follow later edits: caption after the last "
@@ -271,8 +275,8 @@ const Guide kGuides[] = {
           "For each source: duration, frame rate, size and whether it has sound."},
          {"detect_scenes",
           R"({"path":"/path/to/clip1.mp4","threshold":0.3,"wait_ms":20000})",
-          "The shot changes inside a source: take each shot from between them so no cut lands "
-          "inside another cut."},
+          "The shot changes inside a source: take each shot from between them so no shot contains "
+          "a cut."},
          {"detect_silence",
           R"({"path":"/path/to/music.mp3","noise_db":-30,"min_s":0.2,"wait_ms":20000})",
           "The music's quiet breaks, where a section changes and a cut feels natural. It does "
@@ -284,8 +288,9 @@ const Guide kGuides[] = {
           "0, 60, 120 and so on)."},
          {"clip_set_speed",
           R"({"track":0,"clip":3,"speed":0.5})",
-          "Slow motion for an accent shot: speed 0.5 doubles its length and nothing else moves, "
-          "so do it before the next shot is placed after it (or leave a gap for it)."},
+          "While placing the shots, slow an accent shot BEFORE placing the next one: speed 0.5 "
+          "doubles its length and nothing else moves, so it is refused once the next shot "
+          "touches it. Insert half the source range you want to show, then slow it."},
          {"clip_set_color",
           R"({"track":0,"clip":0,"saturation":1.15,"temperature_k":6000,"contrast":0.05})",
           "The same look on every shot (one call per clip; calling it again updates the values "
@@ -299,8 +304,11 @@ const Guide kGuides[] = {
           R"({"type":"audio","name":"Music"})",
           "An audio track for the music; it goes at the bottom (read its index from the result)."},
          {"timeline_insert_range",
-          R"({"path":"/path/to/music.mp3","in_s":0,"out_s":60,"track":1,"position":0})",
-          "The music under the shots, on the new audio track."},
+          R"({"path":"/path/to/music.mp3","in_s":0,"out_s":60,"track":1,"position":0,)"
+          R"("mode":"overwrite"})",
+          "The music under the shots, on the new audio track. mode overwrite: the default insert "
+          "would, with Shotcut's ripple-all-tracks setting on, push every shot later by the "
+          "music's length."},
          {"track_set_ducking",
           R"({"track":1,"threshold_db":-12,"reduction_db":-12})",
           "Dip the music while the tracks above it (shots with voices) are louder than -12 dB."},
@@ -321,10 +329,13 @@ const Guide kGuides[] = {
          "the call is refused, while brightness and contrast still work.",
          "clip_set_speed refuses a clip next to a transition or with fades: change speeds before "
          "adding transitions.",
-         "A transition's duration must be shorter than both clips it joins."
+         "A transition's duration must be shorter than both clips it joins.",
+         "Each transition makes the timeline shorter by its duration, so after N transitions the "
+         "cuts drift N times that duration off a beat grid: lengthen each shot by the transition "
+         "duration to stay on the beat. A shot slowed to 0.5 lasts twice as long: insert half the "
+         "source range before slowing it."
      }},
 };
-
 
 QJsonObject getEditingGuideTool(const QJsonObject &arguments)
 {

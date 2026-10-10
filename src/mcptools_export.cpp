@@ -259,23 +259,59 @@ QJsonObject presetJson(const QString &name, const QString &source)
     } else if (!audio) {
         parts << "no audio";
     }
+    // createMeltJob writes these as numbered files (<base>-%05d.<ext>), not to the path given.
+    static const QStringList sequenceCodecs = {"bmp", "dpx", "png", "ppm", "targa", "tiff"};
+    const bool image2 = !qstrcmp(preset->get("f"), "image2");
+    const bool sequence = video
+                          && (sequenceCodecs.contains(vcodec)
+                              || ((vcodec == "libwebp" || vcodec == "mjpeg") && image2));
     QString description = parts.join(", ");
-    description += (description.isEmpty() ? "A ." : " in a .") + extension + " file";
+    if (sequence)
+        description += QStringLiteral(" written as numbered image files <base>-00001.%1 (base: "
+                                      "the output file name up to its first dot), not to the "
+                                      "path given")
+                           .arg(extension);
+    else
+        description += (description.isEmpty() ? "A ." : " in a .") + extension + " file";
+    // The size and rate export_video renders at: a video mode folder's, then the preset's own
+    // width, height, r or frame_rate_num/den (loadPresetFromProperties applies them after the
+    // folder), else the project's.
+    int width = 0, height = 0;
+    double fps = 0;
+    bool interlaced = false;
     if (!profileFolder.isEmpty()) {
         Mlt::Profile profile(profileFolder.toLatin1().constData());
-        const double fps = qRound(profile.fps() * 1000) / 1000.0;
-        o["width"] = profile.width();
-        o["height"] = profile.height();
+        width = profile.width();
+        height = profile.height();
+        fps = profile.fps();
+        interlaced = !profile.progressive();
+    }
+    if (preset->get_int("width") > 0)
+        width = preset->get_int("width");
+    if (preset->get_int("height") > 0)
+        height = preset->get_int("height");
+    if (preset->get_double("r") > 0)
+        fps = preset->get_double("r");
+    else if (preset->get_int("frame_rate_num") > 0 && preset->get_int("frame_rate_den") > 0)
+        fps = preset->get_double("frame_rate_num") / preset->get_double("frame_rate_den");
+    fps = qRound(fps * 1000) / 1000.0;
+    if (width > 0)
+        o["width"] = width;
+    if (height > 0)
+        o["height"] = height;
+    if (fps > 0)
         o["fps"] = fps;
-        description += QStringLiteral(" at %1x%2, %3 fps%4 (the %5 video mode, not the "
-                                      "project's)")
-                           .arg(QString::number(profile.width()),
-                                QString::number(profile.height()),
-                                QString::number(fps),
-                                profile.progressive() ? QString() : QStringLiteral(" interlaced"),
-                                profileFolder);
-    } else if (video) {
-        description += " at the project's size and frame rate";
+    if (video) {
+        const QString size = width > 0 && height > 0
+                                 ? QStringLiteral("%1x%2").arg(width).arg(height)
+                             : width > 0  ? QStringLiteral("width %1").arg(width)
+                             : height > 0 ? QStringLiteral("height %1").arg(height)
+                                          : QStringLiteral("the project's size");
+        const QString rate = fps > 0 ? QStringLiteral("%1 fps").arg(fps)
+                                     : QStringLiteral("the project's frame rate");
+        description += " at " + size + ", " + rate + (interlaced ? " interlaced" : "");
+        if (!profileFolder.isEmpty())
+            description += " (the " + profileFolder + " video mode, not the project's)";
     }
     // Hints taken from the name only.
     const QString lower = name.toLower();
@@ -317,11 +353,12 @@ QJsonObject exportPresetsListTool(const QJsonObject &arguments)
             listed << name;
         }
     }
-    // A custom file named like a stock preset is never used: export_video finds the stock one.
+    // A custom file named like a stock preset (hidden ones too) is never used: export_video
+    // finds the stock one.
     QStringList custom = dock->exportPresetNames(true);
     custom.sort(Qt::CaseInsensitive);
     for (const QString &name : custom) {
-        if (stock.contains(name) || listed.contains(name))
+        if (dock->isStockPreset(name) || listed.contains(name))
             continue;
         const QJsonObject o = presetJson(name, "custom");
         if (!o.isEmpty()) {

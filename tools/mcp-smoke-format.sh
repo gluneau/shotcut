@@ -780,6 +780,10 @@ printf 'f=matroska\nvcodec=ffv1\nacodec=flac\nmeta.preset.extension=mkv\n' > "$C
 printf 'f=mp4\nvcodec=libx264\n' > "$CUSTOM/noext"
 printf 'f=mp4\nvcodec=libx264\nmeta.preset.extension=mp4\n' > "$CUSTOM/a..b"
 printf 'f=mp4\nvcodec=libx264\nmeta.preset.extension=mp4\n' > "$CUSTOM/.dot"
+# As Shotcut's Export panel saves a custom preset: with the size and the frame rate.
+printf 'f=mp4\nvcodec=libx264\nacodec=aac\nwidth=1280\nheight=720\nframe_rate_num=24\nframe_rate_den=1\nmeta.preset.extension=mp4\n' > "$CUSTOM/MCP 720p24"
+# Shadowed by a HIDDEN stock preset: export_video finds the stock one.
+printf 'f=mp4\nvcodec=libx264\nmeta.preset.extension=mp4\n' > "$CUSTOM/x264-medium-pass1"
 PTOOL='.[] | select(.name=="export_presets_list")'
 expect_eq "export_presets_list takes no arguments" '{}' "$(echo "$TOOLS" | jq -c "$PTOOL | .inputSchema.properties")"
 expect_eq "export_presets_list with an argument is an error" true "$(tool_is_error export_presets_list '{"all":true}')"
@@ -791,6 +795,11 @@ expect_eq "every preset has a name, a source, an extension and a description" tr
 expect_eq "names are unique" true "$(echo "$PL" | jq '[.[].name] | length == (unique | length)')"
 expect_eq "hidden stock presets are not listed (x264-medium-pass1, AV1)" '[]' "$(echo "$PL" | jq -c '[.[] | select(.name=="x264-medium-pass1" or .name=="AV1") | .name]')"
 expect_eq "a profile-folder preset has the profile's size and rate" '{"fps":25,"height":1080,"source":"stock","width":1920}' "$(echo "$PL" | jq -cS '.[] | select(.name=="atsc_1080p_25/DNxHD") | {source,width,height,fps}')"
+expect_eq "a custom preset with width, height and frame_rate_num/den reports them" '{"fps":24,"height":720,"source":"custom","width":1280}' "$(echo "$PL" | jq -cS '.[] | select(.name=="MCP 720p24") | {source,width,height,fps}')"
+expect_eq "its description gives that size and rate, not the project's" true "$(echo "$PL" | jq '.[] | select(.name=="MCP 720p24") | .description | test("1280x720, 24 fps") and (test("project") | not)')"
+expect_eq "a stock preset with its own width and height (Sony-PSP 480x272)" '[480,272,null]' "$(echo "$PL" | jq -c '.[] | select(.name=="Sony-PSP") | [.width,.height,.fps]')"
+expect_eq "a custom file named like a hidden stock preset is not listed" '[]' "$(echo "$PL" | jq -c '[.[] | select(.name=="x264-medium-pass1")]')"
+expect_eq "an image-sequence preset says the files are numbered" true "$(echo "$PL" | jq '.[] | select(.name=="stills/PNG") | .description | test("numbered image files <base>-00001.png")')"
 expect_eq "a plain preset has no width, height or fps" '[null,null,null]' "$(echo "$PL" | jq -c '.[] | select(.name=="x264-medium") | [.width,.height,.fps]')"
 expect_eq "a YouTube preset says so in its description" true "$(echo "$PL" | jq '.[] | select(.name=="YouTube") | .description | test("YouTube")')"
 expect_eq "the custom preset MCP Test: custom, mp4, libx264" '{"extension":"mp4","name":"MCP Test","source":"custom","video_codec":"libx264"}' "$(echo "$PL" | jq -cS '.[] | select(.name=="MCP Test") | {name,source,extension,video_codec}')"
@@ -848,6 +857,7 @@ expect_eq "every step tool is in tools/list and its arguments_example fits the t
 expect_eq "interview: detect_silence -35 dB, 0.6 s; normalize -16; captions 7 words; x264-medium" '[-35,0.6,-16,7,"x264-medium"]' "$(echo "$GUIDES" | jq -c '.[0] | [(.steps[] | select(.tool=="detect_silence") | .arguments_example | .noise_db, .min_s), (.steps[] | select(.tool=="clip_normalize") | .arguments_example.target_lufs), (.steps[] | select(.tool=="captions_from_transcript") | .arguments_example.max_words), (.steps[] | select(.tool=="export_video") | .arguments_example.preset)]')"
 expect_eq "short: 9:16, fill reframe, -14 LUFS, 4-word captions" '["9:16","fill",-14,4]' "$(echo "$GUIDES" | jq -c '.[1] | [(.steps[] | select(.tool=="project_set_format") | .arguments_example.preset), (.steps[] | select(.tool=="clip_reframe") | .arguments_example.mode), (.steps[] | select(.tool=="clip_normalize") | .arguments_example.target_lufs), (.steps[] | select(.tool=="captions_from_transcript") | .arguments_example.max_words)]')"
 expect_eq "tutorial: 16:9 and a 0.25 picture-in-picture" '["16:9",0.25]' "$(echo "$GUIDES" | jq -c '.[2] | [(.steps[] | select(.tool=="project_set_format") | .arguments_example.preset), (.steps[] | select(.tool=="clip_set_transform") | .arguments_example.scale)]')"
+expect_eq "tutorial face and montage music are inserted with mode overwrite" '["overwrite","overwrite"]' "$(echo "$GUIDES" | jq -c '[(.[2].steps[] | select(.tool=="timeline_insert_range" and (.arguments_example.path | test("face")))), (.[3].steps[] | select(.tool=="timeline_insert_range" and (.arguments_example.path | test("music"))))] | map(.arguments_example.mode)')"
 expect_eq "montage uses transitions, ducking, color and speed" true "$(echo "$GUIDES" | jq '.[3] | [.steps[].tool] | contains(["detect_scenes","timeline_add_transition","track_set_ducking","clip_set_color","clip_set_speed","export_video"])')"
 expect_eq "the notes mention undo, index shifts and the ducking MLT version" true "$(echo "$GUIDES" | jq '[.[].notes[]] | join(" ") | test("undo") and test("index") and test("7\\.41")')"
 

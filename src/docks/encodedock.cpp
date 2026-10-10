@@ -1717,6 +1717,12 @@ Mlt::Properties *EncodeDock::exportPreset(const QString &presetName, QString *pr
     return preset;
 }
 
+bool EncodeDock::isStockPreset(const QString &presetName) const
+{
+    const QByteArray stockKey = ("consumer/avformat/" + presetName).toLatin1();
+    return m_presets && m_presets->get_data(stockKey.constData());
+}
+
 QStringList EncodeDock::exportPresetNames(bool custom) const
 {
     QStringList names;

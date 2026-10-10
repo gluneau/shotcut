@@ -69,6 +69,8 @@ public:
     // The names the presets tree shows as files: custom preset files, or stock presets (not
     // hidden) relative to consumer/avformat/. exportPreset may still refuse some.
     QStringList exportPresetNames(bool custom) const;
+    // True when presetName names a stock preset (hidden or not), which exportPreset prefers.
+    bool isStockPreset(const QString &presetName) const;
 
 signals:
     void captureStateChanged(bool);

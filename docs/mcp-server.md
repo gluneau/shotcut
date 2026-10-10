@@ -1049,14 +1049,18 @@ listed `name` works as `export_video`'s `preset`.
   panel's Stock branch shows (`meta.preset.hidden` ones, such as the `-pass1` presets, are left
   out), named relative to that folder (`x264-medium`, `lossless/FFV1`, `atsc_1080p_25/DNxHD`).
 - `source` `custom`: the files in `<appdata>/presets/encode` (the Custom branch). A file with the
-  name of a stock preset is left out (`export_video` finds the stock one first), as is one
-  without `meta.preset.extension` or with a name `export_video` refuses (`..`, a leading dot).
+  name of a stock preset, hidden ones included, is left out (`export_video` finds the stock one
+  first), as is one without `meta.preset.extension` or with a name `export_video` refuses (`..`,
+  a leading dot).
 - `extension` is the preset's `meta.preset.extension`: the output path must end in it.
 - `video_codec` and `audio_codec` are the preset's FFmpeg `vcodec` and `acodec`, left out when the
   preset sets none or turns that stream off.
-- `width`, `height` and `fps` are given only for a preset inside a video mode folder (DV, HDV,
-  ATSC): `export_video` then renders at that mode, as a click on it in the Export panel does.
-  Every other preset renders at the project's size and frame rate.
+- `width`, `height` and `fps` are what `export_video` renders at when the preset fixes them: the
+  video mode of a preset inside a mode folder (DV, HDV, ATSC), as a click on it in the Export
+  panel applies it, overridden by the preset's own `width`, `height`, `r` or
+  `frame_rate_num`/`frame_rate_den` (Shotcut's Export panel saves a custom preset with all of
+  them; among the stock presets only `Sony-PSP` sets a size, 480x272, and none sets a rate).
+  Missing fields mean the project's size or frame rate.
 - `description` is built only from the codecs (a fixed table of readable names), the extension,
   the video mode and the name (`named for YouTube`, `in Shotcut's lossless group`); it does not
   guess quality or purpose.
@@ -1097,8 +1101,11 @@ ducking needing MLT 7.41 or newer, `saturation` and `temperature_k` needing frei
 
 - `export_presets_list` does not say whether this FFmpeg build has the preset's encoders (for
   example `libsvtav1` or `prores_ks`); an export with a missing encoder fails in the job.
-- The image presets (`stills/...`) are listed because `export_video` accepts them; the smoke
-  script checks every listed name is found, but renders only with video presets.
+- The image presets (`stills/...`, and `libwebp` or `mjpeg` with format `image2`) write numbered
+  image files `<base>-00001.<ext>` (base: the output file name up to its first dot), not the
+  path given, so `export_video`'s `output` and `get_export_status`'s `output_exists` do not
+  name them; their description says so. The smoke script checks every listed name is found but
+  renders only with video presets.
 - `captions_from_transcript` captions one clip per call, so after silence cuts the guides call it
   once per kept clip, which makes one subtitle track (and burn-in) per clip.
 - The guides are fixed text; their numbers are starting points, not measurements of the media.
