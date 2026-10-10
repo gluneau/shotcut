@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Format smoke test for the Shotcut MCP server (stage 3, part 3C): project_set_format, clip_reframe,
-# title_add, lower_third_add.
+# title_add, lower_third_add, captions_from_transcript.
 # Usage: MCP_TOKEN=<token> [MCP_PORT=7468] MCP_APPDATA=<scratch dir> tools/mcp-smoke-format.sh
 # Run it against a FRESH, throwaway Shotcut (nothing loaded, no timeline); it aborts otherwise
 # unless MCP_SMOKE_FORCE=1. It creates its media with ffmpeg in a temporary folder and exports
@@ -20,7 +20,7 @@ fresh_guard
 MEDIA="$("$HERE/mcp-fixtures.sh" "$TMP/media")" || { echo "ffmpeg could not create the fixtures"; exit 2; }
 
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[]]')"
-expect_eq "tools/list: 55 tools in all (through Task 19)" 55 "$(echo "$TOOLS" | jq 'length')"
+expect_eq "tools/list: 56 tools in all (through Task 20)" 56 "$(echo "$TOOLS" | jq 'length')"
 expect_eq "tools/list has project_set_format" true "$(echo "$TOOLS" | jq '[.[].name] | index("project_set_format") != null')"
 expect_eq "project_set_format schema refuses extra properties" false "$(echo "$TOOLS" | jq '.[] | select(.name=="project_set_format") | .inputSchema.additionalProperties')"
 expect_eq "tools/list has clip_reframe" true "$(echo "$TOOLS" | jq '[.[].name] | index("clip_reframe") != null')"
@@ -495,6 +495,219 @@ PTL="$(prof)"
 expect_eq "the opened project is 640x360 25 fps" '{"fps_den":1,"fps_num":25,"height":360,"width":640}' "$(echo "$PTL" | jq -cS .)"
 expect_eq "project_set_format on a timeline-only project is an error" true "$(ferr '{"preset":"9:16"}')"
 expect_eq "the refusal changed nothing (timeline only)" "$PTL" "$(prof)"
+
+echo "== captions_from_transcript"
+# On the timeline-only project opened above: 640x360, 25 fps (one frame = 40 ms), V1 = scenes.mp4
+# for 50 frames.
+CTOOL='.[] | select(.name=="captions_from_transcript")'
+expect_eq "tools/list has captions_from_transcript" true "$(echo "$TOOLS" | jq '[.[].name] | index("captions_from_transcript") != null')"
+expect_eq "captions_from_transcript schema refuses extra properties" false "$(echo "$TOOLS" | jq "$CTOOL | .inputSchema.additionalProperties")"
+expect_eq "captions_from_transcript style refuses extra properties" false "$(echo "$TOOLS" | jq "$CTOOL | .inputSchema.properties.style.additionalProperties")"
+cap() { tool_json captions_from_transcript "$1"; }
+cerr() { tool_is_error captions_from_transcript "$1"; }
+SAVED="$TMP/captions.mlt"
+save() { tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null; }
+# svc_prop SERVICE NAME [N]: property NAME of the Nth (default first) filter of SERVICE in $SAVED,
+# newlines kept, XML entities decoded; empty when missing.
+svc_prop() {
+  awk -v svc="$1" -v want="$2" -v nth="${3:-1}" '
+    /<filter /{f=1; hit=0; val=""; cap=0}
+    f && cap {line=$0; if (sub(/<\/property>.*/, "", line)) cap=0; val=val "\n" line; next}
+    f && index($0, "name=\"mlt_service\">" svc "<") {hit=1}
+    f && index($0, "name=\"" want "\">") {line=$0; sub(/.*name="[^"]*">/, "", line)
+      if (sub(/<\/property>.*/, "", line)) val=line; else {val=line; cap=1}}
+    /<\/filter>/{ if (f && hit && ++n == nth) {gsub(/&gt;/, ">", val); gsub(/&lt;/, "<", val)
+      gsub(/&quot;/, "\"", val); gsub(/&amp;/, "\\&", val); printf "%s", val; exit} f=0 }' "$SAVED"
+}
+nsvc() { grep -c "name=\"mlt_service\">$1<" "$SAVED"; }
+
+TONE="$MEDIA/tone_av.mp4"
+# 12 words: "one".."seven" from 0.4 s in 0.4 s steps (segment 0.4-3.2 s), then "eight".."twelve"
+# from 4.0 s (segment 4.0-6.0 s); every time is a whole frame at 25 fps.
+TT="$(jq -nc '["one","two","three","four","five","six","seven"] as $a
+  | ["eight","nine","ten","eleven","twelve"] as $b
+  | def t(x): (x * 100 | round) / 100;
+  {segments:[
+    {start_s:0.4, end_s:3.2, text:($a | join(" ")),
+     words:[range(7) as $i | {start_s:t(0.4 + 0.4 * $i), end_s:t(0.8 + 0.4 * $i), text:$a[$i]}]},
+    {start_s:4.0, end_s:6.0, text:($b | join(" ")),
+     words:[range(5) as $i | {start_s:t(4.0 + 0.4 * $i), end_s:t(4.4 + 0.4 * $i), text:$b[$i]}]}]}')"
+expect_eq "supply the 12-word transcript for tone_av.mp4" word "$(tool_json transcribe "$(jq -nc --arg p "$TONE" --argjson t "$TT" '{path:$p,transcript:$t}')" | jq -r '.granularity')"
+expect_eq "track_add a video track for the captioned clip (index 0)" 0 "$(tool_json track_add '{"type":"video"}' | jq '.added.index')"
+expect_eq "insert tone_av.mp4 (10 s) at frame 50 of track 0" false "$(tool_is_error timeline_insert_range "$(jq -nc --arg p "$TONE" '{path:$p,in_s:0,out_s:10,track:0,position:50}')")"
+expect_eq "the clip is item 1 of track 0, frames 50-299" '[1,50,250]' "$(tool_json get_timeline '{}' | jq -c '.tracks[0].clips[1] | [.index,.start,.duration]')"
+# Hidden, so the export shows only the captions over black after the 2 s of scenes.mp4.
+tool_json track_set '{"track":0,"hide":true}' >/dev/null
+
+echo "== captions_from_transcript: refusals (nothing changes)"
+save
+expect_eq "no subtitle track before" 0 "$(nsvc subtitle_feed)"
+expect_eq "a clip without a transcript is an error" true "$(cerr '{"track":1,"clip":0}')"
+expect_eq "the error says to run transcribe" true "$(tool_text captions_from_transcript '{"track":1,"clip":0}' | grep -q 'transcribe' && echo true || echo false)"
+expect_eq "a blank is an error" true "$(cerr '{"track":0,"clip":0}')"
+expect_eq "a missing clip is an error" true "$(cerr '{"track":0,"clip":9}')"
+expect_eq "a missing track is an error" true "$(cerr '{"track":7,"clip":0}')"
+expect_eq "clip missing is an error" true "$(cerr '{"track":0}')"
+expect_eq "max_words 0 is an error" true "$(cerr '{"track":0,"clip":1,"max_words":0}')"
+expect_eq "max_words 21 is an error" true "$(cerr '{"track":0,"clip":1,"max_words":21}')"
+expect_eq "max_words 2.5 is an error" true "$(cerr '{"track":0,"clip":1,"max_words":2.5}')"
+expect_eq "max_chars 5 is an error" true "$(cerr '{"track":0,"clip":1,"max_chars":5}')"
+expect_eq "max_chars 101 is an error" true "$(cerr '{"track":0,"clip":1,"max_chars":101}')"
+expect_eq "min_duration_ms 199 is an error" true "$(cerr '{"track":0,"clip":1,"min_duration_ms":199}')"
+expect_eq "min_duration_ms 5001 is an error" true "$(cerr '{"track":0,"clip":1,"min_duration_ms":5001}')"
+expect_eq "language en (not ISO 639-2) is an error" true "$(cerr '{"track":0,"clip":1,"language":"en"}')"
+expect_eq "language zzz (unknown) is an error" true "$(cerr '{"track":0,"clip":1,"language":"zzz"}')"
+expect_eq "burn_in as a string is an error" true "$(cerr '{"track":0,"clip":1,"burn_in":"yes"}')"
+expect_eq "style.color red is an error" true "$(cerr '{"track":0,"clip":1,"style":{"color":"red"}}')"
+expect_eq "style.outline_color #12345 is an error" true "$(cerr '{"track":0,"clip":1,"style":{"outline_color":"#12345"}}')"
+expect_eq "style.size 7 is an error" true "$(cerr '{"track":0,"clip":1,"style":{"size":7}}')"
+expect_eq "style.position left is an error" true "$(cerr '{"track":0,"clip":1,"style":{"position":"left"}}')"
+expect_eq "style.valign center is an error" true "$(cerr '{"track":0,"clip":1,"style":{"valign":"center"}}')"
+expect_eq "an unknown style key is an error" true "$(cerr '{"track":0,"clip":1,"style":{"font":"Sans"}}')"
+expect_eq "style that is not an object is an error" true "$(cerr '{"track":0,"clip":1,"style":"big"}')"
+expect_eq "style with burn_in false is an error" true "$(cerr '{"track":0,"clip":1,"burn_in":false,"style":{"size":30}}')"
+expect_eq "an unknown argument is an error" true "$(cerr '{"track":0,"clip":1,"maxwords":5}')"
+expect_eq "the bad style error names style.color" true "$(tool_text captions_from_transcript '{"track":0,"clip":1,"style":{"color":"red"}}' | grep -q 'style.color' && echo true || echo false)"
+save
+expect_eq "the refusals added no subtitle track" 0 "$(nsvc subtitle_feed)"
+expect_eq "the refusals added no subtitle filter" 0 "$(nsvc subtitle)"
+
+echo "== captions_from_transcript: max_words 5"
+R="$(cap '{"track":0,"clip":1,"max_words":5}')"
+expect_eq "result: track name, count, burn_in" '{"burn_in":true,"captions":3,"track_name":"Captions 1"}' "$(echo "$R" | jq -cS '{track_name,captions,burn_in}')"
+expect_eq "result: first caption (2400-4400 ms)" '{"end_ms":4400,"start_ms":2400,"text":"one two three four five"}' "$(echo "$R" | jq -cS '.first')"
+expect_eq "result: last caption (6000-8000 ms)" '{"end_ms":8000,"start_ms":6000,"text":"eight nine ten eleven twelve"}' "$(echo "$R" | jq -cS '.last')"
+LANG3="$(echo "$R" | jq -r '.language')"
+expect_eq "result: language is an ISO 639-2 code (the system's)" true "$(echo "$LANG3" | grep -qE '^[a-z]{3}$' && echo true || echo false)"
+save
+SRT="$(printf '1\n00:00:02,400 --> 00:00:04,400\none two three four five\n\n2\n00:00:04,400 --> 00:00:05,200\nsix seven\n\n3\n00:00:06,000 --> 00:00:08,000\neight nine ten eleven twelve\n')"
+expect_eq "saved: subtitle_feed text is the exact SRT" "$SRT" "$(svc_prop subtitle_feed text)"
+expect_eq "saved: subtitle_feed feed and lang" "Captions 1|$LANG3" "$(svc_prop subtitle_feed feed)|$(svc_prop subtitle_feed lang)"
+expect_eq "saved: the subtitle_feed is hidden" 1 "$(svc_prop subtitle_feed shotcut:hidden)"
+expect_eq "saved: one subtitle burn-in filter, feed Captions 1" "1|Captions 1" "$(nsvc subtitle)|$(svc_prop subtitle feed)"
+expect_eq "saved: burn-in shotcut:filter subtitles" subtitles "$(svc_prop subtitle shotcut:filter)"
+expect_eq "saved: burn-in colours and outline" '#ffffffff|#00000000|#aa000000|3' "$(svc_prop subtitle fgcolour)|$(svc_prop subtitle bgcolour)|$(svc_prop subtitle olcolour)|$(svc_prop subtitle outline)"
+expect_eq "saved: burn-in weight, style, usePointSize, typewriter" '700|normal|1|0' "$(svc_prop subtitle weight)|$(svc_prop subtitle style)|$(svc_prop subtitle shotcut:usePointSize)|$(svc_prop subtitle typewriter)"
+expect_eq "saved: burn-in size 360 / 20 = 18" 18 "$(svc_prop subtitle size)"
+expect_eq "saved: burn-in geometry, valign, halign (bottom)" '20%/75%:60%x20%|bottom|center' "$(svc_prop subtitle geometry)|$(svc_prop subtitle valign)|$(svc_prop subtitle halign)"
+
+echo "== captions_from_transcript: burned into the export"
+OUT4="$TMP/captioned.mp4"
+expect_eq "captioned export succeeded" succeeded "$(export_wait "$OUT4")"
+# ybottom FILE T: the highest luma in the bottom quarter of FILE's frame at T seconds.
+ybottom() {
+  ffmpeg -loglevel error -ss "$2" -i "$1" -frames:v 1 \
+    -vf "crop=iw:ih/4:0:ih*3/4,signalstats,metadata=print:key=lavfi.signalstats.YMAX:file=-" \
+    -f null - 2>/dev/null | sed -n 's/.*YMAX=//p' | head -1
+}
+# The default size is 360 / 20 = 18 px: after x264 its thin white strokes peak at about YMAX 190
+# (measured 170-194), so the threshold is 150; the black frame between captions is 16.
+expect_eq "3.4 s (inside the first caption): bright text in the bottom quarter (YMAX >= 150)" true "$(awk -v y="$(ybottom "$OUT4" 3.4)" 'BEGIN{print (y != "" && y >= 150) ? "true" : "false"}')"
+expect_eq "7.0 s (inside the last caption): bright text too" true "$(awk -v y="$(ybottom "$OUT4" 7.0)" 'BEGIN{print (y != "" && y >= 150) ? "true" : "false"}')"
+expect_eq "5.6 s (between the captions): the bottom quarter stays dark (YMAX < 50)" true "$(awk -v y="$(ybottom "$OUT4" 5.6)" 'BEGIN{print (y != "" && y < 50) ? "true" : "false"}')"
+
+echo "== captions_from_transcript: one undo removes the track and the filter"
+expect_eq "undo text" "Captions from transcript" "$(tool_json undo '{}' | jq -r '.text')"
+save
+expect_eq "after undo: no subtitle track" 0 "$(nsvc subtitle_feed)"
+expect_eq "after undo: no subtitle filter" 0 "$(nsvc subtitle)"
+tool_json redo '{}' >/dev/null
+sleep 1
+save
+expect_eq "redo: the track (with its SRT) and the filter are back" "1|1|$SRT" "$(nsvc subtitle_feed)|$(nsvc subtitle)|$(svc_prop subtitle_feed text)"
+tool_json undo '{}' >/dev/null
+
+echo "== captions_from_transcript: burn_in false, a second track"
+R="$(cap '{"track":0,"clip":1,"max_words":5,"burn_in":false}')"
+expect_eq "burn_in false: result" '{"burn_in":false,"captions":3,"track_name":"Captions 1"}' "$(echo "$R" | jq -cS '{track_name,captions,burn_in}')"
+save
+expect_eq "burn_in false: a subtitle track and no subtitle filter" "1|0" "$(nsvc subtitle_feed)|$(nsvc subtitle)"
+R="$(cap '{"track":0,"clip":1}')"
+expect_eq "a second call makes Captions 2 (defaults: 7 words, 42 characters)" '{"captions":2,"track_name":"Captions 2"}' "$(echo "$R" | jq -cS '{track_name,captions}')"
+expect_eq "defaults: the segment end breaks the captions" '["one two three four five six seven","eight nine ten eleven twelve"]' "$(echo "$R" | jq -c '[.first.text,.last.text]')"
+save
+expect_eq "two subtitle tracks, one burn-in for Captions 2" "2|1|Captions 2" "$(nsvc subtitle_feed)|$(nsvc subtitle)|$(svc_prop subtitle feed)"
+tool_json undo '{}' >/dev/null
+tool_json undo '{}' >/dev/null
+save
+expect_eq "two undos remove both" "0|0" "$(nsvc subtitle_feed)|$(nsvc subtitle)"
+
+echo "== captions_from_transcript: max_chars, style, language"
+R="$(cap '{"track":0,"clip":1,"max_words":20,"max_chars":10,"burn_in":false}')"
+expect_eq "max_chars 10: 7 captions" 7 "$(echo "$R" | jq '.captions')"
+save
+expect_eq "max_chars 10: the caption texts" '["one two","three four","five six","seven","eight nine","ten eleven","twelve"]' "$(svc_prop subtitle_feed text | awk 'NF && !/^[0-9]+$/ && !/-->/' | jq -Rsc 'split("\n") | map(select(length > 0))')"
+tool_json undo '{}' >/dev/null
+R="$(cap '{"track":0,"clip":1,"language":"fra","style":{"size":30,"color":"#ffff00","outline_color":"#000000","bg_color":"#80000000","position":"top"}}')"
+expect_eq "language fra" fra "$(echo "$R" | jq -r '.language')"
+save
+expect_eq "saved: lang fra" fra "$(svc_prop subtitle_feed lang)"
+expect_eq "style: size, colours" '30|#ffffff00|#ff000000|#80000000' "$(svc_prop subtitle size)|$(svc_prop subtitle fgcolour)|$(svc_prop subtitle olcolour)|$(svc_prop subtitle bgcolour)"
+expect_eq "style: position top (valign top by default)" '20%/5%:60%x20%|top' "$(svc_prop subtitle geometry)|$(svc_prop subtitle valign)"
+tool_json undo '{}' >/dev/null
+R="$(cap '{"track":0,"clip":1,"style":{"position":"middle","valign":"bottom"}}')"
+save
+expect_eq "style: position middle, valign bottom" '20%/40%:60%x20%|bottom' "$(svc_prop subtitle geometry)|$(svc_prop subtitle valign)"
+tool_json undo '{}' >/dev/null
+
+echo "== captions_from_transcript: a trimmed clip"
+expect_eq "insert tone_av.mp4 from 3 s at frame 400 of track 0" false "$(tool_is_error timeline_insert_range "$(jq -nc --arg p "$TONE" '{path:$p,in_s:3,out_s:10,track:0,position:400}')")"
+expect_eq "the trimmed clip is item 3, in 75" '[3,400,75]' "$(tool_json get_timeline '{}' | jq -c '.tracks[0].clips[3] | [.index,.start,.in]')"
+R="$(cap '{"track":0,"clip":3,"max_words":5}')"
+# "seven" starts at 2.8 s, before the clip's in point; "eight" (4.0 s = source frame 100) is at
+# timeline frame 400 + 100 - 75 = 425 = 17000 ms.
+expect_eq "trimmed: one caption, the words inside the clip, shifted to its place" '{"captions":1,"first":{"end_ms":19000,"start_ms":17000,"text":"eight nine ten eleven twelve"}}' "$(echo "$R" | jq -cS '{captions,first}')"
+tool_json undo '{}' >/dev/null
+expect_eq "speed 2 on the trimmed clip" false "$(tool_is_error clip_set_speed '{"track":0,"clip":3,"speed":2}')"
+expect_eq "a speed-changed clip is an error" true "$(cerr '{"track":0,"clip":3}')"
+tool_json undo '{}' >/dev/null
+tool_json undo '{}' >/dev/null
+expect_eq "the trimmed clip is gone again" 2 "$(tool_json get_timeline '{}' | jq '.tracks[0].clips | length')"
+
+echo "== captions_from_transcript: an audio-only clip, a gap and the minimum duration"
+AO="$MEDIA/audioonly.wav"
+AT='{"segments":[{"start_s":0,"end_s":0.2,"text":"Hi","words":[{"start_s":0,"end_s":0.2,"text":"Hi"}]},{"start_s":0.4,"end_s":2.6,"text":"there friend again","words":[{"start_s":0.4,"end_s":0.8,"text":"there"},{"start_s":0.8,"end_s":1.2,"text":"friend"},{"start_s":2.4,"end_s":2.6,"text":"again"}]}]}'
+expect_eq "supply a transcript for audioonly.wav" word "$(tool_json transcribe "$(jq -nc --arg p "$AO" --argjson t "$AT" '{path:$p,transcript:$t}')" | jq -r '.granularity')"
+ATR="$(tool_json track_add '{"type":"audio"}' | jq '.added.index')"
+expect_eq "insert audioonly.wav at frame 0 of the audio track" false "$(tool_is_error timeline_insert_range "$(jq -nc --arg p "$AO" --argjson t "$ATR" '{path:$p,in_s:0,out_s:10,track:$t,position:0}')")"
+R="$(cap "{\"track\":$ATR,\"clip\":0,\"burn_in\":false}")"
+expect_eq "audio-only: 3 captions" 3 "$(echo "$R" | jq '.captions')"
+save
+SRT2="$(printf '1\n00:00:00,000 --> 00:00:00,400\nHi\n\n2\n00:00:00,400 --> 00:00:01,200\nthere friend\n\n3\n00:00:02,400 --> 00:00:03,100\nagain\n')"
+expect_eq "audio-only: Hi stretched only up to the next caption, a 1.2 s gap breaks, again stretched to 700 ms" "$SRT2" "$(svc_prop subtitle_feed text)"
+tool_json undo '{}' >/dev/null
+R="$(cap "{\"track\":$ATR,\"clip\":0,\"burn_in\":false,\"min_duration_ms\":1000}")"
+expect_eq "min_duration_ms 1000: again lasts 1000 ms" '{"end_ms":3400,"start_ms":2400,"text":"again"}' "$(echo "$R" | jq -cS '.last')"
+tool_json undo '{}' >/dev/null
+
+tool_json track_set "{\"track\":$ATR,\"lock\":true}" >/dev/null
+expect_eq "a clip on a locked track can be captioned (the clip is not changed)" false "$(cerr "{\"track\":$ATR,\"clip\":0,\"burn_in\":false}")"
+tool_json undo '{}' >/dev/null
+tool_json track_set "{\"track\":$ATR,\"lock\":false}" >/dev/null
+
+echo "== captions_from_transcript: a Whisper result must cover the clip"
+SN="$MEDIA/space name.mp4"
+expect_eq "insert all of 'space name.mp4' at frame 600 of track 0" false "$(tool_is_error timeline_insert_range "$(jq -nc --arg p "$SN" '{path:$p,in_s:0,out_s:9,track:0,position:600}')")"
+expect_eq "insert its 4-9 s at frame 900 of track 0" false "$(tool_is_error timeline_insert_range "$(jq -nc --arg p "$SN" '{path:$p,in_s:4,out_s:9,track:0,position:900}')")"
+expect_eq "the two clips are items 3 and 5" '[[600,0],[900,100]]' "$(tool_json get_timeline '{}' | jq -c '[.tracks[0].clips[3,5] | [.start,.in]]')"
+W="$(tool_json transcribe '{"track":0,"clip":5,"wait_ms":20000}')"
+if echo "$W" | jq -e '.path' >/dev/null 2>&1 || echo "$W" | jq -e '.job_id' >/dev/null 2>&1; then
+  job="$(echo "$W" | jq -r '.job_id // empty')"
+  if [ -n "$job" ]; then W="$(wait_job "$job" 120 | jq -c '.result')"; fi
+  expect_eq "Whisper ran on the trimmed clip only (in_s 4, out_s 9)" '[4,9]' "$(echo "$W" | jq -c '[.in_s,.out_s]')"
+  expect_eq "the full clip is refused: the kept transcript covers only 4-9 s" true "$(tool_text captions_from_transcript '{"track":0,"clip":3,"burn_in":false}' | grep -q 'covers 4 to 9 s' && echo true || echo false)"
+  R="$(cap '{"track":0,"clip":5,"burn_in":false}')"
+  if [ "$(echo "$W" | jq -r '[.segments[].words[]?.text] | join(" ")')" = "Hello… world—" ]; then
+    # tools/mcp-fake-whisper.sh: Hello… 4.0-4.5 s and world— 7.0-7.5 s of the source (frames
+    # 100 and 175 from the clip's in point 100 at frame 900); the 2.5 s pause breaks.
+    expect_eq "fake Whisper: two captions, language eng from en" '{"captions":2,"first":{"end_ms":36700,"start_ms":36000,"text":"Hello…"},"language":"eng","last":{"end_ms":39700,"start_ms":39000,"text":"world—"}}' "$(echo "$R" | jq -cS '{captions,first,last,language}')"
+  else
+    expect_eq "real Whisper: the covered clip is not refused for coverage" false "$(echo "$R" | grep -q 'covers' && echo true || echo false)"
+  fi
+  tool_json undo '{}' >/dev/null 2>&1
+else
+  echo "SKIP (no whisper): captions coverage checks need a configured Whisper (WHISPER_EXE and WHISPER_MODEL for the harness, or tools/mcp-fake-whisper.sh)"
+fi
 
 echo "== the default title size is at most 400 on a tall video mode"
 # Last again: another project is opened. 720x4920: height / 12 = 410.

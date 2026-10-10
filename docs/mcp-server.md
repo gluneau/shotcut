@@ -960,6 +960,81 @@ below it. Put it on an upper track (for example one made with `track_add`).
 - Without `font` the family is MLT's default, "Sans", whereas Open Other > Text uses Verdana on
   Windows and Helvetica on macOS.
 
+### Captions from a transcript
+
+`captions_from_transcript` (56 tools in all) captions a timeline clip from the transcript kept for
+its source file as ONE undo step ("Captions from transcript"): a new Shotcut subtitle track and,
+by default, the Subtitle Burn In filter on the timeline output, so the captions are in the
+exported picture (Shotcut's soft subtitle streams are often ignored by players and uploaders).
+There is no `captions_remove`: one `undo` removes the track and the filter together.
+
+| Argument | Meaning |
+|----------|---------|
+| `track`, `clip` | The clip whose trimmed range is captioned (any track; audio-only, locked) |
+| `max_words?` | 1..20 words per caption, default 7 |
+| `max_chars?` | 10..100 characters per caption (Unicode code points), default 42 |
+| `min_duration_ms?` | 200..5000, default 700 |
+| `language?` | The subtitle track's ISO 639-2 code (`eng`, `fra`, ...) |
+| `style?` | Burn-in only: `{size?, color?, outline_color?, bg_color?, valign?, position?}` |
+| `burn_in?` | Default true; false makes only the subtitle track |
+
+- The transcript is what `transcribe` keeps for the clip's source file (`McpTranscripts`): a
+  supplied one (it covers the whole file), or the last Whisper result for the file. A Whisper
+  run on another clip of the same file covers only that clip's range and replaces the file's
+  entry, so a stored `in_s`..`out_s` that does not cover the clip's range (within a frame) is
+  refused: run `transcribe` on this clip first. No transcript at all is refused the same way.
+- Words: a transcript with word times uses its words; a segment without words is split into its
+  whitespace-separated words, evenly timed over the segment. A word is kept when its START
+  frame, `round(start_s * fps)`, is inside the clip's source range; its end is clamped to the
+  clip's end. No word inside the clip is an error.
+- Grouping, in order: a caption takes words until the next would make more than `max_words`
+  words or more than `max_chars` characters (words joined by single spaces, text trimmed), and
+  it always ends at a segment end and at a pause over 0.8 s (word start minus the previous
+  word's end, in source seconds). A single word longer than `max_chars` is a caption of its own.
+  A word that starts in the same frame as the caption it would end joins that caption instead,
+  so no caption is empty.
+- Times: SubtitlesModel items are milliseconds on the TIMELINE. A caption starts at
+  `((clip start + first word's source frame - clip in) / fps) * 1000` and ends at the same
+  mapping of its last word's end frame, rounded to the millisecond. It is then lengthened to
+  `min_duration_ms` unless the next caption starts sooner (it ends there). At 25 fps every time
+  is a multiple of 40 ms.
+- The track is named `Captions N`, the first N not used by a subtitle track or by a burn-in
+  filter's `feed`. `language` defaults to the transcript's (Whisper's ISO 639-1 code turned into
+  ISO 639-2), else the system language, as the Subtitles panel's first track does.
+- Burn-in: the `subtitle` filter (`shotcut:filter subtitles`) on the multitrack with the
+  properties `SubtitlesDock::burnInOnTimeline` sets: `fgcolour #ffffffff`, `bgcolour #00000000`,
+  `olcolour #aa000000`, `outline 3`, `weight 700`, `style normal`, `shotcut:usePointSize 1`,
+  `size` = project height / 20, `geometry 20%/75%:60%x20%`, `valign bottom`, `halign center`,
+  `feed` = the track name, `typewriter 0` (and its defaults); `family` Verdana on Windows and
+  Helvetica on macOS, as there. `style` changes `size` (8..400), `color`, `outline_color`,
+  `bg_color`, `position` (`bottom`, `middle` = `20%/40%:...`, `top` = `20%/5%:...`) and `valign`
+  (default the position). It is added after the output's user filters, so it renders after them.
+- Refused (nothing changed): unknown arguments (also inside `style`), out-of-range numbers, a
+  `language` that is not a known three-letter code, `style` with `burn_in: false`, a blank,
+  transition or missing clip, a speed-changed clip, no transcript or one that does not cover the
+  clip, and a burn-in when the output already has one and Shotcut's filter did not allow
+  several (it does allow several today, so this cannot happen with stock Shotcut).
+- Returns `{track_name, language, captions, first: {start_ms, end_ms, text}, last: {...},
+  burn_in}`. Edit the captions later in Shotcut's Subtitles panel; export the `.srt` there.
+
+### Known limits (captions)
+
+- Times come from the transcript's word times rounded to frames; Whisper's word times are
+  approximate (often a little early or late), so captions can lead or lag speech by a few
+  frames. A word that starts just before the clip's in point is dropped even if most of it is
+  inside.
+- The minimum duration may carry the last caption up to `min_duration_ms` past the clip's end
+  (over whatever follows on the timeline).
+- The captions are not tied to the clip: moving, trimming or rippling the clip later does not
+  move them; run the tool again (and undo or remove the old track in the Subtitles panel).
+- Shotcut writes a subtitle track's SRT into its `subtitle_feed` filter 500 ms after an edit;
+  the tool writes it at once so an immediate save or export has the captions, but after an
+  `undo`/`redo` of the step the text comes back only after that delay, as for Shotcut's own
+  edits.
+- A speed-changed clip is refused (source and timeline times differ).
+- Fonts: the burn-in uses the font of Shotcut's filter (Sans on Linux); it must be installed
+  where the project is rendered.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -1064,9 +1139,16 @@ It then checks `title_add` and `lower_third_add` on a new top track: argument re
 clip's place, length and name, the saved filter properties (exact text, geometry, colours,
 size within a pixel), one undo restoring the track, insert mode, `#` escaping, and an export
 whose centre band has white text (`signalstats` YMAX >= 235; the same frame of the earlier
-export has none). It ends by opening a timeline-only project and checking
-`project_set_format` is refused there. `MCP_APPDATA` must be set (it is a
-FAIL otherwise): the script checks that `shotcut.ini` has no saved `[player] profile`.
+export has none). It then opens a timeline-only project and checks `project_set_format` is
+refused there. On that project (640x360, 25 fps) it checks `captions_from_transcript` with
+supplied transcripts: the refusals, three captions from 12 known words with their exact
+millisecond times and SRT, the saved `subtitle_feed` and burn-in filter properties, an export
+with bright caption text in the bottom quarter during a caption and none between captions,
+one undo removing both, `burn_in: false`, a second track, `max_chars`, `style`, `language`, a
+trimmed clip, a speed-changed clip, and an audio-only clip (a pause and the minimum duration).
+It ends by opening a 720x4920 project and checking the default title size is capped at 400.
+`MCP_APPDATA` must be set (it is a FAIL otherwise): the script checks that `shotcut.ini` has no
+saved `[player] profile`.
 
 Manual checks (they need a modified project, which the tools cannot create):
 
@@ -1095,5 +1177,5 @@ Manual checks for stage 2 (GUI only; the headless script cannot cover them):
 ## Known limits
 
 Not covered by the tools or not tested headless: locked tracks (refused, tested by hand only), GPU
-mode, proxies, generators and titles, filters outside the stage 3B allowlist, subtitles, two-pass
-encoding and export ranges.
+mode, proxies, generators and titles, filters outside the stage 3B allowlist, subtitles (other
+than `captions_from_transcript`), two-pass encoding and export ranges.

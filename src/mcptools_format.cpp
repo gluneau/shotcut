@@ -18,14 +18,19 @@
 #include "mcptools.h"
 #include "mcptoolsutil.h"
 
+#include "controllers/filtercontroller.h"
 #include "docks/timelinedock.h"
 #include "mainwindow.h"
 #include "mltcontroller.h"
 #include "models/multitrackmodel.h"
+#include "models/subtitles.h"
+#include "models/subtitlesmodel.h"
+#include "qmltypes/qmlmetadata.h"
 #include "shotcut_mlt_properties.h"
 
 #include <QGuiApplication>
 #include <QJsonArray>
+#include <QLocale>
 #include <QRectF>
 #include <QRegularExpression>
 #include <QScreen>
@@ -574,6 +579,355 @@ QJsonObject lowerThirdAddTool(const QJsonObject &arguments)
                        "line1 and line2 together");
 }
 
+// A word of a transcript in source frames, with the segment it belongs to.
+struct CaptionWord
+{
+    int start = 0, end = 0; // source frames; end is clamped to the clip's end
+    double startSeconds = 0, endSeconds = 0;
+    int segment = 0;
+    QString text;
+};
+
+// A caption being built: its words' frames and text.
+struct Caption
+{
+    int start = 0, end = 0; // source frames
+    int segment = 0;
+    int words = 0;
+    double lastEndSeconds = 0;
+    QString text;
+};
+
+// The words of a transcript whose start frame lies inside the clip's source range. A segment
+// without words is split into its whitespace-separated words, evenly timed.
+QList<CaptionWord> transcriptWords(const QJsonArray &segments, const SourceRef &ref, double fps)
+{
+    const int clipEnd = ref.clipFrameIn + ref.clipFrameCount;
+    QList<CaptionWord> list;
+    const auto add = [&](double start, double end, const QString &text, int segment) {
+        CaptionWord word;
+        word.start = qRound(start * fps);
+        word.end = qMin(qMax(word.start, qRound(end * fps)), clipEnd);
+        word.startSeconds = start;
+        word.endSeconds = end;
+        word.segment = segment;
+        word.text = text.simplified();
+        if (word.start >= ref.clipFrameIn && word.start < clipEnd && !word.text.isEmpty())
+            list.append(word);
+    };
+    static const QRegularExpression space(QStringLiteral("\\s+"));
+    for (int i = 0; i < segments.size(); ++i) {
+        const QJsonObject segment = segments.at(i).toObject();
+        const QJsonArray words = segment.value("words").toArray();
+        if (!words.isEmpty()) {
+            for (const QJsonValue &v : words) {
+                const QJsonObject w = v.toObject();
+                add(w.value("start_s").toDouble(),
+                    w.value("end_s").toDouble(),
+                    w.value("text").toString(),
+                    i);
+            }
+            continue;
+        }
+        const QStringList texts = segment.value("text").toString().split(space,
+                                                                         Qt::SkipEmptyParts);
+        const double start = segment.value("start_s").toDouble();
+        const double step = (segment.value("end_s").toDouble() - start) / qMax(1, texts.size());
+        for (int j = 0; j < texts.size(); ++j)
+            add(start + j * step, start + (j + 1) * step, texts.at(j), i);
+    }
+    return list;
+}
+
+// Groups words into captions of at most maxWords words and maxChars characters (code points),
+// breaking at segment ends and at pauses over 0.8 s. A caption never starts in the frame the
+// previous one starts in (the word joins the previous caption instead), so none is empty.
+QList<Caption> groupCaptions(const QList<CaptionWord> &words, int maxWords, int maxChars)
+{
+    QList<Caption> captions;
+    for (const CaptionWord &word : words) {
+        if (!captions.isEmpty()) {
+            Caption &last = captions.last();
+            const QString joined = last.text + ' ' + word.text;
+            const bool full = last.words >= maxWords || joined.toUcs4().size() > maxChars;
+            const bool breaks = word.segment != last.segment
+                                || word.startSeconds - last.lastEndSeconds > 0.8;
+            if ((!full && !breaks) || word.start <= last.start) {
+                last.text = joined;
+                last.end = qMax(last.end, word.end);
+                last.lastEndSeconds = word.endSeconds;
+                ++last.words;
+                continue;
+            }
+        }
+        Caption caption;
+        caption.start = word.start;
+        caption.end = word.end;
+        caption.segment = word.segment;
+        caption.words = 1;
+        caption.lastEndSeconds = word.endSeconds;
+        caption.text = word.text;
+        captions.append(caption);
+    }
+    return captions;
+}
+
+// An ISO 639-2 code from a code Whisper reports (ISO 639-1, e.g. "en"); empty when unknown.
+QString iso6392(const QString &code)
+{
+    const QLocale::Language language = QLocale::codeToLanguage(code);
+    if (code.isEmpty() || language == QLocale::AnyLanguage)
+        return QString();
+    return QLocale::languageToCode(language, QLocale::ISO639Part2);
+}
+
+// The text property of the trackIndex'th subtitle_feed filter of the multitrack, written now
+// from the model's items. SubtitlesModel writes it 500 ms after an edit (a timer), so a save or
+// an export right after the tool would otherwise lose the captions.
+void writeFeedText(SubtitlesModel &subtitles, int trackIndex)
+{
+    Mlt::Tractor *tractor = MAIN.timelineDock()->model()->tractor();
+    if (!tractor)
+        return;
+    Subtitles::SubtitleVector items;
+    for (int i = 0; i < subtitles.itemCount(trackIndex); ++i)
+        items.push_back(subtitles.getItem(trackIndex, i));
+    std::string text;
+    Subtitles::writeToSrtString(text, items);
+    int feed = 0;
+    for (int i = 0; i < tractor->filter_count(); ++i) {
+        std::unique_ptr<Mlt::Filter> filter(tractor->filter(i));
+        if (filter && filter->is_valid()
+            && !qstrcmp(filter->get("mlt_service"), "subtitle_feed") && feed++ == trackIndex) {
+            filter->set("text", text.c_str());
+            return;
+        }
+    }
+}
+
+QJsonObject captionsFromTranscriptTool(const QJsonObject &arguments)
+{
+    QString error;
+    int track = 0, clip = 0;
+    if (!checkKeys(arguments,
+                   {"track",
+                    "clip",
+                    "max_words",
+                    "max_chars",
+                    "min_duration_ms",
+                    "language",
+                    "style",
+                    "burn_in"},
+                   error)
+        || !readTarget(arguments, track, clip, error))
+        return textResult(error, true);
+    int maxWords = 7, maxChars = 42, minDuration = 700;
+    if (!readIntArg(arguments, "max_words", 1, 20, maxWords, error)
+        || !readIntArg(arguments, "max_chars", 10, 100, maxChars, error)
+        || !readIntArg(arguments, "min_duration_ms", 200, 5000, minDuration, error))
+        return textResult(error, true);
+    QString language;
+    const QJsonValue languageValue = arguments.value("language");
+    if (!languageValue.isUndefined()) {
+        static const QRegularExpression code(QStringLiteral("^[a-z]{3}$"));
+        language = languageValue.toString();
+        if (!code.match(language).hasMatch()
+            || QLocale::codeToLanguage(language, QLocale::ISO639Part2) == QLocale::AnyLanguage)
+            return textResult("language must be an ISO 639-2 code (three lower-case letters, e.g. "
+                              "eng, fra).",
+                              true);
+    }
+    const QJsonValue burnValue = arguments.value("burn_in");
+    if (!burnValue.isUndefined() && !burnValue.isBool())
+        return textResult("burn_in must be true or false.", true);
+    const bool burnIn = burnValue.toBool(true);
+
+    // The burn-in filter as SubtitlesDock::burnInOnTimeline makes it, styled.
+    Mlt::Profile &profile = MLT.profile();
+    int size = qMin(400, profile.height() / 20);
+    QString fgcolour = QStringLiteral("#ffffffff"), olcolour = QStringLiteral("#aa000000");
+    QString bgcolour = QStringLiteral("#00000000"), position = QStringLiteral("bottom");
+    QString valign;
+    const QJsonValue styleValue = arguments.value("style");
+    if (!styleValue.isUndefined()) {
+        if (!burnIn)
+            return textResult("style is for the burn-in filter: leave it out with burn_in false.",
+                              true);
+        const QJsonObject style = styleValue.toObject();
+        if (!styleValue.isObject())
+            return textResult("style must be an object.", true);
+        if (!checkKeys(style,
+                       {"size", "color", "outline_color", "bg_color", "valign", "position"},
+                       error)
+            || !readIntArg(style, "size", 8, 400, size, error)
+            || !readColorArg(style, "color", fgcolour, error)
+            || !readColorArg(style, "outline_color", olcolour, error)
+            || !readColorArg(style, "bg_color", bgcolour, error)
+            || !readChoiceArg(style, "position", {"bottom", "middle", "top"}, position, error)
+            || !readChoiceArg(style, "valign", {"top", "middle", "bottom"}, valign, error))
+            return textResult("style." + error, true);
+    }
+    if (valign.isEmpty())
+        valign = position;
+
+    SourceRef ref;
+    if (!resolveSource(QJsonObject{{"track", track}, {"clip", clip}}, ref, error))
+        return textResult(error, true);
+    if (ref.speedChanged)
+        return textResult(QStringLiteral("Clip %1 on track %2 has its speed changed; captions "
+                                         "need a clip at normal speed.")
+                              .arg(clip)
+                              .arg(track),
+                          true);
+    QJsonObject transcript;
+    if (!McpTranscripts::get(ref.path, transcript))
+        return textResult(QStringLiteral("There is no transcript of %1: run transcribe on track %2 "
+                                         "clip %3 (or supply one with transcribe {path, "
+                                         "transcript}) first.")
+                              .arg(ref.path)
+                              .arg(track)
+                              .arg(clip),
+                          true);
+    // A Whisper result covers only the range it was run on (a clip's range when it was run on a
+    // clip), and the latest run on the file replaces it; a supplied transcript covers the file.
+    const double fps = profile.fps();
+    if (transcript.contains("in_s")) {
+        const double slack = 1 / fps + 0.002;
+        const double in = transcript.value("in_s").toDouble();
+        const double out = transcript.value("out_s").toDouble();
+        if (in > ref.inSeconds + slack || out < ref.outSeconds - slack)
+            return textResult(QStringLiteral("The transcript kept for %1 covers %2 to %3 s of it, "
+                                             "not all of the clip's %4 to %5 s: run transcribe on "
+                                             "track %6 clip %7 first.")
+                                  .arg(ref.path)
+                                  .arg(num(in), num(out), num(ref.inSeconds), num(ref.outSeconds))
+                                  .arg(track)
+                                  .arg(clip),
+                              true);
+    }
+    const QList<Caption> captions
+        = groupCaptions(transcriptWords(transcript.value("segments").toArray(), ref, fps),
+                        maxWords,
+                        maxChars);
+    if (captions.isEmpty())
+        return textResult(QStringLiteral("No word of the transcript of %1 starts inside the clip "
+                                         "(%2 to %3 s of the source).")
+                              .arg(ref.path, num(ref.inSeconds), num(ref.outSeconds)),
+                          true);
+
+    // Timeline milliseconds; each caption lasts at least minDuration, up to the next one's start.
+    const auto ms = [&ref, fps](int sourceFrame) {
+        return qint64(std::llround((ref.clipStart + sourceFrame - ref.clipFrameIn) / fps * 1000));
+    };
+    QList<Subtitles::SubtitleItem> items;
+    for (int i = 0; i < captions.size(); ++i) {
+        Subtitles::SubtitleItem item;
+        item.start = ms(captions.at(i).start);
+        item.end = qMax(ms(captions.at(i).end), item.start + minDuration);
+        if (i + 1 < captions.size())
+            item.end = qMin(item.end, ms(captions.at(i + 1).start));
+        item.text = captions.at(i).text.toStdString();
+        items.append(item);
+    }
+
+    if (language.isEmpty())
+        language = iso6392(transcript.value("language").toString());
+    if (language.isEmpty())
+        language = QLocale::languageToCode(QLocale::system().language(), QLocale::ISO639Part2);
+
+    SubtitlesModel &subtitles = *MAIN.timelineDock()->subtitlesModel();
+    Mlt::Tractor *tractor = MAIN.timelineDock()->model()->tractor();
+    QScopedPointer<Mlt::Properties> services(MLT.repository()->filters());
+    for (const char *service : {"subtitle_feed", "subtitle"}) {
+        if (!services || !services->get_data(service))
+            return textResult(QStringLiteral("This MLT has no %1 filter.").arg(service), true);
+    }
+    if (!subtitles.isValid() || !tractor)
+        return textResult("There is no timeline.", true);
+    // Burn-in filters already on the output, by the track they show.
+    QStringList feeds;
+    for (int i = 0; i < tractor->filter_count(); ++i) {
+        std::unique_ptr<Mlt::Filter> filter(tractor->filter(i));
+        if (filter && filter->is_valid() && !qstrcmp(filter->get("mlt_service"), "subtitle"))
+            feeds << QString::fromUtf8(filter->get("feed"));
+    }
+    QStringList names;
+    for (const auto &t : subtitles.getTracks())
+        names << t.name;
+    QString name;
+    for (int n = 1; name.isEmpty(); ++n) {
+        const QString candidate = QStringLiteral("Captions %1").arg(n);
+        if (!names.contains(candidate) && !feeds.contains(candidate))
+            name = candidate;
+    }
+    if (burnIn && !feeds.isEmpty()) {
+        QmlMetadata *meta = MAIN.filterController()->metadata("subtitles");
+        if (meta && !meta->allowMultiple())
+            return textResult(QStringLiteral("The output already has a Subtitle Burn In filter "
+                                             "(for %1); burn in one subtitle track only, or pass "
+                                             "burn_in false.")
+                                  .arg(feeds.first()),
+                              true);
+    }
+
+    MLT.pause();
+    const QString undoText = QObject::tr("Captions from transcript");
+    QUndoStack *stack = MAIN.undoStack();
+    const int trackIndex = subtitles.trackCount();
+    stack->beginMacro(undoText);
+    SubtitlesModel::SubtitleTrack subtitleTrack{name, language};
+    subtitles.importSubtitlesToNewTrack(subtitleTrack, items);
+    bool ok = subtitles.trackCount() == trackIndex + 1
+              && subtitles.itemCount(trackIndex) == items.size();
+    if (!ok)
+        error = QStringLiteral("Shotcut could not add the subtitle track; nothing was changed.");
+    else
+        writeFeedText(subtitles, trackIndex);
+    if (ok && burnIn) {
+        Mlt::Properties props;
+#if defined(Q_OS_WIN)
+        props.set("family", "Verdana");
+#elif defined(Q_OS_MAC)
+        props.set("family", "Helvetica");
+#endif
+        props.set("fgcolour", fgcolour.toLatin1().constData());
+        props.set("bgcolour", bgcolour.toLatin1().constData());
+        props.set("olcolour", olcolour.toLatin1().constData());
+        props.set("outline", 3);
+        props.set("weight", 700);
+        props.set("style", "normal");
+        props.set("shotcut:usePointSize", 1);
+        props.set("size", size);
+        const char *top = position == "top" ? "5%" : position == "middle" ? "40%" : "75%";
+        props.set("geometry", QStringLiteral("20%/%1:60%x20%").arg(top).toLatin1().constData());
+        props.set("valign", valign.toLatin1().constData());
+        props.set("halign", "center");
+        props.set("feed", name.toUtf8().constData());
+        props.set("typewriter", 0);
+        props.set("typewriter.step_length", 15);
+        props.set("typewriter.step_sigma", 2);
+        props.set("typewriter.random_seed", 0);
+        props.set("typewriter.macro_type", 2);
+        props.set("typewriter.cursor", 0);
+        props.set("typewriter.cursor_blink_rate", 25);
+        props.set("typewriter.cursor_char", "|");
+        ok = addOutputFilter("subtitle", "subtitles", props, undoText, error, true);
+    }
+    if (!finishMacro(stack, ok))
+        return textResult(error, true);
+    const auto captionJson = [](const Subtitles::SubtitleItem &item) {
+        return QJsonObject{{"start_ms", qint64(item.start)},
+                           {"end_ms", qint64(item.end)},
+                           {"text", QString::fromStdString(item.text)}};
+    };
+    return jsonResult(QJsonObject{{"track_name", name},
+                                  {"language", language},
+                                  {"captions", int(items.size())},
+                                  {"first", captionJson(items.first())},
+                                  {"last", captionJson(items.last())},
+                                  {"burn_in", burnIn}});
+}
+
 } // namespace
 
 QList<McpTool> McpTools::formatTools()
@@ -692,5 +1046,49 @@ QList<McpTool> McpTools::formatTools()
              "mode":{"type":"string","enum":["insert","overwrite"]}
            },"required":["line1","track","position","duration"],"additionalProperties":false})"),
          lowerThirdAddTool},
+        {"captions_from_transcript",
+         "Caption a timeline clip from its transcript as ONE undo step (\"Captions from "
+         "transcript\"; there is no captions_remove: one undo removes everything): a new "
+         "Shotcut subtitle track named \"Captions N\" (the first unused N) and, with burn_in "
+         "(default true), Shotcut's Subtitle Burn In filter on the timeline output so the "
+         "captions are part of the exported picture. The transcript is the one kept for the "
+         "clip's source file by transcribe (a supplied one, or Whisper's: run transcribe on the "
+         "clip first; a Whisper result that does not cover the clip's range is refused). Only "
+         "words that START inside the clip's trimmed range are used. Words are grouped into "
+         "captions of at most max_words (1 to 20, default 7) words and max_chars (10 to 100, "
+         "default 42, counted as Unicode code points) characters joined by single spaces, "
+         "breaking at segment ends and at pauses over 0.8 s (a transcript without word times is "
+         "split into its words, evenly timed). A caption's start and end are milliseconds on the "
+         "TIMELINE: ((clip start + source frame - clip in) / fps) * 1000, the source frame being "
+         "round(seconds * fps); each caption lasts at least min_duration_ms (200 to 5000, default "
+         "700) unless the next caption starts sooner. language: the track's ISO 639-2 code "
+         "(e.g. eng, fra); default the transcript's language, else the system's. style (burn-in "
+         "only): size 8 to 400 pixels (default the project height / 20), color (default "
+         "\"#ffffffff\"), outline_color (default \"#aa000000\", outline 3), bg_color (default "
+         "\"#00000000\" none) as \"#rrggbb\" or \"#aarrggbb\"; position bottom|middle|top "
+         "(default bottom: the box 20%/75%:60%x20%) and valign top|middle|bottom inside it "
+         "(default the position). A clip on any track (also audio-only or locked) works; refused "
+         "(nothing changed): unknown arguments, a blank or transition, a speed-changed clip, no "
+         "transcript, no word inside the clip. Returns {track_name, language, captions (the "
+         "count), first:{start_ms, end_ms, text}, last:{...}, burn_in}. Edit them later in "
+         "Shotcut's Subtitles panel.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0},
+             "max_words":{"type":"integer","minimum":1,"maximum":20,"default":7},
+             "max_chars":{"type":"integer","minimum":10,"maximum":100,"default":42},
+             "min_duration_ms":{"type":"integer","minimum":200,"maximum":5000,"default":700},
+             "language":{"type":"string","pattern":"^[a-z]{3}$"},
+             "style":{"type":"object","properties":{
+               "size":{"type":"integer","minimum":8,"maximum":400},
+               "color":{"type":"string","pattern":"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"},
+               "outline_color":{"type":"string","pattern":"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"},
+               "bg_color":{"type":"string","pattern":"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"},
+               "valign":{"type":"string","enum":["top","middle","bottom"]},
+               "position":{"type":"string","enum":["bottom","middle","top"]}
+             },"additionalProperties":false},
+             "burn_in":{"type":"boolean","default":true}
+           },"required":["track","clip"],"additionalProperties":false})"),
+         captionsFromTranscriptTool},
     };
 }
