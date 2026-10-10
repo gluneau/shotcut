@@ -88,11 +88,56 @@ expect_eq "export succeeded" succeeded "$st"
 expect_eq "exported size is 1080x1920" 1080x1920 "$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$OUT" 2>/dev/null)"
 expect_eq "exported frame rate is 30/1" 30/1 "$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$OUT" 2>/dev/null)"
 
+echo "== the saved Video Mode setting is untouched"
 if [ -n "${MCP_APPDATA:-}" ]; then
-  echo "== the saved Video Mode setting is untouched"
   INI="$MCP_APPDATA/shotcut.ini"
   # [player] profile= is Settings.playerProfile(); empty or absent is the default (Automatic).
   expect_eq "shotcut.ini has no saved [player] profile" "" "$(awk '/^\[/{s=($0=="[player]")} s && /^profile=/{sub(/^profile=/,""); print}' "$INI")"
+else
+  fail "shotcut.ini has no saved [player] profile" "MCP_APPDATA is not set, so shotcut.ini cannot be checked"
 fi
+
+echo "== refused on a project with only a timeline (nothing in the playlist)"
+# Last: opening a project cannot be undone, and every earlier check needs the empty session.
+TL="$TMP/timeline-only.mlt"
+cat > "$TL" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="main_bin">
+  <profile description="640x360 25 fps" width="640" height="360" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="16" display_aspect_den="9" frame_rate_num="25" frame_rate_den="1" colorspace="709"/>
+  <playlist id="main_bin">
+    <property name="xml_retain">1</property>
+  </playlist>
+  <producer id="black" in="0" out="49">
+    <property name="length">50</property>
+    <property name="resource">0</property>
+    <property name="mlt_service">color</property>
+  </producer>
+  <playlist id="background">
+    <entry producer="black" in="0" out="49"/>
+  </playlist>
+  <chain id="chain0" out="49">
+    <property name="resource">$MEDIA/scenes.mp4</property>
+    <property name="mlt_service">avformat-novalidate</property>
+  </chain>
+  <playlist id="playlist0">
+    <property name="shotcut:video">1</property>
+    <property name="shotcut:name">V1</property>
+    <entry producer="chain0" in="0" out="49"/>
+  </playlist>
+  <tractor id="tractor0" in="0" out="49">
+    <property name="shotcut">1</property>
+    <track producer="background"/>
+    <track producer="playlist0"/>
+  </tractor>
+</mlt>
+XML
+open_fixture_project "$TL" >/dev/null
+sleep 1
+expect_eq "the opened project has a timeline" 1 "$(tool_json get_timeline '{}' | jq '[.tracks[] | select(.type=="video")] | length')"
+expect_eq "the opened project's playlist is empty" 0 "$(tool_json get_playlist '{}' | jq '.items | length')"
+PTL="$(prof)"
+expect_eq "the opened project is 640x360 25 fps" '{"fps_den":1,"fps_num":25,"height":360,"width":640}' "$(echo "$PTL" | jq -cS .)"
+expect_eq "project_set_format on a timeline-only project is an error" true "$(ferr '{"preset":"9:16"}')"
+expect_eq "the refusal changed nothing (timeline only)" "$PTL" "$(prof)"
 
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

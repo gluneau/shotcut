@@ -842,6 +842,8 @@ result is `{width, height, fps_num, fps_den, sar, dar}` with `sar` and `dar` as 
 - The Video Mode menu is not synced to the new format: as after Shotcut's own unnamed custom mode,
   no mode is checked until the project is closed (which re-checks the saved mode). Choosing a
   Video Mode in the menu afterwards replaces the tool's format as usual.
+- The start screen's own Video Mode button still shows the saved mode, and clicking Start there
+  replaces the tool's format with it.
 - Interlaced, non-square-pixel, BT.601/BT.2020 and HDR formats are not offered.
 
 ## Security
