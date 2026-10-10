@@ -435,6 +435,7 @@ QList<McpTool> McpTools::all()
     tools += audioTools();
     tools += pictureTools();
     tools += formatTools();
+    tools += guideTools();
     return tools;
 }
 

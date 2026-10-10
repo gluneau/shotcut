@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Format smoke test for the Shotcut MCP server (stage 3, part 3C): project_set_format, clip_reframe,
-# title_add, lower_third_add, captions_from_transcript.
+# title_add, lower_third_add, captions_from_transcript, export_presets_list, get_editing_guide.
 # Usage: MCP_TOKEN=<token> [MCP_PORT=7468] MCP_APPDATA=<scratch dir> tools/mcp-smoke-format.sh
 # Run it against a FRESH, throwaway Shotcut (nothing loaded, no timeline); it aborts otherwise
 # unless MCP_SMOKE_FORCE=1. It creates its media with ffmpeg in a temporary folder and exports
@@ -20,12 +20,12 @@ fresh_guard
 MEDIA="$("$HERE/mcp-fixtures.sh" "$TMP/media")" || { echo "ffmpeg could not create the fixtures"; exit 2; }
 
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[]]')"
-expect_eq "tools/list: 56 tools in all (through Task 20)" 56 "$(echo "$TOOLS" | jq 'length')"
+expect_eq "tools/list: 58 tools in all (through Task 21)" 58 "$(echo "$TOOLS" | jq 'length')"
 expect_eq "tools/list has project_set_format" true "$(echo "$TOOLS" | jq '[.[].name] | index("project_set_format") != null')"
 expect_eq "project_set_format schema refuses extra properties" false "$(echo "$TOOLS" | jq '.[] | select(.name=="project_set_format") | .inputSchema.additionalProperties')"
 expect_eq "tools/list has clip_reframe" true "$(echo "$TOOLS" | jq '[.[].name] | index("clip_reframe") != null')"
 expect_eq "clip_reframe schema refuses extra properties" false "$(echo "$TOOLS" | jq '.[] | select(.name=="clip_reframe") | .inputSchema.additionalProperties')"
-for t in title_add lower_third_add; do
+for t in title_add lower_third_add export_presets_list get_editing_guide; do
   expect_eq "tools/list has $t" true "$(echo "$TOOLS" | jq --arg t "$t" '[.[].name] | index($t) != null')"
   expect_eq "$t schema refuses extra properties" false "$(echo "$TOOLS" | jq --arg t "$t" '.[] | select(.name==$t) | .inputSchema.additionalProperties')"
 done
@@ -769,5 +769,86 @@ expect_eq "title_add with the default size" false "$(terr '{"text":"Tall","track
 SAVED="$TMP/tall-saved.mlt"
 tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null
 expect_eq "saved: size 400, not 4920 / 12 = 410 (within 1)" true "$(near 400 "$(dyn_prop size)")"
+
+echo "== export_presets_list"
+# Custom presets in the instance's presets folder: one usable, one shadowed by a stock name, one
+# without an extension, one whose name export_video refuses (..), and a hidden file.
+CUSTOM="$MCP_APPDATA/presets/encode"
+mkdir -p "$CUSTOM"
+printf 'f=mp4\nvcodec=libx264\nacodec=aac\nmeta.preset.extension=mp4\n' > "$CUSTOM/MCP Test"
+printf 'f=matroska\nvcodec=ffv1\nacodec=flac\nmeta.preset.extension=mkv\n' > "$CUSTOM/x264-medium"
+printf 'f=mp4\nvcodec=libx264\n' > "$CUSTOM/noext"
+printf 'f=mp4\nvcodec=libx264\nmeta.preset.extension=mp4\n' > "$CUSTOM/a..b"
+printf 'f=mp4\nvcodec=libx264\nmeta.preset.extension=mp4\n' > "$CUSTOM/.dot"
+PTOOL='.[] | select(.name=="export_presets_list")'
+expect_eq "export_presets_list takes no arguments" '{}' "$(echo "$TOOLS" | jq -c "$PTOOL | .inputSchema.properties")"
+expect_eq "export_presets_list with an argument is an error" true "$(tool_is_error export_presets_list '{"all":true}')"
+PL="$(tool_json export_presets_list '{}' | jq -c '.presets')"
+expect_eq "at least 10 stock presets" true "$(echo "$PL" | jq '[.[] | select(.source=="stock")] | length >= 10')"
+expect_eq "x264-medium: stock, mp4, libx264, aac" '{"audio_codec":"aac","extension":"mp4","name":"x264-medium","source":"stock","video_codec":"libx264"}' "$(echo "$PL" | jq -cS '.[] | select(.name=="x264-medium") | {name,source,extension,video_codec,audio_codec}')"
+expect_eq "x264-medium's description names H.264 and AAC" true "$(echo "$PL" | jq '.[] | select(.name=="x264-medium") | .description | test("H\\.264") and test("AAC")')"
+expect_eq "every preset has a name, a source, an extension and a description" true "$(echo "$PL" | jq 'all(.[]; (.name|type)=="string" and (.name|length)>0 and (.source=="stock" or .source=="custom") and (.extension|length)>0 and (.description|length)>0)')"
+expect_eq "names are unique" true "$(echo "$PL" | jq '[.[].name] | length == (unique | length)')"
+expect_eq "hidden stock presets are not listed (x264-medium-pass1, AV1)" '[]' "$(echo "$PL" | jq -c '[.[] | select(.name=="x264-medium-pass1" or .name=="AV1") | .name]')"
+expect_eq "a profile-folder preset has the profile's size and rate" '{"fps":25,"height":1080,"source":"stock","width":1920}' "$(echo "$PL" | jq -cS '.[] | select(.name=="atsc_1080p_25/DNxHD") | {source,width,height,fps}')"
+expect_eq "a plain preset has no width, height or fps" '[null,null,null]' "$(echo "$PL" | jq -c '.[] | select(.name=="x264-medium") | [.width,.height,.fps]')"
+expect_eq "a YouTube preset says so in its description" true "$(echo "$PL" | jq '.[] | select(.name=="YouTube") | .description | test("YouTube")')"
+expect_eq "the custom preset MCP Test: custom, mp4, libx264" '{"extension":"mp4","name":"MCP Test","source":"custom","video_codec":"libx264"}' "$(echo "$PL" | jq -cS '.[] | select(.name=="MCP Test") | {name,source,extension,video_codec}')"
+expect_eq "a custom file named like a stock preset is listed once, as stock" '["stock"]' "$(echo "$PL" | jq -c '[.[] | select(.name=="x264-medium") | .source]')"
+expect_eq "no custom preset without an extension, with .. or starting with a dot" '[]' "$(echo "$PL" | jq -c '[.[] | select(.name=="noext" or .name=="a..b" or .name==".dot") | .name]')"
+# export_video finds every listed name: a path with the wrong extension in a writable folder gets
+# past every path check and fails only on the extension the preset names (not "Unknown preset").
+BAD=""
+while IFS=$'\t' read -r name ext; do
+  msg="$(tool_text export_video "$(jq -nc --arg p "$TMP/presetcheck.zzz" --arg n "$name" '{path:$p,preset:$n}')")"
+  echo "$msg" | grep -qF "produces .$ext files" || BAD="$BAD[$name: $msg]"
+done < <(echo "$PL" | jq -r '.[] | [.name, .extension] | @tsv')
+expect_eq "export_video finds every listed preset (only the .zzz extension is refused)" "" "$BAD"
+expect_eq "the same check with an unknown name says Unknown preset" true "$(tool_text export_video "$(jq -nc --arg p "$TMP/presetcheck.zzz" '{path:$p,preset:"no-such-preset"}')" | grep -q 'Unknown preset: no-such-preset' && echo true || echo false)"
+
+echo "== get_editing_guide"
+GTOOL='.[] | select(.name=="get_editing_guide")'
+expect_eq "get_editing_guide: use_case is one of four, required" '{"enum":["interview","short","tutorial","montage"],"required":["use_case"]}' "$(echo "$TOOLS" | jq -cS "$GTOOL | .inputSchema | {enum:.properties.use_case.enum, required}")"
+expect_eq "get_editing_guide schema refuses extra properties" false "$(echo "$TOOLS" | jq "$GTOOL | .inputSchema.additionalProperties")"
+expect_eq "no use_case is an error" true "$(tool_is_error get_editing_guide '{}')"
+expect_eq "an unknown use_case is an error" true "$(tool_is_error get_editing_guide '{"use_case":"vlog"}')"
+expect_eq "the error lists the four use cases" true "$(tool_text get_editing_guide '{"use_case":"vlog"}' | grep -q 'interview, short, tutorial, montage' && echo true || echo false)"
+expect_eq "use_case as a number is an error" true "$(tool_is_error get_editing_guide '{"use_case":1}')"
+expect_eq "an unknown argument is an error" true "$(tool_is_error get_editing_guide '{"use_case":"short","style":"x"}')"
+GUIDES="$(for u in interview short tutorial montage; do tool_json get_editing_guide "{\"use_case\":\"$u\"}"; done | jq -sc .)"
+expect_eq "four guides, each for its use case" '["interview","short","tutorial","montage"]' "$(echo "$GUIDES" | jq -c '[.[].use_case]')"
+expect_eq "each guide has exactly use_case, title, steps, defaults, notes" true "$(echo "$GUIDES" | jq 'all(.[]; (keys == ["defaults","notes","steps","title","use_case"]) and (.title|length)>0 and (.steps|length)>=5 and (.defaults|type)=="object" and (.defaults|length)>0 and (.notes|length)>0 and all(.notes[]; type=="string" and length>0))')"
+expect_eq "steps are numbered 1..n, each with tool, why and an object arguments_example" true "$(echo "$GUIDES" | jq 'all(.[]; [.steps[].n] == [range(1; (.steps|length)+1)] and all(.steps[]; (keys == ["arguments_example","n","tool","why"]) and (.why|length)>0 and (.arguments_example|type)=="object"))')"
+expect_eq "defaults are numbers or strings" true "$(echo "$GUIDES" | jq 'all(.[].defaults[]; type=="number" or type=="string")')"
+# Every step names a tool in tools/list, and its arguments_example fits that tool's schema: known
+# keys (also inside an object argument), the required ones, enum values, integer and range limits.
+GBAD="$(echo "$GUIDES" | jq -c --argjson tools "$TOOLS" '
+  ($tools | map({key:.name, value:.inputSchema}) | from_entries) as $s
+  | def bad($p; $v): ($p.enum != null and ($p.enum | any(. == $v) | not))
+      or ($p.type == "integer" and (($v|type) != "number" or ($v|floor) != $v))
+      or ($p.type == "number" and ($v|type) != "number")
+      or ($p.type == "string" and ($v|type) != "string")
+      or ($p.type == "boolean" and ($v|type) != "boolean")
+      or ($p.type == "array" and ($v|type) != "array")
+      or ($p.type == "object" and ($v|type) != "object")
+      or (($v|type) == "number" and $p.minimum != null and $v < $p.minimum)
+      or (($v|type) == "number" and $p.maximum != null and $v > $p.maximum)
+      or ($p.type == "object" and $p.properties != null and ($v|type) == "object"
+          and ((($v|keys) - ($p.properties|keys)) | length) > 0);
+  [ .[] | .use_case as $u | .steps[] | . as $st | $s[$st.tool] as $sch
+    | if $sch == null then "\($u) \($st.n): no tool \($st.tool)"
+      else ( $st.arguments_example | to_entries[] | . as $e | ($sch.properties[$e.key]) as $p
+             | if $p == null then "\($u) \($st.n): \($st.tool) has no argument \($e.key)"
+               elif bad($p; $e.value) then "\($u) \($st.n): \($st.tool).\($e.key) does not fit"
+               else empty end ),
+           ( ($sch.required // [])[] | select(. as $r | $st.arguments_example | has($r) | not)
+             | "\($u) \($st.n): \($st.tool) needs \(.)" )
+      end ]')"
+expect_eq "every step tool is in tools/list and its arguments_example fits the tool's schema" '[]' "$GBAD"
+expect_eq "interview: detect_silence -35 dB, 0.6 s; normalize -16; captions 7 words; x264-medium" '[-35,0.6,-16,7,"x264-medium"]' "$(echo "$GUIDES" | jq -c '.[0] | [(.steps[] | select(.tool=="detect_silence") | .arguments_example | .noise_db, .min_s), (.steps[] | select(.tool=="clip_normalize") | .arguments_example.target_lufs), (.steps[] | select(.tool=="captions_from_transcript") | .arguments_example.max_words), (.steps[] | select(.tool=="export_video") | .arguments_example.preset)]')"
+expect_eq "short: 9:16, fill reframe, -14 LUFS, 4-word captions" '["9:16","fill",-14,4]' "$(echo "$GUIDES" | jq -c '.[1] | [(.steps[] | select(.tool=="project_set_format") | .arguments_example.preset), (.steps[] | select(.tool=="clip_reframe") | .arguments_example.mode), (.steps[] | select(.tool=="clip_normalize") | .arguments_example.target_lufs), (.steps[] | select(.tool=="captions_from_transcript") | .arguments_example.max_words)]')"
+expect_eq "tutorial: 16:9 and a 0.25 picture-in-picture" '["16:9",0.25]' "$(echo "$GUIDES" | jq -c '.[2] | [(.steps[] | select(.tool=="project_set_format") | .arguments_example.preset), (.steps[] | select(.tool=="clip_set_transform") | .arguments_example.scale)]')"
+expect_eq "montage uses transitions, ducking, color and speed" true "$(echo "$GUIDES" | jq '.[3] | [.steps[].tool] | contains(["detect_scenes","timeline_add_transition","track_set_ducking","clip_set_color","clip_set_speed","export_video"])')"
+expect_eq "the notes mention undo, index shifts and the ducking MLT version" true "$(echo "$GUIDES" | jq '[.[].notes[]] | join(" ") | test("undo") and test("index") and test("7\\.41")')"
 
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

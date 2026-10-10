@@ -1688,29 +1688,18 @@ MeltJob *EncodeDock::createMeltJob(Mlt::Producer *service,
     return job;
 }
 
-AbstractJob *EncodeDock::exportToFile(const QString &presetName,
-                                      const QString &path,
-                                      QString &error)
+Mlt::Properties *EncodeDock::exportPreset(const QString &presetName, QString *profileFolder) const
 {
-    if (!MLT.producer() || !MLT.producer()->is_valid()) {
-        error = tr("Nothing is loaded.");
-        return nullptr;
-    }
-    if (isExportInProgress()) {
-        error = tr("An export is already in progress.");
-        return nullptr;
-    }
-
     // Stock presets come from the MLT repository, custom ones from the app data folder.
     Mlt::Properties *preset = nullptr;
-    QString profileFolder; // set for a stock preset inside a profile folder
     const QByteArray stockKey = ("consumer/avformat/" + presetName).toLatin1();
     if (m_presets->get_data(stockKey.constData())) {
         preset = new Mlt::Properties((mlt_properties) m_presets->get_data(stockKey.constData()));
         // consumer/avformat/<profile>/<preset>: same test as on_presetsTree_clicked().
         const QStringList textParts = QString::fromLatin1(stockKey).split('/');
-        if (textParts.count() > 3 && m_profiles->get_data(textParts.at(2).toLatin1().constData()))
-            profileFolder = textParts.at(2);
+        if (profileFolder && textParts.count() > 3
+            && m_profiles->get_data(textParts.at(2).toLatin1().constData()))
+            *profileFolder = textParts.at(2);
     } else {
         // A custom preset is a plain file name inside <appdata>/presets/encode, never a path.
         QDir dir(Settings.appDataLocation());
@@ -1725,6 +1714,47 @@ AbstractJob *EncodeDock::exportToFile(const QString &presetName,
             }
         }
     }
+    return preset;
+}
+
+QStringList EncodeDock::exportPresetNames(bool custom) const
+{
+    QStringList names;
+    if (custom) {
+        // The files the Custom branch of the presets tree shows.
+        QDir dir(Settings.appDataLocation());
+        if (dir.cd("presets") && dir.cd("encode"))
+            names = dir.entryList(QDir::Files | QDir::NoDotAndDotDot | QDir::Readable);
+        return names;
+    }
+    // The presets the Stock branch of the presets tree shows (hidden ones are left out).
+    const QString prefix("consumer/avformat/");
+    for (int i = 0; m_presets && m_presets->is_valid() && i < m_presets->count(); ++i) {
+        const QString name(m_presets->get_name(i));
+        if (!name.startsWith(prefix))
+            continue;
+        Mlt::Properties preset((mlt_properties) m_presets->get_data(name.toLatin1().constData()));
+        if (!preset.get_int("meta.preset.hidden"))
+            names << name.mid(prefix.length());
+    }
+    return names;
+}
+
+AbstractJob *EncodeDock::exportToFile(const QString &presetName,
+                                      const QString &path,
+                                      QString &error)
+{
+    if (!MLT.producer() || !MLT.producer()->is_valid()) {
+        error = tr("Nothing is loaded.");
+        return nullptr;
+    }
+    if (isExportInProgress()) {
+        error = tr("An export is already in progress.");
+        return nullptr;
+    }
+
+    QString profileFolder; // set for a stock preset inside a profile folder
+    Mlt::Properties *preset = exportPreset(presetName, &profileFolder);
     if (!preset || !preset->is_valid()) {
         delete preset;
         error = tr("Unknown preset: %1").arg(presetName);

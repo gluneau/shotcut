@@ -128,7 +128,8 @@ picture is theoretically possible with Realtime off or a very loaded GUI.
 background job that shows as a row in the Jobs dock, and returns `{job_id, output, preset}` at once. The
 preset defaults to `x264-medium` (H.264 + AAC, `.mp4`, the project's resolution and frame rate).
 It can be any stock preset name, or a custom preset by plain file name from
-`<appdata>/presets/encode`; paths are not accepted. Preconditions, each a tool error:
+`<appdata>/presets/encode`; paths are not accepted (`export_presets_list`, stage 3C, lists the
+names). Preconditions, each a tool error:
 
 - something is loaded and no export is already running (one at a time);
 - `path` is absolute, normalized (no `./`, `../`, doubled slashes) and not a symbolic link or
@@ -1037,6 +1038,71 @@ There is no `captions_remove`: one `undo` removes the track and the filter toget
 - Fonts: the burn-in uses the font of Shotcut's filter (Sans on Linux); it must be installed
   where the project is rendered.
 
+### Export presets
+
+`export_presets_list` (57 tools in all; no arguments) lists the presets `export_video` accepts as
+`{presets: [{name, source, extension, video_codec?, audio_codec?, width?, height?, fps?,
+description}]}`. It uses the same lookup as `export_video` (`EncodeDock::exportPreset`), so every
+listed `name` works as `export_video`'s `preset`.
+
+- `source` `stock`: the presets under `consumer/avformat/` of MLT's repository that the Export
+  panel's Stock branch shows (`meta.preset.hidden` ones, such as the `-pass1` presets, are left
+  out), named relative to that folder (`x264-medium`, `lossless/FFV1`, `atsc_1080p_25/DNxHD`).
+- `source` `custom`: the files in `<appdata>/presets/encode` (the Custom branch). A file with the
+  name of a stock preset is left out (`export_video` finds the stock one first), as is one
+  without `meta.preset.extension` or with a name `export_video` refuses (`..`, a leading dot).
+- `extension` is the preset's `meta.preset.extension`: the output path must end in it.
+- `video_codec` and `audio_codec` are the preset's FFmpeg `vcodec` and `acodec`, left out when the
+  preset sets none or turns that stream off.
+- `width`, `height` and `fps` are given only for a preset inside a video mode folder (DV, HDV,
+  ATSC): `export_video` then renders at that mode, as a click on it in the Export panel does.
+  Every other preset renders at the project's size and frame rate.
+- `description` is built only from the codecs (a fixed table of readable names), the extension,
+  the video mode and the name (`named for YouTube`, `in Shotcut's lossless group`); it does not
+  guess quality or purpose.
+- Order: stock, then custom, each sorted by name (case-insensitive).
+
+### Editing guides
+
+`get_editing_guide` (58 tools in all) returns a fixed recipe for `use_case` `interview`, `short`,
+`tutorial` or `montage`: `{use_case, title, steps: [{n, tool, why, arguments_example}],
+defaults: {...}, notes: [...]}`. It reads nothing from the project and changes nothing. The text
+lives in `src/mcpguide.cpp`; the format smoke script checks that every step's `tool` is in
+`tools/list` and that its `arguments_example` fits that tool's input schema (known and required
+keys, enums, integer and range limits), so a renamed argument breaks the test, not the guide.
+
+- `interview`: `analyze_media`, `transcribe`, insert the recording, `audio_levels`,
+  `clip_normalize` -16 LUFS (before the cuts, so the pieces keep the gain), `detect_silence`
+  (-35 dB, 0.6 s), `save_project`, `timeline_remove_ranges` (each pause shrunk by 0.15 s at both
+  ends), `get_overview`, `captions_from_transcript` (7 words), `export_video` (`x264-medium`),
+  `audio_levels` on the output (-16 LUFS within 1.5 LU).
+- `short`: `project_set_format` 9:16, `playlist_add`, `transcribe`, insert 30-60 s, `get_frame`,
+  `clip_reframe` fill with `focus_x`, `clip_normalize` -14, `detect_silence`,
+  `timeline_remove_ranges`, `captions_from_transcript` (4 words, size 120, middle), `track_add`,
+  a 2 s `title_add` hook, `get_overview`, export.
+- `tutorial`: `project_set_format` 16:9, the screen recording, `track_add`, the camera on top,
+  `clip_set_transform` scale 0.25 in the lower-right corner, `transcribe`, `clip_normalize`,
+  `detect_silence` and `timeline_remove_ranges` on both tracks, `track_add`, `lower_third_add`
+  and `marker_add` per chapter, captions, export.
+- `montage`: `analyze_media`, `detect_scenes`, `detect_silence` on the music (it finds quiet
+  breaks, not beats), equal-length shots, `clip_set_speed` accents, `clip_set_color`,
+  `timeline_add_transition`, a music track, `track_set_ducking`, `get_overview`, export.
+
+The notes are honest about the limits the steps run into: one `undo` per call, index shifting
+(re-read `get_timeline`), captions being one clip per call and not following later edits,
+ducking needing MLT 7.41 or newer, `saturation` and `temperature_k` needing frei0r, and the
+120-cut cap of `timeline_remove_ranges`. Frame numbers in the examples assume 30 fps.
+
+### Known limits (presets and guides)
+
+- `export_presets_list` does not say whether this FFmpeg build has the preset's encoders (for
+  example `libsvtav1` or `prores_ks`); an export with a missing encoder fails in the job.
+- The image presets (`stills/...`) are listed because `export_video` accepts them; the smoke
+  script checks every listed name is found, but renders only with video presets.
+- `captions_from_transcript` captions one clip per call, so after silence cuts the guides call it
+  once per kept clip, which makes one subtitle track (and burn-in) per clip.
+- The guides are fixed text; their numbers are starting points, not measurements of the media.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -1150,7 +1216,12 @@ one undo removing both, an immediate `save_project` (copy and project file) and 
 after a redo keeping the captions, `burn_in: false`, a second track, `max_chars`, `style`,
 `language`, a trimmed clip, a speed-changed clip, and an audio-only clip (a pause and the minimum
 duration).
-It ends by opening a 720x4920 project and checking the default title size is capped at 400.
+It then opens a 720x4920 project and checks the default title size is capped at 400. Last, it
+writes custom presets into `$MCP_APPDATA/presets/encode` and checks `export_presets_list` (stock
+and custom entries, hidden and shadowed presets left out, a video mode preset's size and rate) and
+that `export_video` finds every listed name (a `.zzz` path fails only on the extension), then
+checks `get_editing_guide`: its refusals, four guides with numbered steps, every step's tool in
+`tools/list` with an `arguments_example` that fits the tool's schema, and the key numbers.
 `MCP_APPDATA` must be set (it is a FAIL otherwise): the script checks that `shotcut.ini` has no
 saved `[player] profile`.
 

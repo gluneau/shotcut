@@ -92,6 +92,7 @@ add_executable(shotcut WIN32 MACOSX_BUNDLE
   mcpanalysis.cpp mcpanalysis.h
   mcpfiltercommands.cpp mcpfiltercommands.h
   mcpfilters.h
+  mcpguide.cpp
   mcpjobs.cpp mcpjobs.h
   mcpserver.cpp mcpserver.h
   mcptools.cpp mcptools.h

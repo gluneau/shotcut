@@ -13,10 +13,12 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "mcpfilters.h"
 #include "mcptools.h"
 #include "mcptoolsutil.h"
 
 #include "autosavefile.h"
+#include "docks/encodedock.h"
 #include "docks/timelinedock.h"
 #include "jobs/abstractjob.h"
 #include "mainwindow.h"
@@ -25,11 +27,13 @@
 #include "proxymanager.h"
 
 #include <MltPlaylist.h>
+#include <MltProfile.h>
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QPointer>
 #include <QProcess>
@@ -157,6 +161,177 @@ QSet<QString> protectedFiles()
     return files;
 }
 
+// A preset name export_video accepts before looking it up. ".." anywhere is rejected, which also
+// rejects (harmless) names such as "my..preset".
+bool validPresetName(const QString &preset)
+{
+    return !preset.isEmpty() && !preset.contains("..") && !preset.contains('\\')
+           && !preset.contains(QChar(0)) && !preset.startsWith('.') && !QDir::isAbsolutePath(preset)
+           && !QFileInfo(preset).isAbsolute();
+}
+
+// A readable name for an FFmpeg codec of a preset; the codec itself when it is not in the table.
+QString codecLabel(const QString &codec)
+{
+    static const QList<QPair<QString, QString>> labels = {
+        {"libx264", "H.264"},
+        {"libx265", "HEVC (H.265)"},
+        {"libaom-av1", "AV1"},
+        {"libsvtav1", "AV1"},
+        {"libvpx", "VP8"},
+        {"libvpx-vp9", "VP9"},
+        {"mpeg2video", "MPEG-2"},
+        {"mpeg4", "MPEG-4 Part 2"},
+        {"dnxhd", "DNxHD/DNxHR"},
+        {"prores", "ProRes"},
+        {"prores_ks", "ProRes"},
+        {"dvvideo", "DV"},
+        {"ffv1", "FFV1 (lossless)"},
+        {"huffyuv", "HuffYUV (lossless)"},
+        {"utvideo", "Ut Video (lossless)"},
+        {"qtrle", "QuickTime Animation"},
+        {"mjpeg", "Motion JPEG"},
+        {"wmv2", "WMV"},
+        {"flv", "Flash Video"},
+        {"aac", "AAC"},
+        {"libmp3lame", "MP3"},
+        {"mp2", "MPEG audio layer 2"},
+        {"ac3", "AC-3"},
+        {"flac", "FLAC"},
+        {"alac", "ALAC"},
+        {"vorbis", "Vorbis"},
+        {"libvorbis", "Vorbis"},
+        {"libopus", "Opus"},
+        {"wmav2", "WMA"},
+        {"png", "PNG images"},
+        {"bmp", "BMP images"},
+        {"tiff", "TIFF images"},
+        {"ppm", "PPM images"},
+        {"dpx", "DPX images"},
+        {"targa", "TGA images"},
+        {"libwebp", "WebP images"},
+        {"libwebp_anim", "animated WebP"},
+        {"gif", "animated GIF"},
+    };
+    for (const auto &label : labels) {
+        if (label.first == codec)
+            return label.second;
+    }
+    if (codec.startsWith("pcm_"))
+        return QStringLiteral("PCM (uncompressed)");
+    if (codec.startsWith("h264_"))
+        return QStringLiteral("H.264 (") + codec.mid(5) + ")";
+    if (codec.startsWith("hevc_"))
+        return QStringLiteral("HEVC (") + codec.mid(5) + ")";
+    return codec;
+}
+
+// One export_presets_list entry, or an empty object when export_video could not use the preset.
+QJsonObject presetJson(const QString &name, const QString &source)
+{
+    if (!validPresetName(name))
+        return {};
+    QString profileFolder;
+    std::unique_ptr<Mlt::Properties> preset(
+        MAIN.encodeDock()->exportPreset(name, &profileFolder));
+    if (!preset || !preset->is_valid())
+        return {};
+    const QString extension = QString::fromLatin1(preset->get("meta.preset.extension"));
+    if (extension.isEmpty())
+        return {};
+    QJsonObject o{{"name", name}, {"source", source}, {"extension", extension}};
+    QStringList parts;
+    const QString vcodec = QString::fromLatin1(preset->get("vcodec"));
+    const QString acodec = QString::fromLatin1(preset->get("acodec"));
+    const bool video = !preset->get_int("video_off") && !preset->get_int("vn");
+    const bool audio = !preset->get_int("audio_off") && !preset->get_int("an");
+    if (video && !vcodec.isEmpty()) {
+        o["video_codec"] = vcodec;
+        const QString label = codecLabel(vcodec);
+        parts << (label.contains("images") || label.contains("animated") ? label
+                                                                         : label + " video");
+    } else if (!video) {
+        parts << "no video";
+    }
+    if (audio && !acodec.isEmpty()) {
+        o["audio_codec"] = acodec;
+        parts << codecLabel(acodec) + " audio";
+    } else if (!audio) {
+        parts << "no audio";
+    }
+    QString description = parts.join(", ");
+    description += (description.isEmpty() ? "A ." : " in a .") + extension + " file";
+    if (!profileFolder.isEmpty()) {
+        Mlt::Profile profile(profileFolder.toLatin1().constData());
+        const double fps = qRound(profile.fps() * 1000) / 1000.0;
+        o["width"] = profile.width();
+        o["height"] = profile.height();
+        o["fps"] = fps;
+        description += QStringLiteral(" at %1x%2, %3 fps%4 (the %5 video mode, not the "
+                                      "project's)")
+                           .arg(QString::number(profile.width()),
+                                QString::number(profile.height()),
+                                QString::number(fps),
+                                profile.progressive() ? QString() : QStringLiteral(" interlaced"),
+                                profileFolder);
+    } else if (video) {
+        description += " at the project's size and frame rate";
+    }
+    // Hints taken from the name only.
+    const QString lower = name.toLower();
+    QStringList hints;
+    if (lower.contains("youtube"))
+        hints << "named for YouTube";
+    if (lower.startsWith("lossless/"))
+        hints << "in Shotcut's lossless group";
+    if (lower.startsWith("intermediate/"))
+        hints << "in Shotcut's intermediate (for further editing) group";
+    if (lower.startsWith("ten_bit/"))
+        hints << "in Shotcut's 10-bit group";
+    if (lower.startsWith("alpha/"))
+        hints << "in Shotcut's alpha (transparency) group";
+    if (lower.startsWith("stills/"))
+        hints << "in Shotcut's still images group";
+    if (lower.contains("slide-deck"))
+        hints << "named for slide decks";
+    if (!hints.isEmpty())
+        description += "; " + hints.join("; ");
+    o["description"] = description + ".";
+    return o;
+}
+
+QJsonObject exportPresetsListTool(const QJsonObject &arguments)
+{
+    QString error;
+    if (!McpFilters::checkKeys(arguments, {}, error))
+        return textResult(error, true);
+    EncodeDock *dock = MAIN.encodeDock();
+    QJsonArray presets;
+    QStringList listed;
+    QStringList stock = dock->exportPresetNames(false);
+    stock.sort(Qt::CaseInsensitive);
+    for (const QString &name : stock) {
+        const QJsonObject o = presetJson(name, "stock");
+        if (!o.isEmpty() && !listed.contains(name)) {
+            presets.append(o);
+            listed << name;
+        }
+    }
+    // A custom file named like a stock preset is never used: export_video finds the stock one.
+    QStringList custom = dock->exportPresetNames(true);
+    custom.sort(Qt::CaseInsensitive);
+    for (const QString &name : custom) {
+        if (stock.contains(name) || listed.contains(name))
+            continue;
+        const QJsonObject o = presetJson(name, "custom");
+        if (!o.isEmpty()) {
+            presets.append(o);
+            listed << name;
+        }
+    }
+    return jsonResult(QJsonObject{{"presets", presets}});
+}
+
 QJsonObject exportVideoTool(const QJsonObject &arguments)
 {
     const QString path = arguments.value("path").toString();
@@ -166,10 +341,7 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
     const QJsonValue presetValue = arguments.value("preset");
     if (!presetValue.isUndefined()) {
         preset = presetValue.toString();
-        // ".." anywhere is rejected, which also rejects (harmless) names such as "my..preset".
-        if (!presetValue.isString() || preset.isEmpty() || preset.contains("..")
-            || preset.contains('\\') || preset.contains(QChar(0)) || preset.startsWith('.')
-            || QDir::isAbsolutePath(preset) || QFileInfo(preset).isAbsolute())
+        if (!presetValue.isString() || !validPresetName(preset))
             return textResult("preset must be a preset name such as x264-medium.", true);
     }
     const QJsonValue overwriteValue = arguments.value("overwrite");
@@ -351,6 +523,21 @@ QList<McpTool> McpTools::exportTools()
              "overwrite":{"type":"boolean","description":"Replace an existing file."}
            },"required":["path"]})"),
          exportVideoTool},
+        {"export_presets_list",
+         "List the export presets export_video accepts: {presets:[{name, source (\"stock\": "
+         "MLT's consumer/avformat presets that Shotcut's Export panel shows, hidden ones left "
+         "out; \"custom\": preset files saved in Shotcut's presets folder), extension (the "
+         "output path must end in it), video_codec?, audio_codec? (FFmpeg names, when the "
+         "preset sets them), width?, height?, fps? (only for a preset in a video mode folder, "
+         "such as atsc_1080p_25/DNxHD, which renders at that size and rate; every other preset "
+         "renders at the project's), description}]}. Pass name as export_video's preset. The "
+         "description is built from the codecs, the extension and the name only (e.g. \"named "
+         "for YouTube\"), never from guesses about quality. Stock first, then custom, each "
+         "sorted by name. A custom file with the name of a stock preset is left out "
+         "(export_video uses the stock one), as is a preset without an extension or with a name "
+         "export_video refuses (\"..\", a leading dot). No arguments.",
+         schema(R"({"type":"object","properties":{},"additionalProperties":false})"),
+         exportPresetsListTool},
         {"get_export_status",
          "Progress of an export: {job_id, state (pending, running, paused, succeeded, failed, "
          "stopped, removed, idle), percent, output, output_exists, output_bytes, exit_code, "

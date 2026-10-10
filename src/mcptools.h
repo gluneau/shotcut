@@ -75,6 +75,7 @@ QList<McpTool> filterTools();
 QList<McpTool> audioTools();
 QList<McpTool> pictureTools();
 QList<McpTool> formatTools();
+QList<McpTool> guideTools();
 
 } // namespace McpTools
 

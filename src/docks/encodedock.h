@@ -61,6 +61,14 @@ public:
     // Path-safety checks (normalized path, symlinks, project media identity, hard links, free
     // space) live in the MCP tool layer (src/mcptools_export.cpp); callers must apply them.
     AbstractJob *exportToFile(const QString &presetName, const QString &path, QString &error);
+    // The preset exportToFile uses for presetName (a stock name relative to consumer/avformat/,
+    // or a custom preset's file name), or nullptr; the caller deletes it. profileFolder is set
+    // to the profile folder a stock preset is in, if any.
+    Mlt::Properties *exportPreset(const QString &presetName,
+                                  QString *profileFolder = nullptr) const;
+    // The names the presets tree shows as files: custom preset files, or stock presets (not
+    // hidden) relative to consumer/avformat/. exportPreset may still refuse some.
+    QStringList exportPresetNames(bool custom) const;
 
 signals:
     void captureStateChanged(bool);
