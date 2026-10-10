@@ -19,7 +19,7 @@ MEDIA="$("$HERE/mcp-fixtures.sh" "$TMP/media")" || { echo "ffmpeg could not crea
 
 echo "== filter tools"
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[].name]')"
-expect_eq "tools/list: 58 tools in all (through Task 21)" 58 "$(echo "$TOOLS" | jq 'length')"
+expect_eq "tools/list: 58 tools in all (stage 3 complete)" 58 "$(echo "$TOOLS" | jq 'length')"
 expect_eq "tools/list has the five filter tools" true "$(echo "$TOOLS" | jq 'contains(["filter_list_available","filter_list_applied","filter_add","filter_set","filter_remove"])')"
 expect_eq "filter tools need a timeline" true "$(tool_is_error filter_list_applied '{"track":0,"clip":0}')"
 
@@ -1168,5 +1168,5 @@ gf 100; expect_eq "detach: frame 100 is still green (fresh frame)" G "$(rgb)"
 undo_text >/dev/null
 gf 10; expect_eq "detach undone: frame 10 is red" R "$(rgb)"
 
-# FOOTER (later tasks insert their blocks above this line)
+# FOOTER: stage 3 is complete (58 tools); new blocks go above this line.
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

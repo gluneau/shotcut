@@ -20,7 +20,7 @@ fresh_guard
 MEDIA="$("$HERE/mcp-fixtures.sh" "$TMP/media")" || { echo "ffmpeg could not create the fixtures"; exit 2; }
 
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[]]')"
-expect_eq "tools/list: 58 tools in all (through Task 21)" 58 "$(echo "$TOOLS" | jq 'length')"
+expect_eq "tools/list: 58 tools in all (stage 3 complete)" 58 "$(echo "$TOOLS" | jq 'length')"
 expect_eq "tools/list has project_set_format" true "$(echo "$TOOLS" | jq '[.[].name] | index("project_set_format") != null')"
 expect_eq "project_set_format schema refuses extra properties" false "$(echo "$TOOLS" | jq '.[] | select(.name=="project_set_format") | .inputSchema.additionalProperties')"
 expect_eq "tools/list has clip_reframe" true "$(echo "$TOOLS" | jq '[.[].name] | index("clip_reframe") != null')"
@@ -247,7 +247,7 @@ expect_eq "the timeline has the one clip again" 1 "$(tool_json get_timeline '{}'
 echo "== keyframes on a clip with a non-zero in point"
 # reframe_attr NAME: the attribute NAME of the <filter> elements marked shotcut:reframe=1 in $SAVED.
 reframe_attr() {
-  awk -v want="$1" '/<filter /{f=1; mark=0; a=""; if (match($0, want "=\"[^\"]*\"")) a=substr($0, RSTART + length(want) + 2, RLENGTH - length(want) - 3)}
+  awk -v want="$1" '/<filter /{f=1; mark=0; a=""; if (match($0, " " want "=\"[^\"]*\"")) a=substr($0, RSTART + length(want) + 3, RLENGTH - length(want) - 4)}
     f && /name="shotcut:reframe">1</{mark=1} /<\/filter>/{ if (f && mark) print a; f=0 }' "$SAVED"
 }
 tool_json filter_remove '{"track":0,"clip":0,"index":0}' >/dev/null
@@ -728,6 +728,34 @@ else
   echo "SKIP (no whisper): captions coverage checks need a configured Whisper (WHISPER_EXE and WHISPER_MODEL for the harness, or tools/mcp-fake-whisper.sh)"
 fi
 
+echo "== captions_from_transcript: real Whisper on jfk.wav"
+# Needs WHISPER_EXE in the environment naming a real whisper-cli (the same program configured in
+# the Shotcut under test, as the harness does) and whisper.cpp's samples/jfk.wav (JFK_WAV).
+JFK_SRC="${JFK_WAV:-$HOME/GitHub/whisper.cpp/samples/jfk.wav}"
+if [ -n "${WHISPER_EXE:-}" ] && [ "$(basename "$WHISPER_EXE")" != mcp-fake-whisper.sh ] && [ -f "$JFK_SRC" ]; then
+  cp "$JFK_SRC" "$MEDIA/jfk.wav"
+  expect_eq "insert jfk.wav at frame 300 of the audio track" false "$(tool_is_error timeline_insert_range "$(jq -nc --arg p "$MEDIA/jfk.wav" --argjson t "$ATR" '{path:$p,in_s:0,out_s:11,track:$t,position:300}')")"
+  JC="$(tool_json get_timeline '{}' | jq ".tracks[$ATR].clips | length - 1")"
+  W="$(tool_json transcribe "{\"track\":$ATR,\"clip\":$JC,\"language\":\"en\",\"wait_ms\":20000}")"
+  job="$(echo "$W" | jq -r '.job_id // empty')"
+  [ -n "$job" ] && W="$(wait_job "$job" 180 | jq -c '.result')"
+  expect_eq "Whisper transcribed the clip with word times" word "$(echo "$W" | jq -r '.granularity')"
+  R="$(cap "{\"track\":$ATR,\"clip\":$JC,\"burn_in\":false}")"
+  expect_eq "real Whisper: at least one caption" true "$(echo "$R" | jq '.captions >= 1')"
+  save
+  JSRT=""
+  for n in $(seq 1 "$(nsvc subtitle_feed)"); do
+    [ "$(svc_prop subtitle_feed feed "$n")" = "$(echo "$R" | jq -r '.track_name')" ] && JSRT="$(svc_prop subtitle_feed text "$n")"
+  done
+  JWORDS="$(echo "$JSRT" | grep -v -E '^[0-9]+$|-->|^$' | wc -w)"
+  echo "INFO  real Whisper: $(echo "$R" | jq '.captions') captions, $JWORDS words: $(echo "$JSRT" | grep -v -E '^[0-9]+$|-->|^$' | tr '\n' ' ')"
+  expect_eq "real Whisper: the SRT has more than 15 words" true "$([ "$JWORDS" -gt 15 ] && echo true || echo false)"
+  tool_json undo '{}' >/dev/null
+  tool_json undo '{}' >/dev/null
+else
+  echo "SKIP (no real whisper): set WHISPER_EXE (a real whisper-cli, configured in the Shotcut under test) and have jfk.wav (JFK_WAV) for the real-Whisper captions check"
+fi
+
 echo "== the default title size is at most 400 on a tall video mode"
 # Last again: another project is opened. 720x4920: height / 12 = 410.
 TALL="$TMP/tall.mlt"
@@ -861,4 +889,5 @@ expect_eq "tutorial face and montage music are inserted with mode overwrite" '["
 expect_eq "montage uses transitions, ducking, color and speed" true "$(echo "$GUIDES" | jq '.[3] | [.steps[].tool] | contains(["detect_scenes","timeline_add_transition","track_set_ducking","clip_set_color","clip_set_speed","export_video"])')"
 expect_eq "the notes mention undo, index shifts and the ducking MLT version" true "$(echo "$GUIDES" | jq '[.[].notes[]] | join(" ") | test("undo") and test("index") and test("7\\.41")')"
 
+# FOOTER: stage 3 is complete (58 tools); new blocks go above this line.
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

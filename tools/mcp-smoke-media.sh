@@ -1657,5 +1657,5 @@ expect_eq "keyframed gain: undo keeps the keyframes (in a plain volume filter)" 
 expect_eq "keyframed gain: after undo it is no longer the track gain filter" "" "$(saved_gain "$TG")"
 expect_eq "keyframed gain: after undo gain_db reports 0" 0 "$(tl | jq '.tracks[1].gain_db')"
 
-# FOOTER (later tasks insert their blocks above this line)
+# FOOTER: stage 3 is complete (58 tools); new blocks go above this line.
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi
