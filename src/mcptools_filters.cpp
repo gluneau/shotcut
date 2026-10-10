@@ -511,8 +511,11 @@ bool readParamsArg(const QJsonObject &arguments, bool required, QJsonObject &par
     return true;
 }
 
-QJsonObject filterListAvailableTool(const QJsonObject &)
+QJsonObject filterListAvailableTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {}, keyError))
+        return textResult(keyError, true);
     QJsonArray filters, unavailable;
     for (const FilterSpec &spec : McpFilters::allSpecs()) {
         const QString reason = unavailableReason(spec);
@@ -527,6 +530,9 @@ QJsonObject filterListAvailableTool(const QJsonObject &)
 
 QJsonObject filterListAppliedTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"track", "clip"}, keyError))
+        return textResult(keyError, true);
     int track = 0, clip = 0;
     QString error;
     if (!readTarget(arguments, track, clip, error))
@@ -553,6 +559,9 @@ QJsonObject filterListAppliedTool(const QJsonObject &arguments)
 
 QJsonObject filterAddTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"track", "clip", "filter", "params"}, keyError))
+        return textResult(keyError, true);
     int track = 0, clip = 0;
     QString error;
     if (!readTarget(arguments, track, clip, error))
@@ -599,6 +608,9 @@ QJsonObject filterAddTool(const QJsonObject &arguments)
 
 QJsonObject filterSetTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"track", "clip", "index", "params"}, keyError))
+        return textResult(keyError, true);
     int track = 0, clip = 0, index = 0;
     QString error;
     if (!readTarget(arguments, track, clip, error))
@@ -630,6 +642,9 @@ QJsonObject filterSetTool(const QJsonObject &arguments)
 
 QJsonObject filterRemoveTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"track", "clip", "index"}, keyError))
+        return textResult(keyError, true);
     int track = 0, clip = 0, index = 0;
     QString error;
     if (!readTarget(arguments, track, clip, error))
@@ -1017,7 +1032,7 @@ QList<McpTool> McpTools::filterTools()
          "picture fitted into the frame and centered. crop's maxima are the video mode's width "
          "and height. Filters whose MLT service is missing in this Shotcut are listed under "
          "unavailable.",
-         schema(R"({"type":"object","properties":{}})"),
+         schema(R"({"type":"object","properties":{},"additionalProperties":false})"),
          filterListAvailableTool},
         {"filter_list_applied",
          "List a timeline clip's user filters in their MLT (processing) order; hidden internal "
@@ -1031,7 +1046,7 @@ QList<McpTool> McpTools::filterTools()
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0}
-           },"required":["track","clip"]})"),
+           },"required":["track","clip"],"additionalProperties":false})"),
          filterListAppliedTool},
         {"filter_add",
          "Add an allowlisted filter (see filter_list_available) to a timeline clip as ONE undo "
@@ -1050,7 +1065,7 @@ QList<McpTool> McpTools::filterTools()
              "filter":{"type":"string","description":"An id from filter_list_available."},
              "params":{"type":"object","description":"Parameter values by name; )"
                 R"(rect params are {x, y, w, h} in pixels."}
-           },"required":["track","clip","filter"]})"),
+           },"required":["track","clip","filter"],"additionalProperties":false})"),
          filterAddTool},
         {"filter_set",
          "Change parameters of a clip's allowlisted filter (index from filter_list_applied) as "
@@ -1064,7 +1079,7 @@ QList<McpTool> McpTools::filterTools()
              "clip":{"type":"integer","minimum":0},
              "index":{"type":"integer","minimum":0},
              "params":{"type":"object","minProperties":1}
-           },"required":["track","clip","index","params"]})"),
+           },"required":["track","clip","index","params"],"additionalProperties":false})"),
          filterSetTool},
         {"filter_remove",
          "Remove the filter at index (from filter_list_applied; any listed filter, allowlisted "
@@ -1075,7 +1090,7 @@ QList<McpTool> McpTools::filterTools()
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},
              "index":{"type":"integer","minimum":0}
-           },"required":["track","clip","index"]})"),
+           },"required":["track","clip","index"],"additionalProperties":false})"),
          filterRemoveTool},
     };
 }

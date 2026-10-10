@@ -1168,5 +1168,33 @@ gf 100; expect_eq "detach: frame 100 is still green (fresh frame)" G "$(rgb)"
 undo_text >/dev/null
 gf 10; expect_eq "detach undone: frame 10 is red" R "$(rgb)"
 
+echo "== unknown arguments are refused (filter tools, and every strict tool's key list)"
+TLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[]]')"
+for t in filter_list_available filter_list_applied filter_add filter_set filter_remove; do
+  expect_eq "$t schema refuses extra properties" false "$(echo "$TLS" | jq --arg t "$t" '.[] | select(.name==$t) | .inputSchema.additionalProperties')"
+done
+tool_json filter_add '{"track":0,"clip":0,"filter":"gain","params":{"level":-3}}' >/dev/null
+UF0="$(fa 0 0)|$(tool_json get_timeline '{}' | jq -c 'del(.position)')"
+while IFS='|' read -r t key args; do
+  expect_eq "$t: unknown argument '$key' is refused by name" true "$(tool_text "$t" "$args" | grep -q "^Unknown argument '$key'; the arguments are: " && echo true || echo false)"
+done <<'EOF'
+filter_list_available|x|{"x":1}
+filter_list_applied|clips|{"track":0,"clip":0,"clips":0}
+filter_add|param|{"track":0,"clip":0,"filter":"gain","param":{"level":3}}
+filter_set|param|{"track":0,"clip":0,"index":0,"params":{"level":2},"param":{}}
+filter_remove|indx|{"track":0,"clip":0,"index":0,"indx":0}
+EOF
+expect_eq "unknown arguments: the clip's filters and the timeline are unchanged" "$UF0" "$(fa 0 0)|$(tool_json get_timeline '{}' | jq -c 'del(.position)')"
+undo_text >/dev/null
+# Every tool whose schema says additionalProperties false checks the names first and lists
+# exactly its schema's properties (so no documented argument is refused).
+KBAD="$(echo "$TLS" | jq -r '.[] | select(.inputSchema.additionalProperties == false) | .name' | while read -r t; do
+  want="$(echo "$TLS" | jq -c --arg t "$t" '.[] | select(.name==$t) | .inputSchema.properties | keys | sort')"
+  got="$(tool_text "$t" '{"zz_unknown":1}' | sed -n "s/^Unknown argument 'zz_unknown'; the arguments are: \(.*\)\.$/\1/p" | jq -Rc 'if . == "" then [] else split(", ") | sort end')"
+  [ "$want" = "$got" ] || echo "$t: schema $want, refusal lists ${got:-nothing}"
+done)"
+expect_eq "every strict tool refuses an unknown name first, listing exactly its schema keys" "" "$KBAD"
+expect_eq "strict tools: the 35 of stage 3; the 23 of stages 1 and 2 stay lenient" "35 23" "$(echo "$TLS" | jq -r '[(map(select(.inputSchema.additionalProperties == false)) | length), (map(select(.inputSchema.additionalProperties != false)) | length)] | join(" ")')"
+
 # FOOTER: stage 3 is complete (58 tools); new blocks go above this line.
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

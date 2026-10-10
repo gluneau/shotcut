@@ -13,6 +13,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "mcpfilters.h"
 #include "mcpanalysis.h"
 #include "mcpjobs.h"
 #include "mcptools.h"
@@ -372,6 +373,11 @@ QJsonObject storeTranscript(const QJsonObject &arguments)
 
 QJsonObject transcribeTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments,
+                               {"path", "track", "clip", "language", "wait_ms", "transcript"},
+                               keyError))
+        return textResult(keyError, true);
     if (arguments.contains("transcript"))
         return storeTranscript(arguments);
     QString error;
@@ -541,7 +547,7 @@ QList<McpTool> McpTools::transcribeTools()
                  "required":["start_s","end_s","text"]}}},
                "required":["segments"],
                "description":"A transcript to keep for path instead of running Whisper."}
-           }})"),
+           },"additionalProperties":false})"),
          transcribeTool},
     };
 }

@@ -13,6 +13,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "mcpfilters.h"
 #include "mcptools.h"
 #include "mcptoolsutil.h"
 
@@ -43,6 +44,12 @@ namespace {
 
 QJsonObject timelineInsertRangeTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments,
+                               {"path", "playlist_index", "in_s", "out_s", "track", "position",
+                                "mode"},
+                               keyError))
+        return textResult(keyError, true);
     int track = 0, position = 0;
     if (readFrame(arguments, "track", track) != FrameArg::Ok
         || readFrame(arguments, "position", position) != FrameArg::Ok || position > 1000000000)
@@ -274,6 +281,9 @@ bool cutRange(
 
 QJsonObject timelineRemoveRangesTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"tracks", "ranges", "ripple"}, keyError))
+        return textResult(keyError, true);
     const QJsonValue tracksValue = arguments.value("tracks");
     const QJsonArray tracksArray = tracksValue.toArray();
     if (!tracksValue.isArray() || tracksArray.isEmpty() || tracksArray.size() > 8)
@@ -460,6 +470,9 @@ bool readTrackName(const QJsonObject &arguments, QString &name, QString &error)
 
 QJsonObject trackAddTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"type", "name"}, keyError))
+        return textResult(keyError, true);
     const QString type = arguments.value("type").toString();
     if (type != "video" && type != "audio")
         return textResult("type must be \"video\" or \"audio\".", true);
@@ -497,6 +510,9 @@ QJsonObject trackAddTool(const QJsonObject &arguments)
 
 QJsonObject trackRemoveTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"track", "force"}, keyError))
+        return textResult(keyError, true);
     int track = 0;
     if (readFrame(arguments, "track", track) != FrameArg::Ok)
         return textResult("track must be a non-negative integer.", true);
@@ -562,6 +578,11 @@ QJsonObject trackRemoveTool(const QJsonObject &arguments)
 
 QJsonObject trackSetTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments,
+                               {"track", "name", "mute", "lock", "hide", "composite", "gain_db"},
+                               keyError))
+        return textResult(keyError, true);
     int track = 0;
     if (readFrame(arguments, "track", track) != FrameArg::Ok)
         return textResult("track must be a non-negative integer.", true);
@@ -700,6 +721,9 @@ QJsonObject markerJson(int index, const Markers::Marker &marker)
 
 QJsonObject markerAddTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"start", "end", "text", "color"}, keyError))
+        return textResult(keyError, true);
     Markers::Marker marker;
     if (readFrame(arguments, "start", marker.start) != FrameArg::Ok)
         return textResult("start must be a non-negative integer frame.", true);
@@ -739,8 +763,11 @@ QJsonObject markerAddTool(const QJsonObject &arguments)
                                   {"markers_count", count}});
 }
 
-QJsonObject markerListTool(const QJsonObject &)
+QJsonObject markerListTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {}, keyError))
+        return textResult(keyError, true);
     QJsonArray list;
     if (MAIN.isMultitrackValid()) {
         const QList<Markers::Marker> markers = MAIN.timelineDock()->markersModel()->getMarkers();
@@ -752,6 +779,9 @@ QJsonObject markerListTool(const QJsonObject &)
 
 QJsonObject markerRemoveTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"index"}, keyError))
+        return textResult(keyError, true);
     int index = 0;
     if (readFrame(arguments, "index", index) != FrameArg::Ok)
         return textResult("index must be a non-negative integer.", true);
@@ -810,7 +840,7 @@ QList<McpTool> McpTools::structureTools()
              "track":{"type":"integer","minimum":0},
              "position":{"type":"integer","minimum":0,"description":"Absolute timeline frame."},
              "mode":{"type":"string","enum":["insert","overwrite"]}
-           },"required":["track","position"]})"),
+           },"required":["track","position"],"additionalProperties":false})"),
          timelineInsertRangeTool},
         {"timeline_remove_ranges",
          "Cut the same frame ranges out of every listed track as ONE undo step (to cut audio and "
@@ -840,7 +870,7 @@ QList<McpTool> McpTools::structureTools()
                "end":{"type":"integer","minimum":1,"description":"Exclusive."}
              },"required":["start","end"]}},
              "ripple":{"type":"boolean","description":"Default true."}
-           },"required":["tracks","ranges"]})"),
+           },"required":["tracks","ranges"],"additionalProperties":false})"),
          timelineRemoveRangesTool},
         {"track_add",
          "Add an empty timeline track as ONE undo step, optionally named (otherwise Shotcut names "
@@ -853,7 +883,7 @@ QList<McpTool> McpTools::structureTools()
          schema(R"({"type":"object","properties":{
              "type":{"type":"string","enum":["video","audio"]},
              "name":{"type":"string","minLength":1,"maxLength":64}
-           },"required":["type"]})"),
+           },"required":["type"],"additionalProperties":false})"),
          trackAddTool},
         {"track_remove",
          "Remove a track as ONE undo step (undo restores its clips, filters, name, mute, hide, "
@@ -868,7 +898,7 @@ QList<McpTool> McpTools::structureTools()
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "force":{"type":"boolean","description":"Remove a track that still holds clips."}
-           },"required":["track"]})"),
+           },"required":["track"],"additionalProperties":false})"),
          trackRemoveTool},
         {"track_set",
          "Set track properties as ONE undo step; pass at least one. Values are set, not "
@@ -888,7 +918,7 @@ QList<McpTool> McpTools::structureTools()
              "hide":{"type":"boolean","description":"Video tracks only."},
              "composite":{"type":"boolean","description":"Video tracks only."},
              "gain_db":{"type":"number","minimum":-70,"maximum":24}
-           },"required":["track"]})"),
+           },"required":["track"],"additionalProperties":false})"),
          trackSetTool},
         {"marker_add",
          "Add a timeline marker as ONE undo step: a point (end omitted or equal to start) or a "
@@ -902,19 +932,19 @@ QList<McpTool> McpTools::structureTools()
              "end":{"type":"integer","minimum":0,"description":"Timeline frame, at least start. Default start."},
              "text":{"type":"string","minLength":1,"maxLength":200},
              "color":{"type":"string","pattern":"^#[0-9a-fA-F]{6}$","description":"Default: Shotcut's marker color."}
-           },"required":["start","text"]})"),
+           },"required":["start","text"],"additionalProperties":false})"),
          markerAddTool},
         {"marker_list",
          "List the timeline markers in index order: {markers:[{index, start, end, text, "
          "color}]} (empty without a timeline).",
-         schema(R"({"type":"object","properties":{}})"),
+         schema(R"({"type":"object","properties":{},"additionalProperties":false})"),
          markerListTool},
         {"marker_remove",
          "Remove the marker at index (from marker_list) as ONE undo step; later markers' indexes "
          "shift down by one. Returns {removed:{index, start, end, text, color}, markers_count}.",
          schema(R"({"type":"object","properties":{
              "index":{"type":"integer","minimum":0}
-           },"required":["index"]})"),
+           },"required":["index"],"additionalProperties":false})"),
          markerRemoveTool},
     };
 }

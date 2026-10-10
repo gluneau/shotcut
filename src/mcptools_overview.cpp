@@ -13,6 +13,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "mcpfilters.h"
 #include "mcptools.h"
 #include "mcptoolsutil.h"
 
@@ -93,6 +94,9 @@ OverviewLabel overviewLabel(QFont font,
 
 QJsonObject getOverviewTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"columns", "rows", "tile_width", "format"}, keyError))
+        return textResult(keyError, true);
     QString error;
     int columns = 4;
     int rows = 4;
@@ -280,7 +284,7 @@ QList<McpTool> McpTools::overviewTools()
              "rows":{"type":"integer","minimum":1,"maximum":8,"default":4},
              "tile_width":{"type":"integer","minimum":96,"maximum":640,"default":320},
              "format":{"type":"string","enum":["jpeg","png"],"default":"jpeg"}
-           }})"),
+           },"additionalProperties":false})"),
          getOverviewTool},
     };
 }

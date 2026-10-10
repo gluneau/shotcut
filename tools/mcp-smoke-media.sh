@@ -1657,5 +1657,41 @@ expect_eq "keyframed gain: undo keeps the keyframes (in a plain volume filter)" 
 expect_eq "keyframed gain: after undo it is no longer the track gain filter" "" "$(saved_gain "$TG")"
 expect_eq "keyframed gain: after undo gain_db reports 0" 0 "$(tl | jq '.tracks[1].gain_db')"
 
+echo "== unknown arguments are refused (every stage 3A tool)"
+# Each call is otherwise valid (a misspelt optional argument), so without the check it would
+# change the project or start a job; it must refuse, naming the argument, and do nothing.
+TOOLS3A="get_job analyze_media detect_silence audio_levels detect_scenes transcribe get_overview
+  timeline_insert_range timeline_remove_ranges track_add track_remove track_set marker_add
+  marker_list marker_remove"
+TL3A="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[]]')"
+for t in $TOOLS3A; do
+  expect_eq "$t schema refuses extra properties" false "$(echo "$TL3A" | jq --arg t "$t" '.[] | select(.name==$t) | .inputSchema.additionalProperties')"
+done
+UK0="$(tl | jq -c 'del(.position)')|$(ML)|$(tool_json get_state '{}' | jq -c '.modified')"
+UKJ0="$(new_job_id -43.25)"
+UKT='{"segments":[{"start_s":0,"end_s":1,"text":"x"}]}'
+while IFS='|' read -r t key args; do
+  expect_eq "$t: unknown argument '$key' is refused by name" true "$(tool_text "$t" "$args" | grep -q "^Unknown argument '$key'; the arguments are: " && echo true || echo false)"
+done <<EOF
+get_job|jobid|{"job_id":$UKJ0,"jobid":1}
+analyze_media|pth|{"path":"$MEDIA/tone_av.mp4","pth":1}
+detect_silence|noise|{"path":"$MEDIA/silence.wav","noise":-45}
+audio_levels|bucket|{"path":"$MEDIA/silence.wav","buckets":7,"bucket":7}
+detect_scenes|treshold|{"path":"$MEDIA/scenes.mp4","threshold":0.47,"treshold":0.47}
+transcribe|transcrip|{"path":"$MEDIA/noaudio.mp4","transcrip":$UKT}
+get_overview|cols|{"cols":2}
+timeline_insert_range|mod|{"path":"$MEDIA/tone_av.mp4","in_s":0,"out_s":1,"track":0,"position":0,"mod":"overwrite"}
+timeline_remove_ranges|riple|{"tracks":[0,1],"ranges":[{"start":0,"end":25}],"riple":false}
+track_add|nam|{"type":"audio","nam":"x"}
+track_remove|forse|{"track":1,"force":true,"forse":true}
+track_set|mutee|{"track":0,"mute":true,"mutee":true}
+marker_add|colour|{"start":0,"text":"x","colour":"#ff0000"}
+marker_list|x|{"x":1}
+marker_remove|idx|{"index":0,"idx":0}
+EOF
+expect_eq "unknown arguments: timeline, markers and modified flag unchanged" "$UK0" "$(tl | jq -c 'del(.position)')|$(ML)|$(tool_json get_state '{}' | jq -c '.modified')"
+expect_eq "unknown arguments: no job was started (the next job id follows)" "$((UKJ0 + 1))" "$(new_job_id -43.5)"
+expect_eq "unknown arguments: no transcript was stored" true "$(tool_is_error transcribe "$(jq -nc --arg p "$MEDIA/noaudio.mp4" '{path:$p}')")"
+
 # FOOTER: stage 3 is complete (58 tools); new blocks go above this line.
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

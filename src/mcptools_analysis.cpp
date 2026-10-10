@@ -13,6 +13,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "mcpfilters.h"
 #include "mcpanalysis.h"
 #include "mcpjobs.h"
 #include "mcptools.h"
@@ -31,6 +32,9 @@ namespace {
 
 QJsonObject getJobTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"job_id"}, keyError))
+        return textResult(keyError, true);
     int id = 0;
     if (readFrame(arguments, "job_id", id) != FrameArg::Ok)
         return textResult("job_id must be a non-negative integer.", true);
@@ -42,6 +46,9 @@ QJsonObject getJobTool(const QJsonObject &arguments)
 
 QJsonObject analyzeMediaTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments, {"path"}, keyError))
+        return textResult(keyError, true);
     if (arguments.value("path").isUndefined())
         return textResult("path must be an absolute file path.", true);
     SourceRef ref;
@@ -151,6 +158,11 @@ bool parseSilence(const SourceRef &ref,
 
 QJsonObject detectSilenceTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments,
+                               {"path", "track", "clip", "noise_db", "min_s", "wait_ms"},
+                               keyError))
+        return textResult(keyError, true);
     QString error;
     double noise = -35;
     double minimum = 0.4;
@@ -245,6 +257,11 @@ bool parseScenes(const SourceRef &ref,
 
 QJsonObject detectScenesTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments,
+                               {"path", "track", "clip", "threshold", "wait_ms"},
+                               keyError))
+        return textResult(keyError, true);
     QString error;
     double threshold = 0.3;
     int waitMs = 0;
@@ -394,6 +411,11 @@ bool parseLevels(const SourceRef &ref,
 
 QJsonObject audioLevelsTool(const QJsonObject &arguments)
 {
+    QString keyError;
+    if (!McpFilters::checkKeys(arguments,
+                               {"path", "track", "clip", "buckets", "wait_ms"},
+                               keyError))
+        return textResult(keyError, true);
     QString error;
     int waitMs = 0;
     int buckets = 60;
@@ -487,7 +509,7 @@ QList<McpTool> McpTools::analysisTools()
          "transcribe): starting another is an error until one has finished.",
          schema(R"({"type":"object","properties":{
              "job_id":{"type":"integer","minimum":0}
-           },"required":["job_id"]})"),
+           },"required":["job_id"],"additionalProperties":false})"),
          getJobTool},
         {"analyze_media",
          "Probe a media file with ffprobe: {path, duration_s, size_bytes, video, audio}. video is "
@@ -502,7 +524,7 @@ QList<McpTool> McpTools::analysisTools()
          "time). An error is returned when ffprobe is missing or the file is not media.",
          schema(R"({"type":"object","properties":{
              "path":{"type":"string","description":"Absolute path of the media file."}
-           },"required":["path"]})"),
+           },"required":["path"],"additionalProperties":false})"),
          analyzeMediaTool},
         {"detect_silence",
          "Find silent and spoken stretches of a source's audio with ffmpeg silencedetect. Give "
@@ -525,7 +547,7 @@ QList<McpTool> McpTools::analysisTools()
              "noise_db":{"type":"number","minimum":-90,"maximum":-10,"default":-35},
              "min_s":{"type":"number","minimum":0.05,"maximum":30,"default":0.4},
              "wait_ms":{"type":"integer","minimum":0,"maximum":20000,"default":0}
-           }})"),
+           },"additionalProperties":false})"),
          detectSilenceTool},
         {"audio_levels",
          "Measure the loudness of a source's audio with ffmpeg: {path, in_s, out_s, "
@@ -546,7 +568,7 @@ QList<McpTool> McpTools::analysisTools()
              "clip":{"type":"integer","minimum":0,"description":"Clip index on the track."},
              "buckets":{"type":"integer","minimum":1,"maximum":600,"default":60},
              "wait_ms":{"type":"integer","minimum":0,"maximum":20000,"default":0}
-           }})"),
+           },"additionalProperties":false})"),
          audioLevelsTool},
         {"detect_scenes",
          "Find scene changes (cuts) in a source's video with ffmpeg's scene score. Give path "
@@ -569,7 +591,7 @@ QList<McpTool> McpTools::analysisTools()
              "clip":{"type":"integer","minimum":0,"description":"Clip index on the track."},
              "threshold":{"type":"number","minimum":0.05,"maximum":0.9,"default":0.3},
              "wait_ms":{"type":"integer","minimum":0,"maximum":20000,"default":0}
-           }})"),
+           },"additionalProperties":false})"),
          detectScenesTool},
     };
 }

@@ -150,7 +150,8 @@ Key arguments (the tool index says what each tool does):
 - `get_export_status`: `job_id?` (default: the latest)
 
 Positions and `to_start` are absolute timeline frames; `frame` in `timeline_trim` is the absolute
-timeline frame the edge moves to. Tool arguments are validated strictly and no stage 2 tool
+timeline frame the edge moves to. Tool arguments are validated strictly (the tools of stages 1
+and 2 ignore unknown argument names; every stage 3 tool refuses them) and no stage 2 tool
 opens a dialog.
 
 ### Editing rules
@@ -252,6 +253,10 @@ Key arguments:
 - `marker_add`: `start`, `end?`, `text`, `color?`
 - `marker_list` (in index order): none
 - `marker_remove`: `index`
+
+Every stage 3A tool refuses an unknown argument name before doing anything ("Unknown argument
+'x'; the arguments are: ..."; their schemas say `additionalProperties: false`), so a misspelt
+optional argument (`riple`, `noise`, `transcrip`) never runs with its default or starts a job.
 
 "Source" means exactly one of `path` (absolute path of an existing file) or `track` and `clip` (a
 timeline clip: only its trimmed range is analysed; a locked track is fine). All result times are
@@ -510,10 +515,9 @@ and on Shotcut's own commands.
 
 Every 3B edit is at most ONE undo step with its own text, finds its clip by `(track, clip)` from
 `get_timeline` (never through the selection or the Filters panel), and changes nothing when it
-is refused. The eight recipes refuse an unknown argument name ("Unknown argument 'x'; the
-arguments are: ..."; their schemas say `additionalProperties: false`); the five generic filter
-tools ignore unknown top-level argument names (unknown names inside `params` are errors). The
-residual risks of the whole part are summed up at the end of this section.
+is refused. All 13 refuse an unknown argument name ("Unknown argument 'x'; the arguments are:
+..."; their schemas say `additionalProperties: false`; unknown names inside `params` are errors
+too). The residual risks of the whole part are summed up at the end of this section.
 
 The five generic filter tools (43 tools in all at that point) add, change and remove filters on
 timeline clips:
@@ -1315,7 +1319,10 @@ and checks the refusals. The audio recipe checks export a normalized clip (`x264
 and 3600 s files (about 7 and 10 s each on a debug build); if a measurement ends before the
 script can change the clip, that check prints SKIP. The picture recipe checks export four 1 s
 clips and read pixels with ffmpeg and od; without frei0r the saturation and temperature checks
-print SKIP. The `clip_set_speed` checks export a 10 s clip at speed 2 (`melt-7` again).
+print SKIP. The `clip_set_speed` checks export a 10 s clip at speed 2 (`melt-7` again). Last,
+it calls every tool whose schema says `additionalProperties: false` with an unknown name and
+checks that the refusal lists exactly the schema's properties (the media script checks that the
+3A tools refuse a misspelt argument, change nothing and start no job).
 
 Stage 3C has its own script, also needing a FRESH throwaway Shotcut:
 
