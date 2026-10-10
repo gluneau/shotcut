@@ -19,7 +19,7 @@ MEDIA="$("$HERE/mcp-fixtures.sh" "$TMP/media")" || { echo "ffmpeg could not crea
 
 echo "== filter tools"
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[].name]')"
-expect_eq "tools/list: 53 tools in all (through Task 18)" 53 "$(echo "$TOOLS" | jq 'length')"
+expect_eq "tools/list: 55 tools in all (through Task 19)" 55 "$(echo "$TOOLS" | jq 'length')"
 expect_eq "tools/list has the five filter tools" true "$(echo "$TOOLS" | jq 'contains(["filter_list_available","filter_list_applied","filter_add","filter_set","filter_remove"])')"
 expect_eq "filter tools need a timeline" true "$(tool_is_error filter_list_applied '{"track":0,"clip":0}')"
 

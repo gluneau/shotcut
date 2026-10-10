@@ -22,9 +22,13 @@
 #include "mainwindow.h"
 #include "mltcontroller.h"
 #include "models/multitrackmodel.h"
+#include "shotcut_mlt_properties.h"
 
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QRectF>
+#include <QRegularExpression>
+#include <QScreen>
 #include <QUndoStack>
 
 #include <algorithm>
@@ -315,6 +319,248 @@ QJsonObject clipReframeTool(const QJsonObject &arguments)
         QJsonObject{{"filters", QJsonArray{filter}}, {"track", trackJson(model, track)}});
 }
 
+// An optional integer from min to max; value keeps its default when missing.
+bool readIntArg(
+    const QJsonObject &arguments, const char *key, int min, int max, int &value, QString &error)
+{
+    double d = value;
+    if (readNumberArg(arguments, key, min, max, d, error) == FrameArg::Invalid
+        || d != std::floor(d)) {
+        error = QStringLiteral("%1 must be an integer from %2 to %3.").arg(key).arg(min).arg(max);
+        return false;
+    }
+    value = int(d);
+    return true;
+}
+
+// An optional "#rrggbb" or "#aarrggbb" as MLT's "#aarrggbb" (lower case, opaque without alpha).
+bool readColorArg(const QJsonObject &arguments, const char *key, QString &color, QString &error)
+{
+    const QJsonValue v = arguments.value(key);
+    if (v.isUndefined())
+        return true;
+    static const QRegularExpression re(QStringLiteral("^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"));
+    if (!v.isString() || !re.match(v.toString()).hasMatch()) {
+        error = QStringLiteral("%1 must be a color \"#rrggbb\" or \"#aarrggbb\".").arg(key);
+        return false;
+    }
+    color = v.toString().toLower();
+    if (color.size() == 7)
+        color.insert(1, QStringLiteral("ff"));
+    return true;
+}
+
+// An optional string that must be one of choices; value keeps its default when missing.
+bool readChoiceArg(const QJsonObject &arguments,
+                   const char *key,
+                   const QStringList &choices,
+                   QString &value,
+                   QString &error)
+{
+    const QJsonValue v = arguments.value(key);
+    if (v.isUndefined())
+        return true;
+    if (!choices.contains(v.toString())) {
+        error = QStringLiteral("%1 must be one of %2.").arg(key, choices.join(", "));
+        return false;
+    }
+    value = v.toString();
+    return true;
+}
+
+// A transparent clip carrying Shotcut's Text: Simple filter (dynamictext), as Open Other > Text
+// makes it.
+struct TextClip
+{
+    QString text; // as shown; may hold newlines
+    QString family;
+    int size = 0;
+    QString fgcolour = QStringLiteral("#ffffffff");
+    QString bgcolour = QStringLiteral("#00000000");
+    int outline = 3;
+    QString geometry = QStringLiteral("0%/0%:100%x100%");
+    QString halign = QStringLiteral("center");
+    QString valign = QStringLiteral("middle");
+};
+
+// Reads track, position, duration, mode and font, shared by the text tools.
+bool readTextPlacement(const QJsonObject &arguments,
+                       int &track,
+                       int &position,
+                       int &duration,
+                       QString &mode,
+                       TextClip &clip,
+                       QString &error)
+{
+    if (readFrame(arguments, "track", track) != FrameArg::Ok) {
+        error = QStringLiteral("track must be a non-negative integer.");
+        return false;
+    }
+    if (readFrame(arguments, "position", position) != FrameArg::Ok || position > 1000000000) {
+        error = QStringLiteral("position must be a non-negative integer (at most 1e9).");
+        return false;
+    }
+    if (readFrame(arguments, "duration", duration) != FrameArg::Ok || duration < 1
+        || duration > 100000) {
+        error = QStringLiteral("duration must be an integer from 1 to 100000 frames.");
+        return false;
+    }
+    if (!readChoiceArg(arguments, "mode", {"insert", "overwrite"}, mode, error))
+        return false;
+    const QJsonValue font = arguments.value("font");
+    return font.isUndefined() || readText(font, "font", 100, clip.family, error);
+}
+
+QJsonObject addTextClip(const TextClip &clip,
+                        int track,
+                        int position,
+                        int duration,
+                        const QString &mode,
+                        const QString &undoText)
+{
+    // "#" starts a keyword of the filter (#timecode# and so on); "\#" shows it as text.
+    QString argument = clip.text;
+    argument.replace('#', QStringLiteral("\\#"));
+    // Shotcut's Filters panel cuts the text to 256 (UTF-16) characters when it shows the filter,
+    // and MLT's filter renders at most 511 bytes of it.
+    if (argument.size() > 256 || argument.toUtf8().size() > 511)
+        return textResult("The text is too long for Shotcut's text filter: at most 256 characters "
+                          "(each # and emoji counts twice) and 511 bytes in UTF-8.",
+                          true);
+    QString error;
+    // A video track, or track 0 when there is no timeline yet (pushClipXml creates it).
+    if (!validTargetTrack(track, error)
+        || (MAIN.isMultitrackValid()
+            && !validTrack(*MAIN.timelineDock()->model(), track, error, true)))
+        return textResult(error, true);
+
+    // The first line that is not blank names the clip.
+    QString caption;
+    for (const QString &line : clip.text.split('\n')) {
+        if (!line.trimmed().isEmpty()) {
+            caption = line;
+            break;
+        }
+    }
+    Mlt::Producer producer(MLT.profile(), "color:");
+    Mlt::Filter filter(MLT.profile(), "dynamictext");
+    if (!producer.is_valid() || !filter.is_valid())
+        return textResult("Shotcut's text filter (dynamictext) is not available.", true);
+    producer.set("resource", "#00000000");
+    producer.set("mlt_image_format", "rgba");
+    producer.set("length", duration);
+    producer.set_in_and_out(0, duration - 1);
+    producer.set(kShotcutCaptionProperty, caption.toUtf8().constData());
+    producer.set(kShotcutDetailProperty, caption.toUtf8().constData());
+    filter.set(kShotcutFilterProperty, "dynamicText");
+    filter.set("argument", argument.toUtf8().constData());
+    if (!clip.family.isEmpty())
+        filter.set("family", clip.family.toUtf8().constData());
+    filter.set("size", clip.size);
+    filter.set("fgcolour", clip.fgcolour.toLatin1().constData());
+    filter.set("bgcolour", clip.bgcolour.toLatin1().constData());
+    filter.set("olcolour", "#aa000000");
+    filter.set("outline", clip.outline);
+    filter.set("weight", 700);
+    filter.set("style", "normal");
+    filter.set("geometry", clip.geometry.toLatin1().constData());
+    filter.set("valign", clip.valign.toLatin1().constData());
+    filter.set("halign", clip.halign.toLatin1().constData());
+    // A fixed size, as Open Other > Text: with usePointSize 0 the Filters panel replaces size by
+    // height / lines when it shows the filter; with 1 it sets size from the point size, so that is
+    // the size in points at the screen's resolution (it may then move size by about a pixel).
+    const QScreen *screen = QGuiApplication::primaryScreen();
+    const double dpi = screen ? screen->logicalDotsPerInchY() : 96.0;
+    filter.set("shotcut:usePointSize", 1);
+    filter.set("shotcut:pointSize", qMax(1, qRound(clip.size * 72 / dpi)));
+    filter.set_in_and_out(producer.get_in(), producer.get_out());
+    producer.attach(filter);
+
+    const int index = pushClipXml(mode, track, position, MLT.XML(&producer), undoText, error);
+    if (index < 0)
+        return textResult(error, true);
+    MultitrackModel &model = *MAIN.timelineDock()->model();
+    std::unique_ptr<Mlt::ClipInfo> info = model.getClipInfo(track, index);
+    if (!info)
+        return textResult("The clip was added but cannot be read back; call get_timeline.", true);
+    return jsonResult(QJsonObject{{"track", trackJson(model, track)},
+                                  {"clip",
+                                   QJsonObject{{"start", info->start},
+                                               {"duration", info->frame_count}}}});
+}
+
+QJsonObject titleAddTool(const QJsonObject &arguments)
+{
+    QString error;
+    if (!checkKeys(arguments,
+                   {"text",
+                    "track",
+                    "position",
+                    "duration",
+                    "font",
+                    "size",
+                    "color",
+                    "bg_color",
+                    "outline",
+                    "align",
+                    "valign",
+                    "mode"},
+                   error))
+        return textResult(error, true);
+    TextClip clip;
+    clip.size = MLT.profile().height() / 12;
+    int track = 0, position = 0, duration = 0;
+    QString mode = QStringLiteral("overwrite");
+    if (!readText(arguments.value("text"), "text", 256, clip.text, error)
+        || !readTextPlacement(arguments, track, position, duration, mode, clip, error)
+        || !readIntArg(arguments, "size", 8, 400, clip.size, error)
+        || !readColorArg(arguments, "color", clip.fgcolour, error)
+        || !readColorArg(arguments, "bg_color", clip.bgcolour, error)
+        || !readIntArg(arguments, "outline", 0, 20, clip.outline, error)
+        || !readChoiceArg(arguments, "align", {"left", "center", "right"}, clip.halign, error)
+        || !readChoiceArg(arguments, "valign", {"top", "middle", "bottom"}, clip.valign, error))
+        return textResult(error, true);
+    return addTextClip(clip, track, position, duration, mode, QObject::tr("Add title"));
+}
+
+QJsonObject lowerThirdAddTool(const QJsonObject &arguments)
+{
+    QString error;
+    if (!checkKeys(arguments,
+                   {"line1",
+                    "line2",
+                    "track",
+                    "position",
+                    "duration",
+                    "font",
+                    "color",
+                    "bar_color",
+                    "mode"},
+                   error))
+        return textResult(error, true);
+    TextClip clip;
+    clip.size = MLT.profile().height() / 20;
+    clip.bgcolour = QStringLiteral("#99000000");
+    clip.geometry = QStringLiteral("0%/76%:100%x14%");
+    clip.halign = QStringLiteral("left");
+    clip.valign = QStringLiteral("bottom");
+    int track = 0, position = 0, duration = 0;
+    QString mode = QStringLiteral("overwrite");
+    QString line1, line2;
+    const QJsonValue line2Value = arguments.value("line2");
+    if (!readText(arguments.value("line1"), "line1", 200, line1, error)
+        || (!line2Value.isUndefined() && !readText(line2Value, "line2", 200, line2, error)))
+        return textResult(error, true);
+    if (line1.contains('\n') || line2.contains('\n'))
+        return textResult("line1 and line2 must not contain line breaks.", true);
+    if (!readTextPlacement(arguments, track, position, duration, mode, clip, error)
+        || !readColorArg(arguments, "color", clip.fgcolour, error)
+        || !readColorArg(arguments, "bar_color", clip.bgcolour, error))
+        return textResult(error, true);
+    clip.text = line2.isEmpty() ? line1 : line1 + '\n' + line2;
+    return addTextClip(clip, track, position, duration, mode, QObject::tr("Add lower third"));
+}
+
 } // namespace
 
 QList<McpTool> McpTools::formatTools()
@@ -372,5 +618,65 @@ QList<McpTool> McpTools::formatTools()
              "interpolation":{"type":"string","enum":["linear","smooth"]}
            },"required":["track","clip","mode"],"additionalProperties":false})"),
          clipReframeTool},
+        {"title_add",
+         "Put a text clip (a title) on a VIDEO track at an absolute timeline frame as ONE undo "
+         "step (\"Add title\"): a transparent clip of duration frames with Shotcut's Text: Simple "
+         "filter, as Open Other > Text makes it, so it shows over the tracks below (put it on an "
+         "upper track, e.g. one made with track_add). text is 1 to 256 characters (as Shotcut's "
+         "text editor counts them: each # and emoji counts twice) and at most 511 bytes in UTF-8; "
+         "newlines make more lines; # is shown as typed (not a keyword such as #timecode#). The "
+         "clip is named after its first line that is not blank. font: a font family name (default "
+         "the text filter's, Sans); size: 8 to 400 pixels (default the project height / 12); color "
+         "(default \"#ffffffff\") and bg_color (a box behind the text, default \"#00000000\" "
+         "none): \"#rrggbb\" or \"#aarrggbb\"; outline: 0 to 20 pixels (default 3, colour "
+         "#aa000000); bold. align left|center|right (default center) and valign top|middle|bottom "
+         "(default middle) place it in the whole frame. mode overwrite (default) replaces what is "
+         "under it and never ripples; insert splits and pushes later items right (and other "
+         "tracks/markers per Shotcut's ripple settings), as timeline_insert_range. From the "
+         "track's end on, the clip is appended (after a gap); position may be at most one hour "
+         "after the end of the track; a position inside a transition is refused. With no timeline "
+         "only track 0 is accepted and a video track is created. Refused (nothing changed): "
+         "unknown arguments, an audio or locked track. Edit it later in Shotcut's Filters panel. "
+         "Returns {track, clip:{start, duration}}.",
+         schema(R"({"type":"object","properties":{
+             "text":{"type":"string","minLength":1,"maxLength":256},
+             "track":{"type":"integer","minimum":0},
+             "position":{"type":"integer","minimum":0},
+             "duration":{"type":"integer","minimum":1,"maximum":100000},
+             "font":{"type":"string","minLength":1,"maxLength":100},
+             "size":{"type":"integer","minimum":8,"maximum":400},
+             "color":{"type":"string","pattern":"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"},
+             "bg_color":{"type":"string","pattern":"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"},
+             "outline":{"type":"integer","minimum":0,"maximum":20},
+             "align":{"type":"string","enum":["left","center","right"]},
+             "valign":{"type":"string","enum":["top","middle","bottom"]},
+             "mode":{"type":"string","enum":["insert","overwrite"]}
+           },"required":["text","track","position","duration"],"additionalProperties":false})"),
+         titleAddTool},
+        {"lower_third_add",
+         "Put a lower third (a name and an optional second line on a bar across the lower part of "
+         "the frame) on a VIDEO track as ONE undo step (\"Add lower third\"): the same transparent "
+         "text clip as title_add with the text \"line1\\nline2\" left-aligned at the bottom of the "
+         "band from 76% to 90% of the frame height (Shotcut's Lower Third geometry "
+         "0%/76%:100%x14%), size the project height / 20, bold, outline 3, on a bar of bar_color "
+         "(default \"#99000000\", translucent black). line1 and line2 are 1 to 200 characters "
+         "each, without line breaks, and together within title_add's text limits; # is shown as "
+         "typed. color is the text colour (default "
+         "\"#ffffffff\"); colours are \"#rrggbb\" or \"#aarrggbb\"; font as in title_add. track, "
+         "position, duration (1 to 100000 frames) and mode (overwrite by default, or insert) as in "
+         "title_add. The clip is named after line1. Refused (nothing changed): unknown arguments, "
+         "an audio or locked track. Returns {track, clip:{start, duration}}.",
+         schema(R"({"type":"object","properties":{
+             "line1":{"type":"string","minLength":1,"maxLength":200},
+             "line2":{"type":"string","minLength":1,"maxLength":200},
+             "track":{"type":"integer","minimum":0},
+             "position":{"type":"integer","minimum":0},
+             "duration":{"type":"integer","minimum":1,"maximum":100000},
+             "font":{"type":"string","minLength":1,"maxLength":100},
+             "color":{"type":"string","pattern":"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"},
+             "bar_color":{"type":"string","pattern":"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"},
+             "mode":{"type":"string","enum":["insert","overwrite"]}
+           },"required":["line1","track","position","duration"],"additionalProperties":false})"),
+         lowerThirdAddTool},
     };
 }

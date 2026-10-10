@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Format smoke test for the Shotcut MCP server (stage 3, part 3C): project_set_format, clip_reframe.
+# Format smoke test for the Shotcut MCP server (stage 3, part 3C): project_set_format, clip_reframe,
+# title_add, lower_third_add.
 # Usage: MCP_TOKEN=<token> [MCP_PORT=7468] MCP_APPDATA=<scratch dir> tools/mcp-smoke-format.sh
 # Run it against a FRESH, throwaway Shotcut (nothing loaded, no timeline); it aborts otherwise
 # unless MCP_SMOKE_FORCE=1. It creates its media with ffmpeg in a temporary folder and exports
-# two files. MCP_APPDATA (the instance's --appdata folder) is required: the script checks the
+# three files. MCP_APPDATA (the instance's --appdata folder) is required: the script checks the
 # saved Video Mode setting in its shotcut.ini is left alone (a FAIL when it is not set).
 # Needs: bash, curl, jq, ffmpeg, ffprobe.
 set -u
@@ -19,11 +20,15 @@ fresh_guard
 MEDIA="$("$HERE/mcp-fixtures.sh" "$TMP/media")" || { echo "ffmpeg could not create the fixtures"; exit 2; }
 
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[]]')"
-expect_eq "tools/list: 53 tools in all (through Task 18)" 53 "$(echo "$TOOLS" | jq 'length')"
+expect_eq "tools/list: 55 tools in all (through Task 19)" 55 "$(echo "$TOOLS" | jq 'length')"
 expect_eq "tools/list has project_set_format" true "$(echo "$TOOLS" | jq '[.[].name] | index("project_set_format") != null')"
 expect_eq "project_set_format schema refuses extra properties" false "$(echo "$TOOLS" | jq '.[] | select(.name=="project_set_format") | .inputSchema.additionalProperties')"
 expect_eq "tools/list has clip_reframe" true "$(echo "$TOOLS" | jq '[.[].name] | index("clip_reframe") != null')"
 expect_eq "clip_reframe schema refuses extra properties" false "$(echo "$TOOLS" | jq '.[] | select(.name=="clip_reframe") | .inputSchema.additionalProperties')"
+for t in title_add lower_third_add; do
+  expect_eq "tools/list has $t" true "$(echo "$TOOLS" | jq --arg t "$t" '[.[].name] | index($t) != null')"
+  expect_eq "$t schema refuses extra properties" false "$(echo "$TOOLS" | jq --arg t "$t" '.[] | select(.name==$t) | .inputSchema.additionalProperties')"
+done
 
 prof() { tool_json get_state '{}' | jq -c '.profile'; }
 fmt() { tool_json project_set_format "$1" | jq -cS .; }
@@ -271,6 +276,159 @@ done
 expect_eq "reframed export succeeded" succeeded "$st"
 expect_eq "reframed export is 1080x1920" 1080x1920 "$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$OUT2" 2>/dev/null)"
 expect_eq "the four corners are red (no black bars)" "red red red red" "$(corners "$OUT2")"
+
+echo "== title_add and lower_third_add: argument errors (nothing changes)"
+trk() { tool_json get_timeline '{}' | jq -c ".tracks[$1]"; }
+terr() { tool_is_error title_add "$1"; }
+lerr() { tool_is_error lower_third_add "$1"; }
+expect_eq "track_add a video track for the titles (on top, index 0)" 0 "$(tool_json track_add '{"type":"video"}' | jq '.added.index')"
+expect_eq "the background clip is now on track 1" 30 "$(trk 1 | jq '.clips[0].duration')"
+T0="$(trk 0)"
+TL0="$(tool_json get_timeline '{}' | jq -c '.tracks')"
+long501="$(jq -nr '[range(0;501) | "a"] | join("")')"
+expect_eq "empty text is an error" true "$(terr '{"text":"","track":0,"position":0,"duration":30}')"
+expect_eq "blank text is an error" true "$(terr '{"text":"  \n ","track":0,"position":0,"duration":30}')"
+expect_eq "text of 501 characters is an error" true "$(terr "{\"text\":\"$long501\",\"track\":0,\"position\":0,\"duration\":30}")"
+expect_eq "text as a number is an error" true "$(terr '{"text":5,"track":0,"position":0,"duration":30}')"
+expect_eq "text missing is an error" true "$(terr '{"track":0,"position":0,"duration":30}')"
+expect_eq "size 5 is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"size":5}')"
+expect_eq "size 401 is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"size":401}')"
+expect_eq "color #fff is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"color":"#fff"}')"
+expect_eq "color white is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"color":"white"}')"
+expect_eq "bg_color #gg0000 is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"bg_color":"#gg0000"}')"
+expect_eq "outline 21 is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"outline":21}')"
+expect_eq "align centre is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"align":"centre"}')"
+expect_eq "valign center is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"valign":"center"}')"
+expect_eq "an empty font is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"font":""}')"
+expect_eq "duration 0 is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":0}')"
+expect_eq "duration 100001 is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":100001}')"
+expect_eq "position -1 is an error" true "$(terr '{"text":"Hi","track":0,"position":-1,"duration":30}')"
+expect_eq "mode ripple is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"mode":"ripple"}')"
+expect_eq "an unknown argument is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30,"colour":"#ffffff"}')"
+expect_eq "a missing track is an error" true "$(terr '{"text":"Hi","track":9,"position":0,"duration":30}')"
+long257="$(jq -nr '[range(0;257) | "a"] | join("")')"
+expect_eq "text of 257 characters is an error (the Filters panel keeps 256)" true "$(terr "{\"text\":\"$long257\",\"track\":0,\"position\":0,\"duration\":30}")"
+# 129 # signs are 258 characters once escaped (\#).
+hash129="$(jq -nr '[range(0;129) | "#"] | join("")')"
+expect_eq "129 # signs are an error (each counts twice)" true "$(terr "{\"text\":\"$hash129\",\"track\":0,\"position\":0,\"duration\":30}")"
+# 171 three-byte characters: 513 bytes, more than MLT's text filter renders (511).
+long_e="$(jq -nr '[range(0;171) | "€"] | join("")')"
+expect_eq "text over 511 UTF-8 bytes is an error" true "$(terr "{\"text\":\"$long_e\",\"track\":0,\"position\":0,\"duration\":30}")"
+AUD="$(tool_json track_add '{"type":"audio"}' | jq '.added.index')"
+expect_eq "title_add on an audio track is an error" true "$(terr "{\"text\":\"Hi\",\"track\":$AUD,\"position\":0,\"duration\":30}")"
+expect_eq "lower_third_add on an audio track is an error" true "$(lerr "{\"line1\":\"Hi\",\"track\":$AUD,\"position\":0,\"duration\":30}")"
+tool_json undo '{}' >/dev/null
+tool_json track_set '{"track":0,"lock":true}' >/dev/null
+expect_eq "title_add on a locked track is an error" true "$(terr '{"text":"Hi","track":0,"position":0,"duration":30}')"
+expect_eq "lower_third_add on a locked track is an error" true "$(lerr '{"line1":"Hi","track":0,"position":0,"duration":30}')"
+tool_json track_set '{"track":0,"lock":false}' >/dev/null
+expect_eq "empty line1 is an error" true "$(lerr '{"line1":"","track":0,"position":0,"duration":30}')"
+expect_eq "line1 with a newline is an error" true "$(lerr '{"line1":"a\nb","track":0,"position":0,"duration":30}')"
+expect_eq "blank line2 is an error" true "$(lerr '{"line1":"a","line2":" ","track":0,"position":0,"duration":30}')"
+expect_eq "bar_color red is an error" true "$(lerr '{"line1":"a","track":0,"position":0,"duration":30,"bar_color":"red"}')"
+expect_eq "lower_third_add duration 0 is an error" true "$(lerr '{"line1":"a","track":0,"position":0,"duration":0}')"
+expect_eq "lower_third_add size is an unknown argument" true "$(lerr '{"line1":"a","track":0,"position":0,"duration":30,"size":40}')"
+expect_eq "lower_third_add mode ripple is an error" true "$(lerr '{"line1":"a","track":0,"position":0,"duration":30,"mode":"ripple"}')"
+expect_eq "the errors changed nothing" "$TL0" "$(tool_json get_timeline '{}' | jq -c '.tracks')"
+
+echo "== title_add over the background clip"
+SAVED="$TMP/titles.mlt"
+# dyn_prop NAME [N]: property NAME of the Nth (default first) dynamictext filter in $SAVED, with its
+# newlines; empty when the filter or the property is missing.
+dyn_prop() {
+  awk -v want="$1" -v nth="${2:-1}" '
+    /<filter /{f=1; dyn=0; val=""; cap=0}
+    f && cap {line=$0; if (sub(/<\/property>.*/, "", line)) cap=0; val=val "\n" line; next}
+    f && /name="mlt_service">dynamictext</{dyn=1}
+    f && index($0, "name=\"" want "\">") {line=$0; sub(/.*name="[^"]*">/, "", line)
+      if (sub(/<\/property>.*/, "", line)) val=line; else {val=line; cap=1}}
+    /<\/filter>/{ if (f && dyn && ++n == nth) {printf "%s", val; exit} f=0 }' "$SAVED"
+}
+R="$(tool_json title_add '{"text":"Hello\nWorld","track":0,"position":0,"duration":30}')"
+expect_eq "title_add result clip" '{"duration":30,"start":0}' "$(echo "$R" | jq -cS '.clip')"
+expect_eq "the result's track is get_timeline's track 0" "$(trk 0)" "$(echo "$R" | jq -c '.track')"
+expect_eq "the title clip: start 0, 30 frames, named after the first line" '{"duration":30,"kind":"clip","name":"Hello","start":0}' "$(trk 0 | jq -cS '.clips[0] | {kind,start,duration,name}')"
+expect_eq "the background clip is unchanged" "$(echo "$TL0" | jq -c '.[1]')" "$(trk 1)"
+tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null
+expect_eq "saved: the exact argument (two lines)" "Hello"$'\n'"World" "$(dyn_prop argument)"
+expect_eq "saved: shotcut:filter dynamicText" dynamicText "$(dyn_prop shotcut:filter)"
+# near SIZE VALUE: "true" when VALUE is within 1 of SIZE (the Filters panel may round the size
+# through its point size when it shows the filter, as for Shotcut's own text clips).
+near() { awk -v a="$1" -v b="$2" 'BEGIN{d=a-b; print (b != "" && d <= 1 && d >= -1) ? "true" : "false"}'; }
+expect_eq "saved: size = 1920 / 12 (within 1)" true "$(near 160 "$(dyn_prop size)")"
+expect_eq "saved: a point size is stored with it" true "$(dyn_prop shotcut:pointSize | grep -qE '^[1-9][0-9]*$' && echo true || echo false)"
+expect_eq "saved: fgcolour" "#ffffffff" "$(dyn_prop fgcolour)"
+expect_eq "saved: bgcolour" "#00000000" "$(dyn_prop bgcolour)"
+expect_eq "saved: olcolour" "#aa000000" "$(dyn_prop olcolour)"
+expect_eq "saved: outline 3" 3 "$(dyn_prop outline)"
+expect_eq "saved: weight 700" 700 "$(dyn_prop weight)"
+expect_eq "saved: halign center, valign middle" "center middle" "$(dyn_prop halign) $(dyn_prop valign)"
+expect_eq "saved: geometry is the whole frame" "0%/0%:100%x100%" "$(dyn_prop geometry)"
+# Like Open Other > Text on Linux: no family set, so the filter's own default (Sans) is saved.
+expect_eq "saved: family is the filter's default" Sans "$(dyn_prop family)"
+# 1 as Open Other > Text: with 0 the Filters panel replaces size by height / lines when shown.
+expect_eq "saved: shotcut:usePointSize 1 (the size is kept)" 1 "$(dyn_prop shotcut:usePointSize)"
+expect_eq "title_add: undo text" "Add title" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "one undo restores track 0 byte for byte" "$T0" "$(trk 0)"
+tool_json redo '{}' >/dev/null
+expect_eq "redo puts the title back" '{"duration":30,"name":"Hello","start":0}' "$(trk 0 | jq -cS '.clips[0] | {start,duration,name}')"
+
+echo "== export with the title: white text in the centre"
+export_wait() {
+  local job st=""
+  job="$(tool_json export_video "{\"path\":\"$1\"}" | jq '.job_id')"
+  for _ in $(seq 1 300); do
+    st="$(tool_json get_export_status "{\"job_id\":$job}" | jq -r '.state')"
+    case "$st" in succeeded|failed|stopped|removed) break ;; esac
+    sleep 1
+  done
+  echo "$st"
+}
+# ymax FILE: the highest luma (0-255) in the centre band (y 760-1160) of FILE's frame at 0.5 s.
+ymax() {
+  ffmpeg -loglevel error -ss 0.5 -i "$1" -frames:v 1 \
+    -vf "crop=1080:400:0:760,signalstats,metadata=print:key=lavfi.signalstats.YMAX:file=-" \
+    -f null - 2>/dev/null | sed -n 's/.*YMAX=//p' | head -1
+}
+OUT3="$TMP/titled.mp4"
+expect_eq "titled export succeeded" succeeded "$(export_wait "$OUT3")"
+expect_eq "the title's centre band has white pixels (YMAX >= 235)" true "$(awk -v y="$(ymax "$OUT3")" 'BEGIN{print (y != "" && y >= 235) ? "true" : "false"}')"
+expect_eq "control: the same frame without the title has none" true "$(awk -v y="$(ymax "$OUT2")" 'BEGIN{print (y != "" && y < 235) ? "true" : "false"}')"
+
+echo "== title_add options"
+tool_json title_add '{"text":"Take #1","track":0,"position":0,"duration":10,"mode":"insert","font":"DejaVu Sans","size":200,"color":"#FF0000","bg_color":"#80000000","outline":0,"align":"left","valign":"top"}' >/dev/null
+expect_eq "insert: the new title is first, the old one moved to 10" '[[0,10,"Take #1"],[10,30,"Hello"]]' "$(trk 0 | jq -c '[.clips[] | [.start,.duration,.name]]')"
+tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null
+expect_eq "options: # is escaped so it shows as text" 'Take \#1' "$(dyn_prop argument)"
+expect_eq "options: family, colours, outline, alignment" 'DejaVu Sans|#ffff0000|#80000000|0|left|top' "$(dyn_prop family)|$(dyn_prop fgcolour)|$(dyn_prop bgcolour)|$(dyn_prop outline)|$(dyn_prop halign)|$(dyn_prop valign)"
+expect_eq "options: size 200 (within 1)" true "$(near 200 "$(dyn_prop size)")"
+tool_json undo '{}' >/dev/null
+expect_eq "undo removes the inserted title" '[[0,30,"Hello"]]' "$(trk 0 | jq -c '[.clips[] | select(.kind=="clip") | [.start,.duration,.name]]')"
+long256="$(jq -nr '[range(0;256) | "a"] | join("")')"
+expect_eq "text of 256 characters is accepted" false "$(terr "{\"text\":\"$long256\",\"track\":0,\"position\":0,\"duration\":30}")"
+tool_json undo '{}' >/dev/null
+expect_eq "undo again: back to the one title" '[[0,30,"Hello"]]' "$(trk 0 | jq -c '[.clips[] | select(.kind=="clip") | [.start,.duration,.name]]')"
+
+echo "== lower_third_add"
+T1="$(trk 0)"
+R="$(tool_json lower_third_add '{"line1":"Jane Doe","line2":"Director","track":0,"position":30,"duration":45}')"
+expect_eq "lower_third_add result clip" '{"duration":45,"start":30}' "$(echo "$R" | jq -cS '.clip')"
+expect_eq "the lower third is named after line1" '[30,45,"Jane Doe"]' "$(trk 0 | jq -c '.clips[-1] | [.start,.duration,.name]')"
+tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null
+expect_eq "saved: argument is line1 newline line2" "Jane Doe"$'\n'"Director" "$(dyn_prop argument 2)"
+expect_eq "saved: lower-third geometry" "0%/76%:100%x14%" "$(dyn_prop geometry 2)"
+expect_eq "saved: halign left, valign bottom" "left bottom" "$(dyn_prop halign 2) $(dyn_prop valign 2)"
+expect_eq "saved: size = 1920 / 20 (within 1)" true "$(near 96 "$(dyn_prop size 2)")"
+expect_eq "saved: bgcolour is the default bar colour" "#99000000" "$(dyn_prop bgcolour 2)"
+expect_eq "saved: fgcolour white" "#ffffffff" "$(dyn_prop fgcolour 2)"
+expect_eq "lower_third_add: undo text" "Add lower third" "$(tool_json undo '{}' | jq -r '.text')"
+expect_eq "one undo restores track 0 byte for byte" "$T1" "$(trk 0)"
+tool_json lower_third_add '{"line1":"Solo","track":0,"position":30,"duration":20,"color":"#00ff00","bar_color":"#cc102030","font":"DejaVu Sans"}' >/dev/null
+tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null
+expect_eq "one line: argument is line1 alone" Solo "$(dyn_prop argument 2)"
+expect_eq "one line: colour, bar colour, font" '#ff00ff00|#cc102030|DejaVu Sans' "$(dyn_prop fgcolour 2)|$(dyn_prop bgcolour 2)|$(dyn_prop family 2)"
+tool_json undo '{}' >/dev/null
+expect_eq "undo: track 0 is back to the one title" "$T1" "$(trk 0)"
 
 echo "== the saved Video Mode setting is untouched"
 if [ -n "${MCP_APPDATA:-}" ]; then

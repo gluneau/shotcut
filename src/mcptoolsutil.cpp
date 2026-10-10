@@ -147,6 +147,20 @@ FrameArg readNumberArg(const QJsonObject &arguments,
     return FrameArg::Ok;
 }
 
+bool readText(const QJsonValue &v, const char *key, int max, QString &text, QString &error)
+{
+    text = v.toString();
+    if (!v.isString() || text.isEmpty() || text.toUcs4().size() > max) {
+        error = QStringLiteral("%1 must be a string of 1 to %2 characters.").arg(key).arg(max);
+        return false;
+    }
+    if (text.trimmed().isEmpty()) {
+        error = QStringLiteral("%1 must not be blank.").arg(key);
+        return false;
+    }
+    return true;
+}
+
 // The multitrack when a timeline is open, otherwise null.
 Mlt::Producer *timeline()
 {

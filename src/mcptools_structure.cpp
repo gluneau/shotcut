@@ -451,22 +451,6 @@ QJsonArray allTracksJson(MultitrackModel &model)
     return tracks;
 }
 
-// A string of 1 to max characters (Unicode code points, so an emoji counts once) that is not only
-// white space.
-bool readText(const QJsonValue &v, const char *key, int max, QString &text, QString &error)
-{
-    text = v.toString();
-    if (!v.isString() || text.isEmpty() || text.toUcs4().size() > max) {
-        error = QStringLiteral("%1 must be a string of 1 to %2 characters.").arg(key).arg(max);
-        return false;
-    }
-    if (text.trimmed().isEmpty()) {
-        error = QStringLiteral("%1 must not be blank.").arg(key);
-        return false;
-    }
-    return true;
-}
-
 // An optional track name. A null name when absent.
 bool readTrackName(const QJsonObject &arguments, QString &name, QString &error)
 {

@@ -901,6 +901,62 @@ say a 16:9 or 4:3 clip in a 9:16 project, as ONE undo step ("Reframe clip (fill)
 - The clip's shape comes from its media (`meta.media.*`, as Size, Position & Rotate's fit rect):
   an aspect ratio override set in the Properties panel (`force_aspect_ratio`) is not used.
 
+### Titles and lower thirds
+
+`title_add` (54 tools in all) and `lower_third_add` (55) put a text clip on a video track as ONE
+undo step ("Add title", "Add lower third"). The clip is what Shotcut's Open Other > Text makes:
+a transparent `color:` producer (`#00000000`, `mlt_image_format rgba`) carrying Shotcut's
+Text: Simple filter (`dynamictext`, `shotcut:filter dynamicText`), so it shows over the tracks
+below it. Put it on an upper track (for example one made with `track_add`).
+
+| Argument | Meaning |
+|----------|---------|
+| `text` | `title_add`: 1..256 characters, newlines make more lines |
+| `line1`, `line2?` | `lower_third_add`: 1..200 characters each, no line breaks |
+| `track`, `position` | A video track (track 0 when there is no timeline yet); absolute frame |
+| `duration` | 1..100000 frames |
+| `font?` | A font family name (1..100 characters); default the filter's own, Sans |
+| `size?` | `title_add`: 8..400 pixels, default the project height / 12 |
+| `color?` | Text colour, `#rrggbb` or `#aarrggbb`, default `#ffffffff` |
+| `bg_color?` | `title_add`: a box behind the text, default `#00000000` (none) |
+| `bar_color?` | `lower_third_add`: the bar behind the text, default `#99000000` |
+| `outline?` | `title_add`: 0..20 pixels, default 3 (outline colour `#aa000000`) |
+| `align?`, `valign?` | `title_add`: `left`/`center`/`right`, `top`/`middle`/`bottom` |
+| `mode?` | `overwrite` (default, never ripples) or `insert` (as `timeline_insert_range`) |
+
+- A title fills the whole frame (`geometry 0%/0%:100%x100%`) and is placed in it by `align`
+  (default `center`) and `valign` (default `middle`).
+- A lower third uses Shotcut's Lower Third preset geometry `0%/76%:100%x14%` (the band from 76%
+  to 90% of the frame height) with `halign left`, `valign bottom`, size = project height / 20,
+  `bgcolour` = `bar_color`, and the text `line1` or `line1\nline2`.
+- Both are bold (`weight 700`), `style normal`, `olcolour #aa000000`; `family` is set only when
+  `font` is given. Colours are stored as `#aarrggbb` (`#rrggbb` gets `ff` alpha).
+- A `#` in the text is stored as `\#`, so it shows as typed instead of starting a keyword such
+  as `#timecode#`.
+- `shotcut:usePointSize 1` with `shotcut:pointSize` = size in points at the screen's resolution,
+  as Open Other > Text does. With 0 the Filters panel would replace `size` by height / lines
+  when it shows the filter.
+- The clip is named (`shotcut:caption`, `shotcut:detail`) after the first line that is not blank
+  (`line1` for a lower third).
+- Placement goes through the same code as `timeline_insert_range`: from the track's end on the
+  clip is appended (after a gap), `position` may be at most one hour after the end of the
+  track, and a position inside a transition is refused.
+- Refused (nothing changed): unknown arguments, an empty or blank text or line, more than 256
+  characters once each `#` is doubled (UTF-16 units, so an emoji counts twice) or more than 511
+  bytes in UTF-8, a bad colour, out-of-range numbers, an unknown `mode`, `align` or `valign`,
+  an audio track, a locked track, a missing track.
+- Returns `{track, clip: {start, duration}}`; edit the text later in Shotcut's Filters panel.
+
+### Known limits (titles)
+
+- The text length limits are Shotcut's and MLT's: the Filters panel cuts the text to 256
+  characters when it shows the filter, and MLT's `dynamictext` renders at most 511 bytes.
+- The Filters panel sets `size` from the point size when it shows the filter, which can move it
+  by about a pixel (as for Shotcut's own text clips).
+- No animation, shadow, rich text or typewriter effect; use the Filters panel for those.
+- The font must be installed where the project is rendered; an unknown family falls back to the
+  system's default font.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -999,17 +1055,22 @@ checks the format is kept, the tool is refused, and an export (`x264-medium`, `m
 `focus_x` 0, 0.25, 0.5 and 1 on the 4:3 clip, the keyframe strings and their saved form, one undo
 step per call, the `shotcut:reframe` mark (a `filter_set` tweak and a reframe restored by undo
 are replaced), the refusal on a clip with its own Size/Position or Blur: Pad, `pad`, the 1%
-match refusal, keyframes on a clip with a non-zero in point, and a 1 s export whose four corners are red (no black bars;
-the earlier export without the reframe has black corners). It ends by opening a timeline-only
-project and checking `project_set_format` is refused there. `MCP_APPDATA` must be set (it is a
+match refusal, keyframes on a clip with a non-zero in point, and a 1 s export whose four
+corners are red (no black bars; the earlier export without the reframe has black corners).
+It then checks `title_add` and `lower_third_add` on a new top track: argument refusals, the
+clip's place, length and name, the saved filter properties (exact text, geometry, colours,
+size within a pixel), one undo restoring the track, insert mode, `#` escaping, and an export
+whose centre band has white text (`signalstats` YMAX >= 235; the same frame of the earlier
+export has none). It ends by opening a timeline-only project and checking
+`project_set_format` is refused there. `MCP_APPDATA` must be set (it is a
 FAIL otherwise): the script checks that `shotcut.ini` has no saved `[player] profile`.
 
 Manual checks (they need a modified project, which the tools cannot create):
 
 - With an edited project loaded, wait for the first autosave tick (the file under
-  `<appdata>/autosave` only exists after it), then call `open_project` with `discard_changes: true` on a broken `.mlt`.
-  It must error, the project must stay modified, and its file under `<appdata>/autosave` must still
-  exist and keep being updated.
+  `<appdata>/autosave` only exists after it), then call `open_project` with
+  `discard_changes: true` on a broken `.mlt`. It must error, the project must stay modified, and
+  its file under `<appdata>/autosave` must still exist and keep being updated.
 - Open a media file into a loaded timeline: no discard is needed and the modified flag is unchanged.
 
 Manual checks for stage 2 (GUI only; the headless script cannot cover them):

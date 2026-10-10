@@ -56,6 +56,10 @@ FrameArg readNumberArg(const QJsonObject &arguments,
                        double &value,
                        QString &error);
 
+// A string of 1 to max characters (Unicode code points, so an emoji counts once) that is not only
+// white space; false with "<key> must be ..." otherwise.
+bool readText(const QJsonValue &v, const char *key, int max, QString &text, QString &error);
+
 // The multitrack when a timeline is open, otherwise null.
 Mlt::Producer *timeline();
 
