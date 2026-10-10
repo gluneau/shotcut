@@ -329,6 +329,11 @@ expect_eq "bar_color red is an error" true "$(lerr '{"line1":"a","track":0,"posi
 expect_eq "lower_third_add duration 0 is an error" true "$(lerr '{"line1":"a","track":0,"position":0,"duration":0}')"
 expect_eq "lower_third_add size is an unknown argument" true "$(lerr '{"line1":"a","track":0,"position":0,"duration":30,"size":40}')"
 expect_eq "lower_third_add mode ripple is an error" true "$(lerr '{"line1":"a","track":0,"position":0,"duration":30,"mode":"ripple"}')"
+expect_eq "line1 with a carriage return is an error" true "$(lerr '{"line1":"a\rb","track":0,"position":0,"duration":30}')"
+expect_eq "line2 with a carriage return is an error" true "$(lerr '{"line1":"a","line2":"b\r","track":0,"position":0,"duration":30}')"
+expect_eq "title text too long: the error names text" true "$(tool_text title_add "{\"text\":\"$hash129\",\"track\":0,\"position\":0,\"duration\":30}" | grep -q 'text may have at most 256' && echo true || echo false)"
+hash150="$(jq -nr '[range(0;150) | "#"] | join("")')"
+expect_eq "lower third too long: the error names line1 and line2" true "$(tool_text lower_third_add "{\"line1\":\"$hash150\",\"track\":0,\"position\":0,\"duration\":30}" | grep -q 'line1 and line2 together may have at most 256' && echo true || echo false)"
 expect_eq "the errors changed nothing" "$TL0" "$(tool_json get_timeline '{}' | jq -c '.tracks')"
 
 echo "== title_add over the background clip"
@@ -408,6 +413,15 @@ long256="$(jq -nr '[range(0;256) | "a"] | join("")')"
 expect_eq "text of 256 characters is accepted" false "$(terr "{\"text\":\"$long256\",\"track\":0,\"position\":0,\"duration\":30}")"
 tool_json undo '{}' >/dev/null
 expect_eq "undo again: back to the one title" '[[0,30,"Hello"]]' "$(trk 0 | jq -c '[.clips[] | select(.kind=="clip") | [.start,.duration,.name]]')"
+tool_json title_add '{"text":"Top\r\nMiddle\rBottom","track":0,"position":0,"duration":10}' >/dev/null
+expect_eq "CR LF and CR: the title is named after its first line" Top "$(trk 0 | jq -r '.clips[0].name')"
+tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null
+found=false
+for n in 1 2 3; do [ "$(dyn_prop argument $n)" = "Top"$'\n'"Middle"$'\n'"Bottom" ] && found=true; done
+expect_eq "CR LF and CR are saved as newlines" true "$found"
+expect_eq "no carriage return in the saved project" 0 "$(grep -c $'\r\|&#13;\|&#xd;' "$SAVED")"
+tool_json undo '{}' >/dev/null
+expect_eq "undo: back to the one title" '[[0,30,"Hello"]]' "$(trk 0 | jq -c '[.clips[] | select(.kind=="clip") | [.start,.duration,.name]]')"
 
 echo "== lower_third_add"
 T1="$(trk 0)"
@@ -481,5 +495,47 @@ PTL="$(prof)"
 expect_eq "the opened project is 640x360 25 fps" '{"fps_den":1,"fps_num":25,"height":360,"width":640}' "$(echo "$PTL" | jq -cS .)"
 expect_eq "project_set_format on a timeline-only project is an error" true "$(ferr '{"preset":"9:16"}')"
 expect_eq "the refusal changed nothing (timeline only)" "$PTL" "$(prof)"
+
+echo "== the default title size is at most 400 on a tall video mode"
+# Last again: another project is opened. 720x4920: height / 12 = 410.
+TALL="$TMP/tall.mlt"
+cat > "$TALL" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="main_bin">
+  <profile description="720x4920 25 fps" width="720" height="4920" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="6" display_aspect_den="41" frame_rate_num="25" frame_rate_den="1" colorspace="709"/>
+  <playlist id="main_bin">
+    <property name="xml_retain">1</property>
+  </playlist>
+  <producer id="black" in="0" out="49">
+    <property name="length">50</property>
+    <property name="resource">0</property>
+    <property name="mlt_service">color</property>
+  </producer>
+  <playlist id="background">
+    <entry producer="black" in="0" out="49"/>
+  </playlist>
+  <chain id="chain0" out="49">
+    <property name="resource">$MEDIA/scenes.mp4</property>
+    <property name="mlt_service">avformat-novalidate</property>
+  </chain>
+  <playlist id="playlist0">
+    <property name="shotcut:video">1</property>
+    <property name="shotcut:name">V1</property>
+    <entry producer="chain0" in="0" out="49"/>
+  </playlist>
+  <tractor id="tractor0" in="0" out="49">
+    <property name="shotcut">1</property>
+    <track producer="background"/>
+    <track producer="playlist0"/>
+  </tractor>
+</mlt>
+XML
+open_fixture_project "$TALL" >/dev/null
+sleep 1
+expect_eq "the tall project is 720x4920" '{"fps_den":1,"fps_num":25,"height":4920,"width":720}' "$(prof | jq -cS .)"
+expect_eq "title_add with the default size" false "$(terr '{"text":"Tall","track":0,"position":0,"duration":10}')"
+SAVED="$TMP/tall-saved.mlt"
+tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null
+expect_eq "saved: size 400, not 4920 / 12 = 410 (within 1)" true "$(near 400 "$(dyn_prop size)")"
 
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

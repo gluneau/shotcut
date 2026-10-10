@@ -416,7 +416,8 @@ QJsonObject addTextClip(const TextClip &clip,
                         int position,
                         int duration,
                         const QString &mode,
-                        const QString &undoText)
+                        const QString &undoText,
+                        const QString &what)
 {
     // "#" starts a keyword of the filter (#timecode# and so on); "\#" shows it as text.
     QString argument = clip.text;
@@ -424,8 +425,10 @@ QJsonObject addTextClip(const TextClip &clip,
     // Shotcut's Filters panel cuts the text to 256 (UTF-16) characters when it shows the filter,
     // and MLT's filter renders at most 511 bytes of it.
     if (argument.size() > 256 || argument.toUtf8().size() > 511)
-        return textResult("The text is too long for Shotcut's text filter: at most 256 characters "
-                          "(each # and emoji counts twice) and 511 bytes in UTF-8.",
+        return textResult(QStringLiteral("Too long for Shotcut's text filter: %1 may have at most "
+                                         "256 characters (each # and emoji counts twice) and 511 "
+                                         "bytes in UTF-8.")
+                              .arg(what),
                           true);
     QString error;
     // A video track, or track 0 when there is no timeline yet (pushClipXml creates it).
@@ -508,7 +511,8 @@ QJsonObject titleAddTool(const QJsonObject &arguments)
                    error))
         return textResult(error, true);
     TextClip clip;
-    clip.size = MLT.profile().height() / 12;
+    // At most the largest size the argument accepts, also on a tall video mode.
+    clip.size = qMin(400, MLT.profile().height() / 12);
     int track = 0, position = 0, duration = 0;
     QString mode = QStringLiteral("overwrite");
     if (!readText(arguments.value("text"), "text", 256, clip.text, error)
@@ -520,7 +524,9 @@ QJsonObject titleAddTool(const QJsonObject &arguments)
         || !readChoiceArg(arguments, "align", {"left", "center", "right"}, clip.halign, error)
         || !readChoiceArg(arguments, "valign", {"top", "middle", "bottom"}, clip.valign, error))
         return textResult(error, true);
-    return addTextClip(clip, track, position, duration, mode, QObject::tr("Add title"));
+    // Windows line ends (and a lone carriage return) become plain newlines.
+    clip.text.replace(QStringLiteral("\r\n"), QStringLiteral("\n")).replace('\r', '\n');
+    return addTextClip(clip, track, position, duration, mode, QObject::tr("Add title"), "text");
 }
 
 QJsonObject lowerThirdAddTool(const QJsonObject &arguments)
@@ -551,14 +557,21 @@ QJsonObject lowerThirdAddTool(const QJsonObject &arguments)
     if (!readText(arguments.value("line1"), "line1", 200, line1, error)
         || (!line2Value.isUndefined() && !readText(line2Value, "line2", 200, line2, error)))
         return textResult(error, true);
-    if (line1.contains('\n') || line2.contains('\n'))
+    if (line1.contains('\n') || line2.contains('\n') || line1.contains('\r')
+        || line2.contains('\r'))
         return textResult("line1 and line2 must not contain line breaks.", true);
     if (!readTextPlacement(arguments, track, position, duration, mode, clip, error)
         || !readColorArg(arguments, "color", clip.fgcolour, error)
         || !readColorArg(arguments, "bar_color", clip.bgcolour, error))
         return textResult(error, true);
     clip.text = line2.isEmpty() ? line1 : line1 + '\n' + line2;
-    return addTextClip(clip, track, position, duration, mode, QObject::tr("Add lower third"));
+    return addTextClip(clip,
+                       track,
+                       position,
+                       duration,
+                       mode,
+                       QObject::tr("Add lower third"),
+                       "line1 and line2 together");
 }
 
 } // namespace
@@ -624,9 +637,10 @@ QList<McpTool> McpTools::formatTools()
          "filter, as Open Other > Text makes it, so it shows over the tracks below (put it on an "
          "upper track, e.g. one made with track_add). text is 1 to 256 characters (as Shotcut's "
          "text editor counts them: each # and emoji counts twice) and at most 511 bytes in UTF-8; "
-         "newlines make more lines; # is shown as typed (not a keyword such as #timecode#). The "
-         "clip is named after its first line that is not blank. font: a font family name (default "
-         "the text filter's, Sans); size: 8 to 400 pixels (default the project height / 12); color "
+         "newlines make more lines (\\r\\n and \\r count as newlines); # is shown as typed (not a "
+         "keyword such as #timecode#). The clip is named after its first line that is not blank. "
+         "font: a font family name (default the text filter's, Sans); size: 8 to 400 pixels "
+         "(default the project height / 12, at most 400); color "
          "(default \"#ffffffff\") and bg_color (a box behind the text, default \"#00000000\" "
          "none): \"#rrggbb\" or \"#aarrggbb\"; outline: 0 to 20 pixels (default 3, colour "
          "#aa000000); bold. align left|center|right (default center) and valign top|middle|bottom "

@@ -911,12 +911,12 @@ below it. Put it on an upper track (for example one made with `track_add`).
 
 | Argument | Meaning |
 |----------|---------|
-| `text` | `title_add`: 1..256 characters, newlines make more lines |
-| `line1`, `line2?` | `lower_third_add`: 1..200 characters each, no line breaks |
+| `text` | `title_add`: 1..256 characters, newlines (`\r\n`, `\r` too) make more lines |
+| `line1`, `line2?` | `lower_third_add`: 1..200 characters each, no line breaks (`\n`, `\r`) |
 | `track`, `position` | A video track (track 0 when there is no timeline yet); absolute frame |
 | `duration` | 1..100000 frames |
 | `font?` | A font family name (1..100 characters); default the filter's own, Sans |
-| `size?` | `title_add`: 8..400 pixels, default the project height / 12 |
+| `size?` | `title_add`: 8..400 pixels, default the project height / 12, at most 400 |
 | `color?` | Text colour, `#rrggbb` or `#aarrggbb`, default `#ffffffff` |
 | `bg_color?` | `title_add`: a box behind the text, default `#00000000` (none) |
 | `bar_color?` | `lower_third_add`: the bar behind the text, default `#99000000` |
@@ -943,8 +943,9 @@ below it. Put it on an upper track (for example one made with `track_add`).
   track, and a position inside a transition is refused.
 - Refused (nothing changed): unknown arguments, an empty or blank text or line, more than 256
   characters once each `#` is doubled (UTF-16 units, so an emoji counts twice) or more than 511
-  bytes in UTF-8, a bad colour, out-of-range numbers, an unknown `mode`, `align` or `valign`,
-  an audio track, a locked track, a missing track.
+  bytes in UTF-8 (the error names `text`, or `line1` and `line2` together), a bad colour,
+  out-of-range numbers, an unknown `mode`, `align` or `valign`, a line break in `line1` or
+  `line2`, an audio track, a locked track, a missing track.
 - Returns `{track, clip: {start, duration}}`; edit the text later in Shotcut's Filters panel.
 
 ### Known limits (titles)
@@ -956,6 +957,8 @@ below it. Put it on an upper track (for example one made with `track_add`).
 - No animation, shadow, rich text or typewriter effect; use the Filters panel for those.
 - The font must be installed where the project is rendered; an unknown family falls back to the
   system's default font.
+- Without `font` the family is MLT's default, "Sans", whereas Open Other > Text uses Verdana on
+  Windows and Helvetica on macOS.
 
 ## Security
 
