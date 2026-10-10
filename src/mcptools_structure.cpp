@@ -673,12 +673,14 @@ QJsonObject trackSetTool(const QJsonObject &arguments)
 
     QJsonArray changed;
     if (!changes.empty()) {
-        MLT.pause();
         // Compositing only sets "disable" on the track's existing blend transition (like hide,
-        // which stays unguarded); it is guarded like the structural edits all the same.
+        // which stays unguarded); it is guarded like the structural edits all the same (the
+        // guard pauses too). The other properties only pause playback.
         std::unique_ptr<EditPreviewGuard> previewGuard;
         if (flags.contains("composite"))
             previewGuard = std::make_unique<EditPreviewGuard>(false);
+        else
+            MLT.pause();
         QUndoStack *stack = MAIN.undoStack();
         // Every call is its own macro, so two calls setting gain stay two undo steps
         // (ChangeTrackGainCommand merges with a directly preceding one).
