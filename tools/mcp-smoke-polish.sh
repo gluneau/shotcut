@@ -19,6 +19,7 @@ MEDIA="$("$HERE/mcp-fixtures.sh" "$TMP/media")" || { echo "ffmpeg could not crea
 
 echo "== filter tools"
 TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[].name]')"
+expect_eq "tools/list: 51 tools in all (through stage 3B)" 51 "$(echo "$TOOLS" | jq 'length')"
 expect_eq "tools/list has the five filter tools" true "$(echo "$TOOLS" | jq 'contains(["filter_list_available","filter_list_applied","filter_add","filter_set","filter_remove"])')"
 expect_eq "filter tools need a timeline" true "$(tool_is_error filter_list_applied '{"track":0,"clip":0}')"
 
@@ -410,7 +411,7 @@ expect_eq "volume 3: the fade filters are untouched" "$FADES" "$(fa 0 0 | jq -c 
 V2="$(vstate)"
 R="$(vol 0 0 3)"
 expect_eq "volume 3 again: changed false" false "$(echo "$R" | jq '.changed')"
-expect_eq "volume 3 again: no undo step (undo goes back to 6)" "Set clip volume to 3 dB" "$(undo_text)"
+expect_eq "volume 3 again: no undo step (the next undo is still the 3 dB step)" "Set clip volume to 3 dB" "$(undo_text)"
 expect_eq "volume 3: undo restores +6" "$V1" "$(vstate)"
 expect_eq "volume +6: undo text" "Set clip volume to 6 dB" "$(undo_text)"
 expect_eq "volume +6: undo restores the start" "$V0" "$(vstate)"
@@ -1002,16 +1003,23 @@ sstate() {
   for t in "$V1 0" "$V1 2" "$V2 2" "$V2 3" "$A1 0"; do s="$s|$(fa $t)"; done
   echo "$s"
 }
-# Prints true when two saved projects are byte-identical, else their first differences (stderr).
+# Prints true when two saved projects are identical apart from shotcut:caption lines, else their
+# first differences (stderr). Shotcut's undo of the speed change selects the clip, and the
+# Properties panel then writes the clip's computed caption (AvformatProducerWidget, through
+# Util::updateCaption) on its own timer: a save right after the undo may or may not have it.
+# Every other byte must match.
 same_file_exact() {
-  if cmp -s "$1" "$2"; then echo true; else diff "$1" "$2" | head -20 >&2; fi
+  if cmp -s <(grep -v 'name="shotcut:caption"' "$1") <(grep -v 'name="shotcut:caption"' "$2"); then echo true
+  else diff <(grep -v 'name="shotcut:caption"' "$1") <(grep -v 'name="shotcut:caption"' "$2") | head -20 >&2; fi
 }
-# As same_file_exact, but meta.media.* lines are left out: MLT caches probe results there when it opens or decodes a file,
-# so an untouched clip that Shotcut's undo rebuilds from XML can gain some (seen: a neighbour's
-# meta.media.top_field_first and meta.media.progressive) depending on when the preview reads it.
+# As same_file_exact, but meta.media.* lines are also left out: MLT caches probe results there
+# when it opens or decodes a file, so an untouched clip that Shotcut's undo rebuilds from XML can
+# gain some (seen: a neighbour's meta.media.top_field_first and meta.media.progressive) depending
+# on when the preview reads it.
 same_file() {
-  if cmp -s <(grep -v 'name="meta\.media\.' "$1") <(grep -v 'name="meta\.media\.' "$2"); then echo true
-  else diff <(grep -v 'name="meta\.media\.' "$1") <(grep -v 'name="meta\.media\.' "$2") | head -20 >&2; fi
+  local x='name="(meta\.media\.|shotcut:caption")'
+  if cmp -s <(grep -Ev "$x" "$1") <(grep -Ev "$x" "$2"); then echo true
+  else diff <(grep -Ev "$x" "$1") <(grep -Ev "$x" "$2") | head -20 >&2; fi
 }
 speed() { tool_json clip_set_speed "$(jq -nc --argjson t "$1" --argjson c "$2" --argjson s "$3" '{track:$t,clip:$c,speed:$s}')"; }
 S0="$(sstate)"
@@ -1029,7 +1037,7 @@ S1="$(sstate)"
 expect_eq "speed 2: one undo step" "Set clip speed: 2x" "$(undo_text)"
 expect_eq "speed 2: undo restores the timeline exactly" "$S0" "$(sstate)"
 tool_json save_project "{\"path\":\"$TMP/speed0u.mlt\"}" >/dev/null
-expect_eq "speed 2: the project saved after undo is byte-identical" true "$(same_file_exact "$TMP/speed0.mlt" "$TMP/speed0u.mlt")"
+expect_eq "speed 2: the project saved after undo is identical (but for the panel-written caption)" true "$(same_file_exact "$TMP/speed0.mlt" "$TMP/speed0u.mlt")"
 redo_text >/dev/null
 expect_eq "speed 2: redo applies it again" "$S1" "$(sstate)"
 expect_eq "speed 0.5 after 2: lengthening into the next clip is an error" true "$(ferr clip_set_speed "{\"track\":$V1,\"clip\":0,\"speed\":0.5}")"
@@ -1111,6 +1119,43 @@ DUR="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$TMP/speed.mp
 echo "INFO  speed 2 export duration $DUR s (source 10 s)"
 expect_eq "speed export: 10 s at speed 2 lasts 5 s (+-0.2)" true "$(awk -v d="$DUR" 'BEGIN {print (d != "" && d >= 4.8 && d <= 5.2) ? "true" : "false"}')"
 expect_eq "speed export: has an audio stream" audio "$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$TMP/speed.mp4" | head -1)"
+
+echo "== clip_set_speed and clip_detach_audio: preview guard"
+# Both run inside EditPreviewGuard: afterwards the preview must show the edited timeline (a fresh
+# frame), and a call made while playing ends paused. scenes.mp4 is red 0-74, green 75-149, blue
+# 150-224 (with audio).
+gf() { call_tool get_frame "{\"position\":$1}" | jq -r '.result.content[0].data' | base64 -d > "$TMP/gf.jpg"; }
+rgb() {
+  local hex r g b
+  hex="$(ffmpeg -v error -i "$TMP/gf.jpg" -vf "crop=100:100:110:70,scale=1:1" -f rawvideo -pix_fmt rgb24 - | xxd -p)"
+  r=$((16#${hex:0:2})); g=$((16#${hex:2:2})); b=$((16#${hex:4:2}))
+  if [ "$r" -gt 150 ] && [ "$g" -lt 90 ] && [ "$b" -lt 90 ]; then echo R
+  elif [ "$g" -gt 150 ] && [ "$r" -lt 90 ] && [ "$b" -lt 90 ]; then echo G
+  elif [ "$b" -gt 150 ] && [ "$r" -lt 90 ] && [ "$g" -lt 90 ]; then echo B
+  else echo "?($hex)"; fi
+}
+playing() { tool_json get_state '{}' | jq -r '.playing'; }
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+ins "$MEDIA/scenes.mp4" 0 9 0 0
+gf 100; expect_eq "guard fixture: frame 100 is green" G "$(rgb)"
+speed 0 0 2 >/dev/null
+gf 100; expect_eq "speed 2: frame 100 is now source frame 200, blue (fresh frame)" B "$(rgb)"
+undo_text >/dev/null
+gf 100; expect_eq "speed undone: frame 100 is green again" G "$(rgb)"
+tool_json play '{}' >/dev/null
+sleep 0.5
+speed 0 0 2 >/dev/null
+expect_eq "speed while playing: playback is paused afterwards" false "$(playing)"
+gf 100; expect_eq "speed while playing: frame 100 is blue" B "$(rgb)"
+undo_text >/dev/null
+tool_json play '{}' >/dev/null
+sleep 0.5
+expect_eq "detach while playing: succeeds" false "$(ferr clip_detach_audio '{"track":0,"clip":0}')"
+expect_eq "detach while playing: playback is paused afterwards" false "$(playing)"
+gf 100; expect_eq "detach: frame 100 is still green (fresh frame)" G "$(rgb)"
+undo_text >/dev/null
+gf 10; expect_eq "detach undone: frame 10 is red" R "$(rgb)"
 
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

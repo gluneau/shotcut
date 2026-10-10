@@ -1546,7 +1546,7 @@ for _ in $(seq 1 25); do
   tool_json track_remove '{"track":1,"force":true}' >/dev/null
   tool_json undo '{}' >/dev/null; tool_json redo '{}' >/dev/null; tool_json undo '{}' >/dev/null
 done
-expect_eq "three video tracks: 25 rounds of remove, undo, redo, undo restore it" "$TV3" "$(tl)"
+expect_eq "stress check: 25 rounds of removing the middle track (remove, undo, redo, undo) restore it" "$TV3" "$(tl)"
 tool_json undo '{}' >/dev/null
 expect_eq "three video tracks: track_add undone" "$TS0" "$(tl)"
 

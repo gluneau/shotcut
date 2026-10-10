@@ -541,6 +541,8 @@ void rollbackLastMacro(QUndoStack *stack)
     // the command if it is obsolete. So undo it by hand first, then mark it obsolete so that
     // stack->undo() only removes it (marking it first would leave its changes applied).
     auto *command = const_cast<QUndoCommand *>(stack->command(stack->index() - 1));
+    if (!command)
+        return; // nothing below the stack index (no macro was pushed)
     command->undo();
     command->setObsolete(true);
     stack->undo();

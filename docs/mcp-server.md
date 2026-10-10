@@ -373,19 +373,18 @@ around the first one.
 
 The MCP server's preview guard: every tool that changes the timeline's structure
 (`timeline_remove_ranges`, `timeline_insert_range`, `timeline_add_playlist`, `timeline_split`,
-`timeline_trim`, `timeline_move`, `timeline_remove`, `timeline_add_transition`,
-`timeline_fade`, `track_add`, `track_remove`, `track_set` with `composite`,
-`clip_detach_audio`, `clip_set_speed`) and the `undo`/`redo` tools pause
-playback, block the preview refresh and stop the preview consumer (which waits for a frame it
-is rendering) while they run, then restart it and refresh once. The stopped consumer does not
-stay stopped: Shotcut seeks the player after every duration change, and that seek starts a
-stopped consumer again DURING the guard (seen in 21 of 24 guarded calls of the smoke test's
-longest-track loop). So on a timeline the guard also connects the consumer to a black stand-in
-at the same position, and the seek renders that instead of the clips being edited. For large
-work, `timeline_remove_ranges` always and `undo`/`redo` of a step with more than 8 commands (a
-`timeline_remove_ranges` call of 3 or more cuts), the consumer is started on the stand-in at
-once, so the preview shows black while they run. The timeline is reconnected afterwards. Guards
-do not nest (only the outermost acts).
+`timeline_trim`, `timeline_move`, `timeline_remove`, `timeline_add_transition`, `timeline_fade`,
+`track_add`, `track_remove`, `track_set` with `composite`, `clip_detach_audio`, `clip_set_speed`)
+and the `undo`/`redo` tools pause playback, block the preview refresh and stop the preview consumer
+(which waits for a frame it is rendering) while they run, then restart it and refresh once. The
+stopped consumer does not stay stopped: Shotcut seeks the player after every duration change, and
+that seek starts a stopped consumer again DURING the guard (seen in 21 of 24 guarded calls of the
+smoke test's longest-track loop). So on a timeline the guard also connects the consumer to a black
+stand-in at the same position, and the seek renders that instead of the clips being edited. For
+large work, `timeline_remove_ranges` always and `undo`/`redo` of a step with more than 8 commands (a
+`timeline_remove_ranges` call of 3 or more cuts), the consumer is started on the stand-in at once,
+so the preview shows black while they run. The timeline is reconnected afterwards. Guards do not
+nest (only the outermost acts).
 
 Measured on a debug build (a 120-cut call plus undo, redo and undo per run): blocking the
 refresh alone left a corrupt snapshot in about 3-7% of runs wherever 30 or more runs were made,
@@ -758,7 +757,8 @@ panel or the selection.
 
 The smoke test checks a 250-frame clip at speed 2 (125 frames, in 0 out 124, filters kept,
 `warp_speed` 2 and `warp_pitch` 1 in the saved project), undo restoring `get_timeline` exactly and
-the saved project byte for byte, redo, a refused lengthening into the next clip (the error names
+the saved project apart from `shotcut:caption` lines (Shotcut's undo selects the clip, and the
+Properties panel writes its caption on its own timer, before or after the save), redo, a refused lengthening into the next clip (the error names
 the 275 free frames), speed 1 after 2 undone (the saved project equal apart from `meta.media.*`
 probe caches, which MLT can add to a clip Shotcut's undo rebuilds), a trimmed clip at speed 2
 and 0.5 (last on its track), `keep_pitch: false`, an audio clip, the refusals (among them a fade
