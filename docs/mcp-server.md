@@ -855,7 +855,7 @@ say a 16:9 or 4:3 clip in a 9:16 project, as ONE undo step ("Reframe clip (fill)
 |----------|---------|
 | `track`, `clip` | The timeline clip (a picture clip on a video track) |
 | `mode` | `fill` (crop to cover the frame) or `pad` (fit over a blurred copy) |
-| `focus_x?` | `fill` only, 0..1, default 0.5: the point across the picture put at the frame centre |
+| `focus_x?` | `fill` only, 0..1, default 0.5: the picture's point put at the frame centre |
 | `keyframes?` | `fill` only, instead of `focus_x`: 1..50 `{frame, focus_x}` to pan |
 | `interpolation?` | With `keyframes`: `linear` (default) or `smooth` |
 
@@ -878,14 +878,18 @@ say a 16:9 or 4:3 clip in a 9:16 project, as ONE undo step ("Reframe clip (fill)
 - The filter is marked `shotcut:reframe=1`. A later `clip_reframe` on the clip replaces the marked
   filter (switching between `fill` and `pad` removes the other one in the same undo step) instead
   of adding another. Plain `filter_set` tweaks keep the mark, so the next `clip_reframe` replaces
-  the tweaked filter too. Size, Position & Rotate or Blur: Pad filters the tool did not add (from
-  the Filters panel, `filter_add`, `clip_set_transform` or `clip_set_blur`) are left alone; the
-  reframe is appended after them, so it scales their result.
-- Refused (nothing changed): a clip whose display aspect is within 1% of the video mode's
-  (`|srcDAR / DAR - 1| < 0.01`: "The clip already matches the project format."), unknown
-  arguments (also inside a keyframe), `focus_x` with `keyframes`, `interpolation` without
-  `keyframes`, `focus_x`, `keyframes` or `interpolation` with `pad`, a keyframe after the clip's
-  last frame, a locked track, a blank or transition, an audio track or audio-only clip.
+  the tweaked filter too.
+- A Size, Position & Rotate or Blur: Pad filter the tool did not add (from the Filters panel,
+  `filter_add`, `clip_set_transform` or `clip_set_blur`) makes the call fail: that filter
+  already renders the frame at the project's shape, so a reframe after it would compute its
+  rect for the wrong picture (a 4:3 cover rect over a 9:16 frame zooms about 2.4x). Remove or
+  adjust it first.
+- Refused (nothing changed): a clip with such a filter of its own, a clip whose display aspect
+  is within 1% of the video mode's (`|srcDAR / DAR - 1| < 0.01`: "The clip already matches the
+  project format."), unknown arguments (also inside a keyframe), `focus_x` with `keyframes`,
+  `interpolation` without `keyframes`, `focus_x`, `keyframes` or `interpolation` with `pad`, a
+  keyframe after the clip's last frame, a locked track, a blank or transition, an audio track or
+  audio-only clip.
 - Returns `{filters: [{id, index}], track}` as the picture recipes do.
 
 ### Known limits (reframe)
@@ -894,6 +898,8 @@ say a 16:9 or 4:3 clip in a 9:16 project, as ONE undo step ("Reframe clip (fill)
   clip's source and call `clip_reframe` again.
 - `clip_set_transform` changes the clip's first Size, Position & Rotate filter, which can be the
   reframe: it is then put in Fit mode and stays marked.
+- The clip's shape comes from its media (`meta.media.*`, as Size, Position & Rotate's fit rect):
+  an aspect ratio override set in the Properties panel (`force_aspect_ratio`) is not used.
 
 ## Security
 
@@ -984,15 +990,16 @@ print SKIP. The `clip_set_speed` checks export a 10 s clip at speed 2 (`melt-7` 
 
 Stage 3C has its own script, also needing a FRESH throwaway Shotcut:
 
-    MCP_TOKEN=<token> [MCP_PORT=<port>] [MCP_APPDATA=<scratch dir>] tools/mcp-smoke-format.sh
+    MCP_TOKEN=<token> [MCP_PORT=<port>] MCP_APPDATA=<scratch dir> tools/mcp-smoke-format.sh
 
 It needs bash, curl, jq, ffmpeg and ffprobe. It checks the `project_set_format` refusals and every
 preset on the empty session, then sets 9:16, adds a 320x240 25 fps clip and builds a timeline,
 checks the format is kept, the tool is refused, and an export (`x264-medium`, `melt-7`) is
 1080x1920 at 30 fps. It then checks `clip_reframe`: argument refusals, the exact fill rects for
 `focus_x` 0, 0.25, 0.5 and 1 on the 4:3 clip, the keyframe strings and their saved form, one undo
-step per call, the `shotcut:reframe` mark (a `filter_set` tweak is replaced, a user filter is
-not), `pad`, the 1% match refusal, and a 1 s export whose four corners are red (no black bars;
+step per call, the `shotcut:reframe` mark (a `filter_set` tweak and a reframe restored by undo
+are replaced), the refusal on a clip with its own Size/Position or Blur: Pad, `pad`, the 1%
+match refusal, keyframes on a clip with a non-zero in point, and a 1 s export whose four corners are red (no black bars;
 the earlier export without the reframe has black corners). It ends by opening a timeline-only
 project and checking `project_set_format` is refused there. `MCP_APPDATA` must be set (it is a
 FAIL otherwise): the script checks that `shotcut.ini` has no saved `[player] profile`.

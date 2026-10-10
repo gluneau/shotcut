@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Format smoke test for the Shotcut MCP server (stage 3, part 3C): project_set_format, clip_reframe.
-# Usage: MCP_TOKEN=<token> [MCP_PORT=7468] [MCP_APPDATA=<scratch dir>] tools/mcp-smoke-format.sh
+# Usage: MCP_TOKEN=<token> [MCP_PORT=7468] MCP_APPDATA=<scratch dir> tools/mcp-smoke-format.sh
 # Run it against a FRESH, throwaway Shotcut (nothing loaded, no timeline); it aborts otherwise
 # unless MCP_SMOKE_FORCE=1. It creates its media with ffmpeg in a temporary folder and exports
-# one file. With MCP_APPDATA it also checks the saved Video Mode setting is left alone.
+# two files. MCP_APPDATA (the instance's --appdata folder) is required: the script checks the
+# saved Video Mode setting in its shotcut.ini is left alone (a FAIL when it is not set).
 # Needs: bash, curl, jq, ffmpeg, ffprobe.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -181,10 +182,32 @@ tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null
 expect_eq "filter_set keeps the shotcut:reframe mark" "-700 0 2560 1920 1" "$(reframe_prop transition.rect)"
 rf '{"track":0,"clip":0,"mode":"fill"}' >/dev/null
 expect_eq "clip_reframe replaced the tweaked reframe" '[{"id":"size_position","rect":{"h":1920,"w":2560,"x":-740,"y":0}}]' "$(fl | jq -cS .)"
+echo "== the mark survives remove and undo"
+tool_json filter_remove '{"track":0,"clip":0,"index":0}' >/dev/null
+expect_eq "the reframe is removed" '[]' "$(fl)"
+tool_json undo '{}' >/dev/null
+expect_eq "undo restores it" 1 "$(fl | jq 'length')"
+rf '{"track":0,"clip":0,"mode":"fill","focus_x":0.5}' >/dev/null
+expect_eq "clip_reframe after the undo: exactly one filter (the restored one was replaced)" '[{"id":"size_position","rect":{"h":1920,"w":2560,"x":-740,"y":0}}]' "$(fl | jq -cS .)"
+
+echo "== refused on a clip with its own Size/Position or Blur: Pad"
 tool_json filter_add '{"track":0,"clip":0,"filter":"size_position","params":{"rect":{"x":10,"y":20,"w":300,"h":400}}}' >/dev/null
-rf '{"track":0,"clip":0,"mode":"fill","focus_x":0}' >/dev/null
-expect_eq "a user's own size_position filter is left alone" '[{"id":"size_position","rect":{"h":1920,"w":2560,"x":0,"y":0}},{"id":"size_position","rect":{"h":400,"w":300,"x":10,"y":20}}]' "$(fl | jq -cS .)"
+FU="$(fl | jq -cS .)"
+expect_eq "the user's size_position is the second filter" '{"h":400,"w":300,"x":10,"y":20}' "$(echo "$FU" | jq -cS '.[1].rect')"
+expect_eq "fill with the user's size_position is an error" true "$(rerr '{"track":0,"clip":0,"mode":"fill","focus_x":0}')"
+expect_eq "pad with the user's size_position is an error" true "$(rerr '{"track":0,"clip":0,"mode":"pad"}')"
+expect_eq "the refusal names the fix" true "$(tool_text clip_reframe '{"track":0,"clip":0,"mode":"fill"}' | grep -q 'Remove or adjust the clip.s own Size, Position & Rotate / Blur: Pad first' && echo true || echo false)"
+expect_eq "the refusals changed nothing" "$FU" "$(fl | jq -cS .)"
 tool_json filter_remove '{"track":0,"clip":0,"index":1}' >/dev/null
+expect_eq "clip_set_blur pad (a user Blur: Pad)" false "$(tool_is_error clip_set_blur '{"track":0,"clip":0,"mode":"pad"}')"
+FU="$(fl | jq -cS .)"
+expect_eq "fill with the user's Blur: Pad is an error" true "$(rerr '{"track":0,"clip":0,"mode":"fill"}')"
+expect_eq "pad with the user's Blur: Pad is an error" true "$(rerr '{"track":0,"clip":0,"mode":"pad"}')"
+expect_eq "those refusals changed nothing" "$FU" "$(fl | jq -cS .)"
+tool_json undo '{}' >/dev/null
+expect_eq "undo removed the user's Blur: Pad" '["size_position"]' "$(fl | jq -c '[.[].id]')"
+rf '{"track":0,"clip":0,"mode":"fill","focus_x":0}' >/dev/null
+expect_eq "without the user's filters the reframe is set again" '[{"id":"size_position","rect":{"h":1920,"w":2560,"x":0,"y":0}}]' "$(fl | jq -cS .)"
 
 echo "== clip_reframe pad"
 rf '{"track":0,"clip":0,"mode":"pad"}' >/dev/null
@@ -215,6 +238,24 @@ expect_eq "2.2% off is reframed" '{"h":1920,"w":1104,"x":-12,"y":0}' "$(rf '{"tr
 tool_json undo '{}' >/dev/null
 tool_json undo '{}' >/dev/null
 expect_eq "the timeline has the one clip again" 1 "$(tool_json get_timeline '{}' | jq '[.tracks[0].clips[] | select(.kind=="clip")] | length')"
+
+echo "== keyframes on a clip with a non-zero in point"
+# reframe_attr NAME: the attribute NAME of the <filter> elements marked shotcut:reframe=1 in $SAVED.
+reframe_attr() {
+  awk -v want="$1" '/<filter /{f=1; mark=0; a=""; if (match($0, want "=\"[^\"]*\"")) a=substr($0, RSTART + length(want) + 2, RLENGTH - length(want) - 3)}
+    f && /name="shotcut:reframe">1</{mark=1} /<\/filter>/{ if (f && mark) print a; f=0 }' "$SAVED"
+}
+tool_json filter_remove '{"track":0,"clip":0,"index":0}' >/dev/null
+expect_eq "trim the clip's in edge by 15 frames (ripple)" false "$(tool_is_error timeline_trim '{"track":0,"clip":0,"edge":"in","delta":15,"ripple":true}')"
+expect_eq "the clip's in point is 15" 15 "$(tool_json get_timeline '{}' | jq '.tracks[0].clips[0].in')"
+rf '{"track":0,"clip":0,"mode":"fill","keyframes":[{"frame":0,"focus_x":0},{"frame":30,"focus_x":1}]}' >/dev/null
+expect_eq "keyframes stay clip-relative (0 is the clip's first frame)" '"0=0 0 2560 1920 1;30=-1480 0 2560 1920 1"' "$(fl | jq -c '.[0].rect')"
+tool_json save_project "{\"path\":\"$SAVED\"}" >/dev/null
+expect_eq "the reframe filter's in is the clip's in (15 frames = 0.5 s at 30 fps)" "00:00:00.500" "$(reframe_attr in)"
+# MLT positions a filter's keyframes from the filter's in, so frame 0 is the clip's first frame.
+expect_eq "the saved keyframes are clip-relative (from that in)" "0=0 0 2560 1920 1;30=-1480 0 2560 1920 1" "$(reframe_prop transition.rect)"
+rf '{"track":0,"clip":0,"mode":"fill"}' >/dev/null
+expect_eq "fill again for the export (one filter)" '[{"id":"size_position","rect":{"h":1920,"w":2560,"x":-740,"y":0}}]' "$(fl | jq -cS .)"
 
 echo "== export a 1-second 9:16 project with fill: no black bars"
 expect_eq "trim the clip to 30 frames" false "$(tool_is_error timeline_trim '{"track":0,"clip":0,"edge":"out","frame":30}')"

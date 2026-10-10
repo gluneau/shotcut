@@ -230,15 +230,33 @@ QJsonObject clipReframeTool(const QJsonObject &arguments)
         }
     };
 
-    // This tool's own filters: the first of this mode's kind is set, the others removed.
+    // This tool's own filters: the first of this mode's kind is set, the others removed. A
+    // Size/Position or Blur: Pad the tool did not add already renders the frame at the project's
+    // shape, so a reframe after it would compute its rect for the wrong picture: refused.
+    const FilterSpec *sizeSpec = findSpec("size_position");
+    const FilterSpec *padSpec = findSpec("blur_pad");
     int target = -1;
     QList<int> removals;
     const QList<int> indices = McpFilter::userFilterIndices(*info->producer);
     for (int i = 0; i < indices.size(); ++i) {
         std::unique_ptr<Mlt::Filter> filter(info->producer->filter(indices.at(i)));
-        if (!filter || !filter->get_int(kReframeProperty))
+        if (!filter)
             continue;
-        if (target < 0 && specOf(*filter) == spec)
+        const FilterSpec *kind = specOf(*filter);
+        if (!filter->get_int(kReframeProperty)) {
+            if (kind && (kind == sizeSpec || kind == padSpec))
+                return textResult(QStringLiteral("Clip %1 on track %2 has its own %3 filter "
+                                                 "(index %4). Remove or adjust the clip's own "
+                                                 "Size, Position & Rotate / Blur: Pad first; "
+                                                 "nothing was changed.")
+                                      .arg(clip)
+                                      .arg(track)
+                                      .arg(kind->label)
+                                      .arg(i),
+                                  true);
+            continue;
+        }
+        if (target < 0 && kind == spec)
             target = i;
         else
             removals.prepend(i);
@@ -333,9 +351,10 @@ QList<McpTool> McpTools::formatTools()
          "\"smooth\". mode \"pad\" fits the whole picture over a blurred, enlarged copy of "
          "itself (Shotcut's Blur: Pad, blur 4; no focus_x or keyframes). The filter is marked as "
          "the clip's reframe (shotcut:reframe=1, kept by filter_set): a later call replaces it "
-         "(also when switching between fill and pad) instead of adding another; Size, Position "
-         "and Blur: Pad filters the tool did not add are left alone, and the reframe goes after "
-         "them. Refused (nothing changed): a clip whose shape is within 1% of the project's "
+         "(also when switching between fill and pad) instead of adding another. Refused "
+         "(nothing changed): a clip that has a Size, Position & Rotate or Blur: Pad filter the "
+         "tool did not add (it already renders the frame at the project's shape: remove or "
+         "adjust it first), a clip whose shape is within 1% of the project's "
          "(\"The clip already matches the project format.\"), unknown arguments, focus_x with "
          "keyframes, focus_x, keyframes or interpolation with pad, a locked track, a blank or "
          "transition, an audio track or audio-only clip. Returns {filters:[{id, index}], track} "
