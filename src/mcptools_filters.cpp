@@ -1483,17 +1483,25 @@ QJsonObject clipSetTransformTool(const QJsonObject &arguments)
     if (geometry || ro == FrameArg::Ok) {
         if (!(size.spec = recipeSpec("size_position", error)))
             return textResult(error, true);
-        // Shotcut's Fit mode: the picture keeps its shape inside the rect.
-        size.extra = [](Mlt::Properties &p) {
-            p.set("transition.fill", 0);
-            p.set("transition.distort", 0);
-        };
     }
     MultitrackModel &model = *MAIN.timelineDock()->model();
     std::unique_ptr<Mlt::ClipInfo> info
         = checkClip(model, track, clip, size.spec ? *size.spec : *steps.first().spec, error);
     if (!info)
         return textResult(error, true);
+    bool hasSize = false;
+    for (int i : McpFilter::userFilterIndices(*info->producer)) {
+        std::unique_ptr<Mlt::Filter> filter(info->producer->filter(i));
+        hasSize = hasSize || (size.spec && filter && McpFilters::specOf(*filter) == size.spec);
+    }
+    // Shotcut's Fit mode (the picture keeps its shape inside the rect) for a new filter or a new
+    // rect; rotation alone leaves an existing filter's mode alone.
+    if (size.spec && (geometry || !hasSize)) {
+        size.extra = [](Mlt::Properties &p) {
+            p.set("transition.fill", 0);
+            p.set("transition.distort", 0);
+        };
+    }
     if (sc == FrameArg::Ok)
         summary << "scale=" + num(scale);
     if (xa == FrameArg::Ok)
@@ -1506,10 +1514,16 @@ QJsonObject clipSetTransformTool(const QJsonObject &arguments)
         // The fit rect scaled about its centre, then moved by (x, y).
         const QRectF fit = fitRect(info->producer, FilterParam::AffineFit);
         const double w = fit.width() * scale, h = fit.height() * scale;
-        size.params["rect"] = QJsonObject{{"x", fit.x() + (fit.width() - w) / 2 + x},
-                                          {"y", fit.y() + (fit.height() - h) / 2 + y},
-                                          {"w", w},
-                                          {"h", h}};
+        const double left = fit.x() + (fit.width() - w) / 2 + x;
+        const double top = fit.y() + (fit.height() - h) / 2 + y;
+        if (std::abs(left) > kMaxRectValue || std::abs(top) > kMaxRectValue)
+            return textResult(QStringLiteral("x and y move the picture too far: its top-left "
+                                             "corner would be at (%1, %2) pixels; it must stay "
+                                             "within %3 pixels of the frame's.")
+                                  .arg(num(left), num(top))
+                                  .arg(kMaxRectValue),
+                              true);
+        size.params["rect"] = QJsonObject{{"x", left}, {"y", top}, {"w", w}, {"h", h}};
     }
     if (ro == FrameArg::Ok)
         size.params["rotation"] = rotation;
@@ -1873,14 +1887,16 @@ QList<McpTool> McpTools::filterTools()
          "Size, move, rotate and crop a timeline clip's picture as ONE undo step (\"Set clip "
          "transform: ...\"). scale (0.05 to 8; 1 = the picture fitted into the frame), x and y "
          "(pixels of the video mode: the picture's centre offset from the frame centre, default "
-         "0) and rotation (-360 to 360 degrees) set Shotcut's Size, Position & Rotate filter in "
-         "Fit mode (the picture keeps its shape; transparent around it, so lower tracks or "
-         "black show): the rect is the fit rect scaled about its centre and moved by (x, y); "
-         "when any of scale, x, y is given the others take their defaults, and rotation alone "
-         "keeps the rect. crop {left, right, top, bottom} (integer pixels of the video mode, "
-         "given sides only) sets the Crop: Source filter. Give at least one. Each filter is "
-         "changed when the clip has one, else added (a new crop before a new size filter; "
-         "filters are appended after the clip's existing ones, as Shotcut does). "
+         "0) and rotation (-360 to 360 degrees) set Shotcut's Size, Position & Rotate filter: "
+         "the rect is the fit rect scaled about its centre and moved by (x, y); when any of "
+         "scale, x, y is given the others take their defaults and the filter is put in Fit mode "
+         "(the picture keeps its shape; transparent around it, so lower tracks or black show), "
+         "as is a new filter; rotation alone keeps an existing filter's rect and mode. crop "
+         "{left, right, top, bottom} (integer pixels of the video mode, given sides only) sets "
+         "the Crop: Source filter. Give at least one. Each filter is changed when the clip has "
+         "one, else added (a new crop before a new size filter; filters are appended after the "
+         "clip's existing ones, as Shotcut does, so a crop added after an existing Size/Position "
+         "filter crops the composited frame). "
          "Picture-in-picture on a 1920x1080 project: {scale: 0.3, x: 560, y: -300} on the upper "
          "track's clip. Refused (nothing changed): unknown arguments, a crop that removes the "
          "whole picture, a locked track, a blank or transition, an audio track or audio-only "

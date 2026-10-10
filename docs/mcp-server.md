@@ -650,19 +650,23 @@ crop left=... top=...`, naming the given values; give at least one):
 
 - `scale` (0.05..8, 1 = the picture fitted into the frame), `x`, `y` (pixels of the video mode:
   the picture's centre offset from the frame centre, default 0) and `rotation` (-360..360
-  degrees) set `size_position` (the `affine` filter) in Shotcut's Fit mode (`transition.fill` 0,
-  `transition.distort` 0: the picture keeps its shape inside the rect; the transparent
-  background shows lower tracks, or black on the bottom track).
+  degrees) set `size_position` (the `affine` filter). A new filter, and any call giving `scale`,
+  `x` or `y`, puts it in Shotcut's Fit mode (`transition.fill` 0, `transition.distort` 0: the
+  picture keeps its shape inside the rect; the transparent background shows lower tracks, or
+  black on the bottom track). `rotation` alone keeps an existing filter's mode (for example the
+  Fill mode of one added with `filter_add`).
 - The rect is the `fit` rect of the allowlist (the clip's picture fitted into the frame with the
   formula of `SizePositionUI.qml`) scaled about its centre and moved by `(x, y)`:
   `w = fit.w x scale`, `h = fit.h x scale`, `x = fit.x + (fit.w - w) / 2 + x`, `y = fit.y +
   (fit.h - h) / 2 + y`. When any of `scale`, `x`, `y` is given the missing ones take their
-  defaults; `rotation` alone keeps the current rect.
+  defaults; `rotation` alone keeps the current rect. A rect whose top-left corner would be more
+  than 100000 pixels from the frame's is refused, naming `x` and `y`.
 - `crop` `{left, right, top, bottom}` (integer pixels of the video mode, only the given sides
   change) sets `crop` (Crop: Source); left + right and top + bottom must leave a picture.
 - When both are new, the crop is added before the size filter. Filters are appended after the
   clip's existing ones (Shotcut does the same), so a crop added to a clip that already has a
-  size filter processes after it.
+  Size/Position filter comes after it and crops the composited frame (the sized picture and its
+  transparent surround), not the source picture.
 - Picture-in-picture on a 1920x1080 project: `{scale: 0.3, x: 560, y: -300}` on the upper
   track's clip (a 576x324 picture near the top-right corner).
 
@@ -767,9 +771,10 @@ It needs bash, curl, jq and ffmpeg. It builds a timeline from the generated fixt
 changes and removes filters with their undo and redo, saves and reopens a copy of the project,
 and checks the refusals. The audio recipe checks export a normalized clip (`x264-medium`, needs
 `melt-7` as for stage 2) and run several background `clip_normalize` jobs on generated 2400 s
-and 3600 s files (about 7 and 10 s each on a debug build); if a measurement ends before the script
-can change the clip, that check prints SKIP. The picture recipe checks export four 1 s clips and read pixels with
-ffmpeg and od; without frei0r the saturation and temperature checks print SKIP.
+and 3600 s files (about 7 and 10 s each on a debug build); if a measurement ends before the
+script can change the clip, that check prints SKIP. The picture recipe checks export four 1 s
+clips and read pixels with ffmpeg and od; without frei0r the saturation and temperature checks
+print SKIP.
 
 Manual checks (they need a modified project, which the tools cannot create):
 

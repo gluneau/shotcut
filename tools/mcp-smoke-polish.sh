@@ -808,6 +808,21 @@ for a in '{"track":0,"clip":0}' '{"track":0,"clip":0,"scale":0.04}' '{"track":0,
   expect_eq "transform: error for $a" true "$(ferr clip_set_transform "$a")"
 done
 expect_eq "transform: errors changed nothing" "$T0" "$(pstate)"
+A='{"track":0,"clip":0,"scale":0.05,"x":100000,"crop":{"left":10}}'
+expect_eq "transform: x moving the picture too far is an error (with a crop)" true "$(ferr clip_set_transform "$A")"
+expect_eq "transform: that error is about x and y, not a rect argument" true "$(tool_text clip_set_transform "$A" | grep -q 'x and y' && ! tool_text clip_set_transform "$A" | grep -q 'rect' && echo true)"
+expect_eq "transform: that error changed nothing (no crop left behind)" "$T0" "$(pstate)"
+# An existing Size/Position filter keeps its Fill mode when only rotation is given.
+add '{"track":0,"clip":0,"filter":"size_position"}' >/dev/null
+tool_json clip_set_transform '{"track":0,"clip":0,"rotation":30}' >/dev/null
+expect_eq "transform: rotation alone on an existing size filter sets rotation" 30 "$(fa 0 0 | jq '.filters[0].params.rotation')"
+tool_json save_project "{\"path\":\"$TMP/pic_fill.mlt\"}" >/dev/null
+expect_eq "transform: rotation alone keeps an existing Fill mode (transition.fill 1)" "1 0" "$(echo "$(grep -c '<property name="transition.fill">1</property>' "$TMP/pic_fill.mlt") $(grep -c '<property name="transition.fill">0</property>' "$TMP/pic_fill.mlt")")"
+tool_json clip_set_transform '{"track":0,"clip":0,"scale":0.5}' >/dev/null
+tool_json save_project "{\"path\":\"$TMP/pic_fit.mlt\"}" >/dev/null
+expect_eq "transform: scale on an existing size filter sets Fit mode (transition.fill 0)" "0 1" "$(echo "$(grep -c '<property name="transition.fill">1</property>' "$TMP/pic_fit.mlt") $(grep -c '<property name="transition.fill">0</property>' "$TMP/pic_fit.mlt")")"
+undo_text >/dev/null; undo_text >/dev/null; undo_text >/dev/null
+expect_eq "transform: three undos go back" "$T0" "$(pstate)"
 
 echo "== clip_set_blur"
 B0="$(pstate)"
@@ -832,6 +847,41 @@ for a in '{"track":0,"clip":0}' '{"track":0,"clip":0,"mode":"gaussian"}' '{"trac
   expect_eq "blur: error for $a" true "$(ferr clip_set_blur "$a")"
 done
 expect_eq "blur: errors changed nothing" "$B0" "$(pstate)"
+
+echo "== picture recipes: keyframes and rollback after a successful step"
+# clip 0 is scenes.mp4 with a Brightness whose level has keyframes and a Size/Position whose rect
+# has keyframes.
+cat > "$TMP/kf.mlt" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="main_bin">
+  <profile description="320x240 25 fps" width="320" height="240" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="4" display_aspect_den="3" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <playlist id="main_bin"><property name="xml_retain">1</property></playlist>
+  <producer id="black" in="0" out="24"><property name="length">25</property><property name="resource">0</property><property name="mlt_service">color</property><property name="set.test_audio">0</property></producer>
+  <playlist id="background"><entry producer="black" in="0" out="24"/></playlist>
+  <chain id="chain0" out="224"><property name="length">225</property><property name="resource">$MEDIA/scenes.mp4</property><property name="mlt_service">avformat-novalidate</property>
+    <filter id="b0"><property name="mlt_service">brightness</property><property name="shotcut:filter">brightness</property><property name="level">0=1;24=1.5</property></filter>
+    <filter id="a0"><property name="mlt_service">affine</property><property name="shotcut:filter">affineSizePosition</property><property name="transition.rect">0=0 0 320 240 1;24=80 60 160 120 1</property><property name="transition.fill">1</property></filter>
+  </chain>
+  <playlist id="playlist0"><property name="shotcut:video">1</property><property name="shotcut:name">V1</property><entry producer="chain0" in="0" out="24"/></playlist>
+  <tractor id="tractor0" in="0" out="24">
+    <property name="shotcut">1</property>
+    <track producer="background"/>
+    <track producer="playlist0"/>
+    <transition id="transition0"><property name="a_track">0</property><property name="b_track">1</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+  </tractor>
+</mlt>
+XML
+open_fixture_project "$TMP/kf.mlt" >/dev/null
+sleep 1
+kstate() { echo "$(tool_json get_timeline '{}' | jq -c 'del(.position)')|$(fa 0 0)"; }
+K0="$(kstate)"
+expect_eq "keyframes: clip_set_color on a keyframed brightness is an error" true "$(ferr clip_set_color '{"track":0,"clip":0,"brightness":0.2}')"
+expect_eq "keyframes: the message says keyframes" true "$(tool_text clip_set_color '{"track":0,"clip":0,"brightness":0.2}' | grep -q 'keyframes' && echo true)"
+expect_eq "keyframes: nothing changed" "$K0" "$(kstate)"
+A='{"track":0,"clip":0,"scale":0.5,"crop":{"left":10}}'
+expect_eq "rollback: crop (added) then scale on a keyframed rect is an error" true "$(ferr clip_set_transform "$A")"
+expect_eq "rollback: the crop added by the first step is gone" "$K0" "$(kstate)"
+expect_eq "rollback: nothing is left to undo" true "$(ferr undo '{}')"
 
 echo "== picture recipes: exported frames"
 open_fixture_project "$EMPTY" >/dev/null
