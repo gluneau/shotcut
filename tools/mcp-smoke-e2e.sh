@@ -205,7 +205,7 @@ interview() { # SOURCE TRANSCRIPT_MODE (supplied|whisper)
   step "audio_levels on the export" audio_levels "$(jq -nc --arg p "$OUT" '{path:$p,wait_ms:20000}')"
   EL="$(job_result "$R")"
   echo "INFO  export loudness $(echo "$EL" | jq '.integrated_lufs') LUFS"
-  expect_eq "export loudness within 1.5 LU of -16" true "$(echo "$EL" | jq '(.integrated_lufs + 16) | fabs <= 1.5')"
+  expect_eq "export loudness within 1 LU of -16" true "$(echo "$EL" | jq '(.integrated_lufs + 16) | fabs <= 1')"
 }
 
 short() {
@@ -250,7 +250,7 @@ short() {
   expect_eq "captions: white text in the middle band at 2.5 s" true "$([ "$(white_px "$OUT" 2.5 0 760 1080 400)" -gt 1000 ] && echo true || echo false)"
   EL="$(job_result "$(tool_json audio_levels "$(jq -nc --arg p "$OUT" '{path:$p,wait_ms:20000}')")")"
   echo "INFO  export loudness $(echo "$EL" | jq '.integrated_lufs') LUFS"
-  expect_eq "export loudness within 1.5 LU of -14" true "$(echo "$EL" | jq '(.integrated_lufs + 14) | fabs <= 1.5')"
+  expect_eq "export loudness within 1 LU of -14" true "$(echo "$EL" | jq '(.integrated_lufs + 14) | fabs <= 1')"
 }
 
 tutorial() {

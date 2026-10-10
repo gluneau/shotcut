@@ -195,7 +195,8 @@ expect_eq "tools/list has audio_levels" true "$(rpc '{"jsonrpc":"2.0","id":3,"me
 V="$(tool_json audio_levels "$(jq -c '. + {wait_ms:20000}' <<<"$SIL")")"
 expect_eq "audio_levels wait_ms: result in the same call" 60 "$(echo "$V" | jq -r '.buckets | length')"
 expect_eq "audio_levels: path" "$MEDIA/silence.wav" "$(echo "$V" | jq -r '.path')"
-expect_eq "audio_levels: integrated_lufs finite in -45..-15" true "$(echo "$V" | jq -r '.integrated_lufs > -45 and .integrated_lufs < -15')"
+# The fixture's tone (-20 dBFS peak sine with silent gaps) measures -24.2 LUFS (ffmpeg ebur128).
+expect_eq "audio_levels: integrated_lufs within 1 LU of the fixture's -24.2" true "$(echo "$V" | jq -r '(.integrated_lufs + 24.2) | fabs <= 1')"
 expect_eq "audio_levels: loudness_range_lu is a number" number "$(echo "$V" | jq -r '.loudness_range_lu | type')"
 expect_eq "audio_levels: true_peak_dbtp within 1.5 of -20" true "$(echo "$V" | jq -r '(.true_peak_dbtp + 20) | fabs < 1.5')"
 expect_eq "audio_levels: first bucket starts at in_s" true "$(echo "$V" | jq -r '.buckets[0].start_s < 0.001')"

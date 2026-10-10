@@ -1213,7 +1213,8 @@ finished file the way the guides end:
 - `analyze_media` on the output: its duration, picture size, frame rate and streams (for
   example 1080x1920 for a vertical short, an audio stream after a music track).
 - `audio_levels` on the output: its integrated loudness against the target (the interview
-  guide's -16 LUFS within 1.5 LU; -14 LUFS for a short).
+  guide's -16 LUFS within 1.5 LU, its delivery tolerance; -14 LUFS for a short). The smoke
+  scripts check 1 LU: the exports measured -16.0 and -13.7 LUFS.
 - `get_frame` and `get_overview` look at the timeline before rendering; `get_export_status`
   reports the render itself.
 
@@ -1373,11 +1374,11 @@ file:
 - `interview`: `tone_av.mp4` with a supplied JFK-style transcript, its sound detached to an
   audio track, normalized to -16 LUFS, both pauses cut from both tracks in one
   `timeline_remove_ranges` call, captions on every kept clip; the export lasts the source minus
-  the cut frames (within 0.3 s), measures -16 LUFS within 1.5 LU and its SRTs hold the 22 words.
+  the cut frames (within 0.3 s), measures -16 LUFS within 1 LU and its SRTs hold the 22 words.
 - `short`: 9:16, `scenes.mp4` from the playlist reframed with `fill`, -14 LUFS, dead air cut,
   4-word captions in the middle, a hook title on a new top track; the export is 1080x1920 with
   no black bars, white hook text in the top band only while the hook lasts, white captions in
-  the middle band, the expected duration and -14 LUFS within 1.5 LU.
+  the middle band, the expected duration and -14 LUFS within 1 LU.
 - `tutorial`: 16:9, the screen (`scenes.mp4`) and the face (`tone_av.mp4`, mode overwrite) on two
   tracks, the face at scale 0.25 in the top-right corner (the guide's note for a lower third),
   the pauses cut from both tracks, two lower thirds and two markers; a frame of the export shows

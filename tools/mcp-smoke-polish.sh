@@ -493,7 +493,7 @@ done
 expect_eq "export normalize: the export succeeded" succeeded "$EST"
 EL="$(tool_json audio_levels "$(jq -nc --arg p "$OUTN" '{path:$p,wait_ms:20000}')")"
 echo "INFO  normalize: measured $(echo "$N" | jq .measured_lufs) LUFS, gain $(echo "$N" | jq .applied_gain_db) dB, export $(echo "$EL" | jq .integrated_lufs) LUFS"
-expect_eq "export normalize: the export's integrated loudness is within 1.5 LU of -16" true "$(echo "$EL" | jq '(.integrated_lufs + 16) | fabs <= 1.5')"
+expect_eq "export normalize: the export's integrated loudness is within 1 LU of -16" true "$(echo "$EL" | jq '(.integrated_lufs + 16) | fabs <= 1')"
 
 echo "== clip_normalize: edits while measuring"
 # 8 kHz 8-bit audio measures at about 350 s of audio per second (job cap test): 2400 s ~ 7 s.
