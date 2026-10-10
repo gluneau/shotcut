@@ -18,18 +18,25 @@
 
 #include <QJsonObject>
 #include <QList>
+#include <QRectF>
 #include <QString>
+#include <QStringList>
 
 #include <functional>
+#include <memory>
 
 namespace Mlt {
+class ClipInfo;
 class Filter;
 class Producer;
 class Properties;
 } // namespace Mlt
+class MultitrackModel;
+class QUndoCommand;
 
 // The filter allowlist of the MCP filter tools and helpers for the recipe, title, caption and
-// reframe tools built on it (implemented in mcptools_filters.cpp).
+// reframe tools built on it (implemented in mcptools_filters.cpp; the audio and picture recipes
+// live in mcptools_audio.cpp and mcptools_picture.cpp).
 namespace McpFilters {
 
 struct FilterParam
@@ -108,6 +115,78 @@ bool addOutputFilter(const QString &service,
                      QString &error,
                      bool joinMacro = false,
                      int *userIndex = nullptr);
+
+// ---- Helpers shared by the filter, audio and picture tools (mcptools_filters.cpp)
+
+// Largest rect coordinate (pixels) a tool accepts.
+constexpr double kMaxRectValue = 100000;
+
+// A number as the tools print it (up to 12 significant digits).
+QString num(double v);
+
+// The fit rectangle of Shotcut's Size/Position (SizePositionUI.qml:316-328: the video mode's SAR,
+// size not rounded) and Blur: Pad (pillar_echo/ui.qml:29-37: no SAR, size rounded) UIs: the
+// clip's picture scaled into the video mode and centered.
+QRectF fitRect(Mlt::Producer *clip, FilterParam::Fit fit);
+
+// Whether the filter's property holds keyframes (MLT's "frame=value" syntax).
+bool isKeyframed(Mlt::Filter &filter, const QString &property);
+
+// filter_add's clip rules: an unlocked track, a clip, and audio/picture that fit the clip.
+std::unique_ptr<Mlt::ClipInfo> checkClip(
+    MultitrackModel &model, int track, int clip, const FilterSpec &spec, QString &error);
+
+// Pushes command as one undo step named text (or into the caller's open macro), after pausing.
+// ok tells whether the command did its work; a failed step is rolled back.
+bool pushCommand(QUndoCommand *command,
+                 const QString &text,
+                 bool joinMacro,
+                 const std::function<bool()> &ok,
+                 QString &error);
+
+// Adds a new filter of spec (defaults for the params not given, then extra) to the clip described
+// by info at (track, clip), through pushCommand; userIndex receives its filter_list_applied index.
+bool addFilter(MultitrackModel &model,
+               int track,
+               int clip,
+               Mlt::ClipInfo &info,
+               const FilterSpec &spec,
+               const QJsonObject &params,
+               QString text,
+               bool joinMacro,
+               QString &error,
+               int *userIndex,
+               const std::function<void(Mlt::Properties &)> &extra = {});
+
+// Sets params (then extra) on the clip's existing filter at userIndex, through pushCommand.
+bool setFilter(MultitrackModel &model,
+               int track,
+               int clip,
+               int userIndex,
+               Mlt::Filter &filter,
+               const FilterSpec &spec,
+               const QJsonObject &params,
+               QString text,
+               bool joinMacro,
+               QString &error,
+               const std::function<void(Mlt::Properties &)> &extra = {});
+
+// Refuses argument names outside allowed (a misspelt value must not be ignored silently).
+bool checkKeys(const QJsonObject &arguments, const QStringList &allowed, QString &error);
+
+// The allowlist row id when it can be used, else null with the reason.
+const FilterSpec *recipeSpec(const QString &id, QString &error);
+
+struct RecipeStep
+{
+    const FilterSpec *spec = nullptr;
+    QJsonObject params;
+    std::function<void(Mlt::Properties &)> extra;
+};
+
+// Applies every step to the clip (set on the first filter of its kind, else added) as ONE undo
+// step named text; any failure rolls the whole call back. Returns {filters:[{id, index}], track}.
+QJsonObject runRecipe(int track, int clip, const QList<RecipeStep> &steps, const QString &text);
 
 } // namespace McpFilters
 

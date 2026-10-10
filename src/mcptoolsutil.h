@@ -181,6 +181,10 @@ struct SourceRef
     bool speedChanged = false;
 };
 
+// Reads the non-negative integers track and clip of a timeline-clip tool; false with an error
+// when they are not, or when there is no timeline.
+bool readTarget(const QJsonObject &arguments, int &track, int &clip, QString &error);
+
 // Reads exactly one of path or (track, clip) from arguments.
 bool resolveSource(const QJsonObject &arguments, SourceRef &ref, QString &error);
 

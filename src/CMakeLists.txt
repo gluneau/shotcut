@@ -96,10 +96,12 @@ add_executable(shotcut WIN32 MACOSX_BUNDLE
   mcpserver.cpp mcpserver.h
   mcptools.cpp mcptools.h
   mcptools_analysis.cpp
+  mcptools_audio.cpp
   mcptools_export.cpp
   mcptools_filters.cpp
   mcptools_frame.cpp
   mcptools_overview.cpp
+  mcptools_picture.cpp
   mcptools_structure.cpp
   mcptools_timeline.cpp
   mcptools_transcribe.cpp

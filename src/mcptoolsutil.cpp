@@ -566,6 +566,20 @@ QString clipSourcePath(Mlt::ClipInfo &info)
     return path;
 }
 
+bool readTarget(const QJsonObject &arguments, int &track, int &clip, QString &error)
+{
+    if (readFrame(arguments, "track", track) != FrameArg::Ok
+        || readFrame(arguments, "clip", clip) != FrameArg::Ok) {
+        error = QStringLiteral("track and clip must be non-negative integers.");
+        return false;
+    }
+    if (!MAIN.isMultitrackValid()) {
+        error = QStringLiteral("There is no timeline.");
+        return false;
+    }
+    return true;
+}
+
 bool resolveSource(const QJsonObject &arguments, SourceRef &ref, QString &error)
 {
     const QJsonValue pathValue = arguments.value("path");

@@ -68,6 +68,8 @@ QList<McpTool> transcribeTools();
 QList<McpTool> overviewTools();
 QList<McpTool> structureTools();
 QList<McpTool> filterTools();
+QList<McpTool> audioTools();
+QList<McpTool> pictureTools();
 
 } // namespace McpTools
 

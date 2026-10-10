@@ -426,6 +426,8 @@ QList<McpTool> McpTools::all()
     tools += overviewTools();
     tools += structureTools();
     tools += filterTools();
+    tools += audioTools();
+    tools += pictureTools();
     return tools;
 }
 
