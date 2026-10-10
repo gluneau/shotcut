@@ -1695,8 +1695,10 @@ QJsonObject clipSetSpeedTool(const QJsonObject &arguments)
     if (!np->is_valid())
         return textResult("Shotcut cannot open " + filename + " to change its speed.", true);
     Util::passProducerProperties(&producer, np.get());
-    // After passProducerProperties, which copies the old clip's warp_pitch.
-    np->set("warp_pitch", keepPitch ? 1 : 0);
+    // After passProducerProperties, which copies the old clip's warp_pitch (kept at speed 1,
+    // where the plain chain does not use it, as in Shotcut).
+    if (speed != 1.0)
+        np->set("warp_pitch", keepPitch ? 1 : 0);
     Util::updateCaption(np.get());
     Mlt::Controller::copyFilters(producer, *np, false, Mlt::Controller::FILTER_INDEX_ALL);
     const double ratio = oldSpeed / speed;
@@ -2113,17 +2115,17 @@ QList<McpTool> McpTools::filterTools()
         {"clip_set_speed",
          "Change a timeline clip's playback speed as ONE undo step (\"Set clip speed: <speed>x\"), "
          "as Shotcut's Properties panel does (MLT's timewarp producer): speed 0.1 to 10 (1 = "
-         "normal; no reverse), keep_pitch (default true: the sound keeps its pitch). The clip "
-         "keeps its start and its filters; its length, in and out scale by old speed / new speed "
-         "(2 halves a clip, 0.5 doubles it). Nothing else moves, whatever Shotcut's ripple "
-         "settings: a shorter clip leaves a gap after it, and a longer clip must fit the gap "
-         "before the next clip on its track (the error names the free frames; make room first). "
-         "Refused (nothing changed): unknown arguments, a locked track, a blank or transition, a "
-         "clip next to a transition, a still image, generator, project or other non-file clip, a "
-         "proxy clip (turn proxy editing off first), a clip playing in reverse, a clip with fades "
-         "or keyframed filters (\"Remove fades and keyframes first\": Shotcut does not move "
-         "keyframes either). Returns {track (as get_timeline), clip, speed, duration (the clip's "
-         "new frames)}.",
+         "normal; no reverse), keep_pitch (default true: the sound keeps its pitch; ignored at "
+         "speed 1). The clip keeps its start and its filters; its length, in and out scale by "
+         "old speed / new speed (2 halves a clip, 0.5 doubles it). Nothing else moves, whatever "
+         "Shotcut's ripple settings: a shorter clip leaves a gap after it, and a longer clip must "
+         "fit the gap before the next clip on its track (the error names the free frames; make "
+         "room first). Refused (nothing changed): unknown arguments, a locked track, a blank or "
+         "transition, a clip next to a transition, a still image, generator, project or other "
+         "non-file clip, a proxy clip (turn proxy editing off first), a clip playing in reverse, "
+         "a clip with fades or keyframed filters (\"Remove fades and keyframes first\": Shotcut "
+         "does not move keyframes either). Returns {track (as get_timeline), clip, speed, "
+         "duration (the clip's new frames)}.",
          schema(R"({"type":"object","properties":{
              "track":{"type":"integer","minimum":0},
              "clip":{"type":"integer","minimum":0},

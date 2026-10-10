@@ -700,7 +700,7 @@ panel or the selection.
 |----------|---------|
 | `track`, `clip` | The clip (a video or audio file clip) |
 | `speed` | 0.1..10, 1 = normal; no reverse |
-| `keep_pitch?` | Default true: the sound keeps its pitch (`warp_pitch` 1); false sets 0 |
+| `keep_pitch?` | Default true: the sound keeps its pitch (`warp_pitch` 1); false sets 0. Ignored at speed 1 (the clip keeps its old `warp_pitch`, as in Shotcut) |
 
 - The clip becomes MLT's `timewarp` producer of the same file (`timewarp:<speed>:<file>`, the
   number formatted by MLT; speed 1 goes back to a plain `avformat` chain), with the clip's
@@ -722,18 +722,18 @@ panel or the selection.
 - Refused, nothing changed: unknown arguments, a missing or out-of-range `speed`, a non-boolean
   `keep_pitch`, a locked track, a blank or transition, a clip next to a transition, a still
   image, generator, `.mlt` or other non-file clip, a proxy clip (turn proxy editing off first),
-  a clip already playing in reverse (negative `warp_speed`),
-  and a clip with fades (`shotcut:animIn`/`shotcut:animOut`) or any user filter value in MLT's
-  keyframe syntax ("Remove fades and keyframes first": Shotcut does not move keyframes when the
-  speed changes either).
+  a clip already playing in reverse (negative `warp_speed`), and a clip with fades
+  (`shotcut:animIn`/`shotcut:animOut`) or any user filter value in MLT's keyframe syntax ("Remove
+  fades and keyframes first": Shotcut does not move keyframes when the speed changes either).
 
 The smoke test checks a 250-frame clip at speed 2 (125 frames, in 0 out 124, filters kept,
 `warp_speed` 2 and `warp_pitch` 1 in the saved project), undo restoring `get_timeline` exactly and
-a saved copy of the project (apart from `meta.media.*` probe caches, which MLT can add to a clip
-Shotcut's undo rebuilds), redo, a refused lengthening into the next clip (the
-error names the 275 free frames), a trimmed clip at speed 2 and 0.5 (last on its track),
-`keep_pitch: false`, an audio clip, the refusals, and an export of a 10 s clip at speed 2 (5 s
-within 0.2 s, with an audio stream).
+the saved project byte for byte, redo, a refused lengthening into the next clip (the error names
+the 275 free frames), speed 1 after 2 undone (the saved project equal apart from `meta.media.*`
+probe caches, which MLT can add to a clip Shotcut's undo rebuilds), a trimmed clip at speed 2
+and 0.5 (last on its track), `keep_pitch: false`, an audio clip, the refusals (among them a fade
+set by `shotcut:animIn` alone and a `.mlt` project clip), and an export of a 10 s clip at speed
+2 (5 s within 0.2 s, with an audio stream).
 
 ### Known limits (clip speed)
 

@@ -935,8 +935,16 @@ ffmpeg -loglevel error -y -f lavfi -i "color=c=blue:size=320x240" -frames:v 1 "$
 # V1: 0 tone_av.mp4 0-249 with a gain of 6 dB [0,250), 1 blank [250,400), 2 tone_av.mp4 50-99
 # [400,450) (last on its track). V2: 0 a still image [0,50), 1 a colour generator [50,100),
 # 2 tone_av.mp4 with a fade-in [100,150), 3 tone_av.mp4 with a keyframed gain [150,200),
-# 4 tone_av.mp4 [200,250). A1: 0 audioonly.wav 0-49. (A proxy clip cannot be faked here: Shotcut
+# 4 tone_av.mp4 [200,250), 5 tone_av.mp4 with a fade-in whose level is plain (shotcut:animIn only)
+# [250,300), 6 a .mlt project clip (xml producer) [300,350). A1: 0 audioonly.wav 0-49. (A proxy clip cannot be faked here: Shotcut
 # drops shotcut:proxy when it opens a project with proxy editing off.)
+cat > "$TMP/speedsub.mlt" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="sub">
+  <profile description="320x240 25 fps" width="320" height="240" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="4" display_aspect_den="3" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <producer id="sub" in="0" out="49"><property name="length">50</property><property name="resource">#00ff00</property><property name="mlt_service">color</property></producer>
+</mlt>
+XML
 cat > "$TMP/speed.mlt" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <mlt LC_NUMERIC="C" producer="main_bin">
@@ -957,9 +965,13 @@ cat > "$TMP/speed.mlt" <<XML
     <filter id="g3"><property name="mlt_service">volume</property><property name="shotcut:filter">audioGain</property><property name="level">0=0;49=6</property></filter>
   </chain>
   <chain id="chain4" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
+  <chain id="chain6" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property>
+    <filter id="f6"><property name="mlt_service">brightness</property><property name="shotcut:filter">fadeInBrightness</property><property name="alpha">1</property><property name="level">1</property><property name="shotcut:animIn">00:00:01.000</property></filter>
+  </chain>
+  <producer id="xmlp" in="0" out="49"><property name="length">50</property><property name="resource">$TMP/speedsub.mlt</property><property name="mlt_service">xml</property></producer>
   <chain id="chain5" out="249"><property name="length">250</property><property name="resource">$MEDIA/audioonly.wav</property><property name="mlt_service">avformat-novalidate</property></chain>
   <playlist id="playlist0"><property name="shotcut:video">1</property><property name="shotcut:name">V1</property><entry producer="chain0" in="0" out="249"/><blank length="150"/><entry producer="chain1" in="50" out="99"/></playlist>
-  <playlist id="playlist1"><property name="shotcut:video">1</property><property name="shotcut:name">V2</property><entry producer="img" in="0" out="49"/><entry producer="col" in="0" out="49"/><entry producer="chain2" in="0" out="49"/><entry producer="chain3" in="0" out="49"/><entry producer="chain4" in="0" out="49"/></playlist>
+  <playlist id="playlist1"><property name="shotcut:video">1</property><property name="shotcut:name">V2</property><entry producer="img" in="0" out="49"/><entry producer="col" in="0" out="49"/><entry producer="chain2" in="0" out="49"/><entry producer="chain3" in="0" out="49"/><entry producer="chain4" in="0" out="49"/><entry producer="chain6" in="0" out="49"/><entry producer="xmlp" in="0" out="49"/></playlist>
   <playlist id="playlist2"><property name="shotcut:audio">1</property><property name="shotcut:name">A1</property><entry producer="chain5" in="0" out="49"/></playlist>
   <tractor id="tractor0" in="0" out="449">
     <property name="shotcut">1</property>
@@ -983,15 +995,18 @@ A1="$(echo "$TL" | jq '.tracks[] | select(.name=="A1") | .index')"
 items() { tool_json get_timeline '{}' | jq -c "[.tracks[$1].clips[] | [.kind,.start,.duration]]"; }
 inout() { tool_json get_timeline '{}' | jq -c ".tracks[$1].clips[$2] | [.in,.out]"; }
 expect_eq "speed fixture: V1 items" '[["clip",0,250],["blank",250,150],["clip",400,50]]' "$(items "$V1")"
-expect_eq "speed fixture: V2 items" '[["clip",0,50],["clip",50,50],["clip",100,50],["clip",150,50],["clip",200,50]]' "$(items "$V2")"
+expect_eq "speed fixture: V2 items" '[["clip",0,50],["clip",50,50],["clip",100,50],["clip",150,50],["clip",200,50],["clip",250,50],["clip",300,50]]' "$(items "$V2")"
 sstate() {
   local t c s
   s="$(tool_json get_timeline '{}' | jq -c 'del(.position)')"
   for t in "$V1 0" "$V1 2" "$V2 2" "$V2 3" "$A1 0"; do s="$s|$(fa $t)"; done
   echo "$s"
 }
-# Prints true when two saved projects are identical, else their first differences (on stderr).
-# meta.media.* lines are left out: MLT caches probe results there when it opens or decodes a file,
+# Prints true when two saved projects are byte-identical, else their first differences (stderr).
+same_file_exact() {
+  if cmp -s "$1" "$2"; then echo true; else diff "$1" "$2" | head -20 >&2; fi
+}
+# As same_file_exact, but meta.media.* lines are left out: MLT caches probe results there when it opens or decodes a file,
 # so an untouched clip that Shotcut's undo rebuilds from XML can gain some (seen: a neighbour's
 # meta.media.top_field_first and meta.media.progressive) depending on when the preview reads it.
 same_file() {
@@ -1014,7 +1029,7 @@ S1="$(sstate)"
 expect_eq "speed 2: one undo step" "Set clip speed: 2x" "$(undo_text)"
 expect_eq "speed 2: undo restores the timeline exactly" "$S0" "$(sstate)"
 tool_json save_project "{\"path\":\"$TMP/speed0u.mlt\"}" >/dev/null
-expect_eq "speed 2: the project saved after undo equals the one saved before" true "$(same_file "$TMP/speed0.mlt" "$TMP/speed0u.mlt")"
+expect_eq "speed 2: the project saved after undo is byte-identical" true "$(same_file_exact "$TMP/speed0.mlt" "$TMP/speed0u.mlt")"
 redo_text >/dev/null
 expect_eq "speed 2: redo applies it again" "$S1" "$(sstate)"
 expect_eq "speed 0.5 after 2: lengthening into the next clip is an error" true "$(ferr clip_set_speed "{\"track\":$V1,\"clip\":0,\"speed\":0.5}")"
@@ -1062,6 +1077,8 @@ for a in "{\"track\":$V1,\"clip\":1,\"speed\":2}" "{\"track\":$V2,\"clip\":0,\"s
 done
 expect_eq "speed: a fade is refused with 'Remove fades and keyframes first'" true "$(tool_text clip_set_speed "{\"track\":$V2,\"clip\":2,\"speed\":2}" | grep -q 'Remove fades and keyframes first' && echo true)"
 expect_eq "speed: keyframes are refused with 'Remove fades and keyframes first'" true "$(tool_text clip_set_speed "{\"track\":$V2,\"clip\":3,\"speed\":2}" | grep -q 'Remove fades and keyframes first' && echo true)"
+expect_eq "speed: a fade with a plain level (shotcut:animIn only) is refused" true "$(tool_text clip_set_speed "{\"track\":$V2,\"clip\":5,\"speed\":2}" | grep -q 'Remove fades and keyframes first' && echo true)"
+expect_eq "speed: a .mlt project clip is refused (media file clips only)" true "$(tool_text clip_set_speed "{\"track\":$V2,\"clip\":6,\"speed\":2}" | grep -q 'media file clips only' && echo true)"
 tool_json track_set "{\"track\":$V1,\"lock\":true}" >/dev/null
 expect_eq "speed: a locked track is an error" true "$(ferr clip_set_speed "{\"track\":$V1,\"clip\":0,\"speed\":2}")"
 tool_json track_set "{\"track\":$V1,\"lock\":false}" >/dev/null
