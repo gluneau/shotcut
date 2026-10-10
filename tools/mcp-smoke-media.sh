@@ -1516,6 +1516,14 @@ expect_eq "three video tracks: one undo restores get_timeline byte for byte" "$T
 tool_json redo '{}' >/dev/null
 tool_json undo '{}' >/dev/null
 expect_eq "three video tracks: redo then undo restores again" "$TV3" "$(tl)"
+# Regression: the preview's read-ahead thread could still be rendering the frame refreshed after
+# one call while the next undo re-inserted the track (SIGSEGV in transition_get_frame or heap
+# corruption, within 4 to 16 rounds of this loop on a debug build).
+for _ in $(seq 1 25); do
+  tool_json track_remove '{"track":1,"force":true}' >/dev/null
+  tool_json undo '{}' >/dev/null; tool_json redo '{}' >/dev/null; tool_json undo '{}' >/dev/null
+done
+expect_eq "three video tracks: 25 rounds of remove, undo, redo, undo restore it" "$TV3" "$(tl)"
 tool_json undo '{}' >/dev/null
 expect_eq "three video tracks: track_add undone" "$TS0" "$(tl)"
 

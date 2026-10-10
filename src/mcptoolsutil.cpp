@@ -174,7 +174,17 @@ EditPreviewGuard::EditPreviewGuard(bool standIn)
     // which makes the preview fetch the frame under the playhead from the clips being edited.
     // For large edits feed the preview a black producer at the same position instead.
     Mlt::Consumer *consumer = MLT.consumer();
-    if (!standIn || !MLT.isMultitrack() || !consumer || !consumer->is_valid())
+    if (!consumer || !consumer->is_valid())
+        return;
+    // Stopping joins the preview's read-ahead thread: a frame it is still rendering (for example
+    // after the previous call's refresh) must not run while the edit changes tracks and
+    // transitions on the GUI thread (seen: SIGSEGV in transition_get_frame, heap corruption,
+    // during RemoveTrackCommand::undo).
+    m_wasStopped = consumer->is_stopped();
+    if (!m_wasStopped)
+        consumer->stop();
+    m_consumer = true;
+    if (!standIn || !MLT.isMultitrack())
         return;
     const int position = MLT.producer()->position();
     m_standIn = std::make_unique<Mlt::Producer>(MLT.profile(), "color:black");
@@ -186,9 +196,6 @@ EditPreviewGuard::EditPreviewGuard(bool standIn)
     m_standIn->set_in_and_out(0, position + 999);
     m_standIn->set_speed(0); // producers play at speed 1 by default
     m_standIn->seek(position);
-    m_wasStopped = consumer->is_stopped();
-    if (!m_wasStopped)
-        consumer->stop();
     consumer->connect(*m_standIn);
     if (!m_wasStopped)
         consumer->start();
@@ -201,14 +208,16 @@ EditPreviewGuard::~EditPreviewGuard()
         return;
     MLT.blockRefresh(false);
     Mlt::Consumer *consumer = MLT.consumer();
-    if (m_standIn && consumer && consumer->is_valid()) {
-        consumer->stop();
-        if (MLT.producer() && MLT.producer()->is_valid()) {
-            consumer->connect(*MLT.producer());
-            if (!m_wasStopped)
-                consumer->start();
+    if (m_consumer && consumer && consumer->is_valid()) {
+        if (m_standIn) {
+            consumer->stop();
+            if (MLT.producer() && MLT.producer()->is_valid())
+                consumer->connect(*MLT.producer());
         }
         // Without a producer the consumer stays stopped rather than running on the stand-in.
+        // start() does nothing when the edit already restarted it (a new timeline).
+        if (!m_wasStopped && MLT.producer() && MLT.producer()->is_valid())
+            consumer->start();
     }
     MLT.refreshConsumer();
 }

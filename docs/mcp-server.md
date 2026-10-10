@@ -364,14 +364,22 @@ around the first one.
   Playhead) every 150 ms during playback crashed 3 of 10 debug sessions of about 135 splits with
   a SIGSEGV in the preview render thread (MLT property and producer state used by two threads).
   This is a related MLT race in plain GUI use; the MCP server does not touch that path.
+- **Read-ahead frame during a track edit.** A frame the preview's read-ahead thread is still
+  rendering (for example the one refreshed after the previous call) used to run while the next
+  call changed tracks and transitions on the GUI thread: a loop of `track_remove` on the middle
+  of three video tracks with undo, redo and undo crashed a debug build within 4 to 16 rounds
+  (SIGSEGV in `transition_get_frame`, or "corrupted double-linked list" during
+  `RemoveTrackCommand::undo`). Since the guard stops the preview consumer, 150 rounds ran clean.
 
 The MCP server's preview guard: `timeline_remove_ranges`, `timeline_insert_range`,
-`track_remove` and the `undo`/`redo` tools pause playback and block the preview refresh while
-they run, then refresh once. For large work, `timeline_remove_ranges` always and `undo`/`redo`
-of a step with more than 8 commands (a `timeline_remove_ranges` call of 3 or more cuts), the
-preview is also fed a black stand-in at the same position instead of the timeline, because
-Shotcut still seeks the player after every duration change and that seek alone renders the
-clips being edited; the timeline is reconnected afterwards. Guards do not nest (only the
+`track_remove`, `clip_detach_audio`, `clip_set_speed` and the `undo`/`redo` tools pause
+playback, block the preview refresh and stop the preview consumer (which waits for a frame it
+is rendering) while they run, then restart it and refresh once. For large work,
+`timeline_remove_ranges` always and `undo`/`redo` of a step with more than 8 commands (a
+`timeline_remove_ranges` call of 3 or more cuts), the preview is fed a black stand-in at the
+same position instead of the timeline, because Shotcut still seeks the player after every
+duration change and that seek alone renders the clips being edited; the timeline is reconnected
+afterwards. Guards do not nest (only the
 outermost acts).
 
 Measured on a debug build (a 120-cut call plus undo, redo and undo per run): blocking the
@@ -384,8 +392,11 @@ cannot rule it out. Call `save_project` before large cuts and send them in chunk
 Residual risks:
 
 - Undo/Redo and History jumps in the Shotcut window are not guarded.
-- Small MCP edits (`timeline_insert_range`, `track_remove`, small undo/redo steps) get only the
-  refresh block, not the stand-in, so they keep a smaller exposure; so do the other edit tools.
+- Small MCP edits (`timeline_insert_range`, `track_remove`, small undo/redo steps) get the
+  stopped consumer, not the stand-in, so Shotcut's seek after a duration change can still render
+  a clip once the guard restarts the consumer; the other edit tools (filters, markers, track
+  properties) are not guarded.
+- Every guarded call restarts the audio device when the preview was running.
 - Inserting into an empty timeline creates the timeline inside the guard, while the player still
   shows the old producer; nothing is swapped then.
 - Shotcut's autosave runs on a worker thread and may serialize the project while a guarded call
