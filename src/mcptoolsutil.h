@@ -65,13 +65,15 @@ int lastFrame();
 // Moves the playhead the same way for a plain clip and for a timeline.
 void movePlayhead(int position);
 
-// Wraps timeline edits (and undo/redo of them). While the outermost guard lives it pauses
-// playback, blocks the preview refresh Shotcut issues after every edit and stops the preview
-// consumer, which joins its read-ahead thread so no frame renders while the edit changes the
-// graph (an in-flight frame crashed RemoveTrackCommand::undo). On a timeline it also connects the
-// stopped consumer to a black stand-in producer at the same position, because the consumer does
-// not stay stopped: a duration change makes Shotcut seek the player (Player::onDurationChanged)
-// and Controller::seek starts a stopped consumer on whatever it is connected to. With standIn
+// Wraps every structural timeline edit tool (split, trim, move, remove, transitions, fades,
+// inserts, track add/remove/composite, detach audio, speed) and undo/redo; the marker and filter
+// tools only pause. While the outermost guard lives it pauses playback, blocks the preview
+// refresh Shotcut issues after every edit and stops the preview consumer, which joins its
+// read-ahead thread so no frame renders while the edit changes the graph (an in-flight frame
+// crashed RemoveTrackCommand::undo). On a timeline it also connects the stopped consumer to a
+// black stand-in producer at the same position, because the consumer does not stay stopped: a
+// duration change makes Shotcut seek the player (Player::onDurationChanged) and
+// Controller::seek starts a stopped consumer on whatever it is connected to. With standIn
 // (large work) the consumer is also started on the stand-in, which shows black; without it the
 // stand-in is only rendered if such a seek restarts the consumer. When the guard goes out of
 // scope (on every exit path) it reconnects the timeline, restarts a consumer that was running (it

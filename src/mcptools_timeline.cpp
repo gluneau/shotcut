@@ -164,7 +164,7 @@ QJsonObject timelineAddPlaylistTool(const QJsonObject &arguments)
 
     if (MAIN.isMultitrackValid())
         dock->setCurrentTrack(track);
-    MLT.pause();
+    EditPreviewGuard previewGuard(false);
     dock->appendFromPlaylist(&copy, false, false);
     if (!MAIN.isMultitrackValid())
         return textResult("Shotcut did not create the timeline.", true);
@@ -196,7 +196,7 @@ QJsonObject timelineSplitTool(const QJsonObject &arguments)
         return textResult("position must be strictly inside the clip (it starts at frame "
                               + QString::number(info ? info->start : 0) + ").",
                           true);
-    MLT.pause();
+    EditPreviewGuard previewGuard(false);
     if (!dock->split(track, clip, position))
         return textResult("Shotcut refused the split.", true);
     return jsonResult(QJsonObject{{"track", trackJson(model, track)}});
@@ -228,7 +228,7 @@ QJsonObject timelineRemoveTool(const QJsonObject &arguments)
         return n;
     };
     const int before = clipCount();
-    MLT.pause();
+    EditPreviewGuard previewGuard(false);
     if (ripple)
         dock->remove(track, clip);
     else
@@ -298,7 +298,7 @@ QJsonObject timelineTrimTool(const QJsonObject &arguments)
                                       true);
             }
         }
-        MLT.pause();
+        EditPreviewGuard previewGuard(false);
         // A macro never merges with other trims (merging matches on clip index, which can shift).
         MAIN.undoStack()->beginMacro(edge == "in" ? QObject::tr("Trim clip in point")
                                                   : QObject::tr("Trim clip out point"));
@@ -366,7 +366,7 @@ QJsonObject timelineMoveTool(const QJsonObject &arguments)
                                   + " on track " + QString::number(toTrack) + ".", true);
     }
 
-    MLT.pause();
+    EditPreviewGuard previewGuard(false);
     auto *command = new Timeline::MoveClipCommand(*dock, trackDelta, positionDelta, false);
     command->addClip(track, clip);
     MAIN.undoStack()->push(command);
@@ -433,7 +433,7 @@ QJsonObject timelineAddTransitionTool(const QJsonObject &arguments)
     if (!model.addTransitionValid(track, track, clip, position, true))
         return textResult("Shotcut cannot add a transition between these clips.", true);
 
-    MLT.pause();
+    EditPreviewGuard previewGuard(false);
     auto *command = new Timeline::AddTransitionCommand(*dock, track, clip, position, true);
     MAIN.undoStack()->push(command);
     const int transitionIndex = command->getTransitionIndex();
@@ -474,7 +474,7 @@ QJsonObject timelineFadeTool(const QJsonObject &arguments)
         || (outArg == FrameArg::Ok && fadeOut > info->frame_count))
         return textResult("A fade cannot be longer than the clip.", true);
 
-    MLT.pause();
+    EditPreviewGuard previewGuard(false);
     MAIN.undoStack()->beginMacro(inArg != FrameArg::Ok    ? QObject::tr("Set clip fade out")
                                  : outArg != FrameArg::Ok ? QObject::tr("Set clip fade in")
                                                           : QObject::tr("Set clip fades"));

@@ -488,7 +488,7 @@ QJsonObject trackAddTool(const QJsonObject &arguments)
     MultitrackModel &model = *dock->model();
     const bool video = type == "video";
     const int before = model.trackList().size();
-    MLT.pause();
+    EditPreviewGuard previewGuard(false);
     // As TimelineDock::addVideoTrack and addAudioTrack do: a selected track head would point at
     // another track once the rows shift.
     if (dock->selectedTrack() != -1)
@@ -669,6 +669,10 @@ QJsonObject trackSetTool(const QJsonObject &arguments)
     QJsonArray changed;
     if (!changes.empty()) {
         MLT.pause();
+        // Compositing swaps the track's transition: guard it like the structural edits.
+        std::unique_ptr<EditPreviewGuard> previewGuard;
+        if (flags.contains("composite"))
+            previewGuard = std::make_unique<EditPreviewGuard>(false);
         QUndoStack *stack = MAIN.undoStack();
         // Every call is its own macro, so two calls setting gain stay two undo steps
         // (ChangeTrackGainCommand merges with a directly preceding one).

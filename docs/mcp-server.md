@@ -371,8 +371,11 @@ around the first one.
   (SIGSEGV in `transition_get_frame`, or "corrupted double-linked list" during
   `RemoveTrackCommand::undo`). Since the guard stops the preview consumer, 150 rounds ran clean.
 
-The MCP server's preview guard: `timeline_remove_ranges`, `timeline_insert_range`,
-`track_remove`, `clip_detach_audio`, `clip_set_speed` and the `undo`/`redo` tools pause
+The MCP server's preview guard: every tool that changes the timeline's structure
+(`timeline_remove_ranges`, `timeline_insert_range`, `timeline_add_playlist`, `timeline_split`,
+`timeline_trim`, `timeline_move`, `timeline_remove`, `timeline_add_transition`,
+`timeline_fade`, `track_add`, `track_remove`, `track_set` with `composite`,
+`clip_detach_audio`, `clip_set_speed`) and the `undo`/`redo` tools pause
 playback, block the preview refresh and stop the preview consumer (which waits for a frame it
 is rendering) while they run, then restart it and refresh once. The stopped consumer does not
 stay stopped: Shotcut seeks the player after every duration change, and that seek starts a
@@ -394,7 +397,9 @@ cannot rule it out. Call `save_project` before large cuts and send them in chunk
 Residual risks:
 
 - Undo/Redo and History jumps in the Shotcut window are not guarded.
-- The edit tools that are not guarded (filters, markers, track properties) keep the exposure.
+- The edit tools that are not guarded (the filter tools and recipes other than
+  `clip_detach_audio` and `clip_set_speed`, markers, `track_set` without `composite`) keep the
+  exposure: they only pause.
 - Every guarded call restarts the audio device when the preview was running.
 - Inserting into an empty timeline creates the timeline inside the guard, while the player still
   shows the old producer; nothing is swapped then.
