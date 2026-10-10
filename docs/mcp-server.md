@@ -846,6 +846,55 @@ result is `{width, height, fps_num, fps_den, sar, dar}` with `sar` and `dar` as 
   replaces the tool's format with it.
 - Interlaced, non-square-pixel, BT.601/BT.2020 and HDR formats are not offered.
 
+### Reframe
+
+`clip_reframe` (53 tools in all) makes a timeline clip of another shape fill the project's frame,
+say a 16:9 or 4:3 clip in a 9:16 project, as ONE undo step ("Reframe clip (fill)" or "(pad)").
+
+| Argument | Meaning |
+|----------|---------|
+| `track`, `clip` | The timeline clip (a picture clip on a video track) |
+| `mode` | `fill` (crop to cover the frame) or `pad` (fit over a blurred copy) |
+| `focus_x?` | `fill` only, 0..1, default 0.5: the point across the picture put at the frame centre |
+| `keyframes?` | `fill` only, instead of `focus_x`: 1..50 `{frame, focus_x}` to pan |
+| `interpolation?` | With `keyframes`: `linear` (default) or `smooth` |
+
+- `fill` sets Shotcut's Size, Position & Rotate filter (`affine`) in Fill mode
+  (`transition.fill 1`, `transition.distort 0`, centred, no rotation) with the cover rect. With
+  the clip's display aspect `srcDAR` and the video mode's `PW`, `PH`, `sar` and DAR: if
+  `srcDAR > DAR` then `h = PH`, `w = h / sar * srcDAR`, else `w = PW`, `h = w * sar / srcDAR`;
+  `x = PW/2 - w * focus_x` clamped to `[PW - w, 0]`, `y = (PH - h) / 2`; no rounding. A 4:3
+  clip in 1080x1920 gets `-740 0 2560 1920 1`; `focus_x` 0 keeps its left edge (`x = 0`) and 1
+  its right edge (`x = -1480`). `focus_x` changes nothing when the picture is taller than the
+  frame (it is cropped top and bottom, centred).
+- `keyframes` frames count from the clip's first frame (0), strictly increasing and within the
+  clip. They become an MLT animation string on `transition.rect`, e.g.
+  `0=0 0 2560 1920 1;60=-1480 0 2560 1920 1`; `smooth` puts `~` on EVERY keyframe
+  (`0~=...;60~=...`), because MLT takes a segment's interpolation from the keyframe it starts at.
+  MLT reads it like Shotcut's own keyframes (a saved project stores the keyframes as times). Before
+  the first keyframe the picture holds the first position, after the last the last.
+- `pad` sets Shotcut's Blur: Pad (`pillar_echo`, blur 4, its default fit rect), as
+  `clip_set_blur` mode `pad` does.
+- The filter is marked `shotcut:reframe=1`. A later `clip_reframe` on the clip replaces the marked
+  filter (switching between `fill` and `pad` removes the other one in the same undo step) instead
+  of adding another. Plain `filter_set` tweaks keep the mark, so the next `clip_reframe` replaces
+  the tweaked filter too. Size, Position & Rotate or Blur: Pad filters the tool did not add (from
+  the Filters panel, `filter_add`, `clip_set_transform` or `clip_set_blur`) are left alone; the
+  reframe is appended after them, so it scales their result.
+- Refused (nothing changed): a clip whose display aspect is within 1% of the video mode's
+  (`|srcDAR / DAR - 1| < 0.01`: "The clip already matches the project format."), unknown
+  arguments (also inside a keyframe), `focus_x` with `keyframes`, `interpolation` without
+  `keyframes`, `focus_x`, `keyframes` or `interpolation` with `pad`, a keyframe after the clip's
+  last frame, a locked track, a blank or transition, an audio track or audio-only clip.
+- Returns `{filters: [{id, index}], track}` as the picture recipes do.
+
+### Known limits (reframe)
+
+- The rect is computed from the clip and the format at call time: change the format or the
+  clip's source and call `clip_reframe` again.
+- `clip_set_transform` changes the clip's first Size, Position & Rotate filter, which can be the
+  reframe: it is then put in Fit mode and stays marked.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
@@ -940,8 +989,13 @@ Stage 3C has its own script, also needing a FRESH throwaway Shotcut:
 It needs bash, curl, jq, ffmpeg and ffprobe. It checks the `project_set_format` refusals and every
 preset on the empty session, then sets 9:16, adds a 320x240 25 fps clip and builds a timeline,
 checks the format is kept, the tool is refused, and an export (`x264-medium`, `melt-7`) is
-1080x1920 at 30 fps. With `MCP_APPDATA` it also checks that `shotcut.ini` has no saved
-`[player] profile`.
+1080x1920 at 30 fps. It then checks `clip_reframe`: argument refusals, the exact fill rects for
+`focus_x` 0, 0.25, 0.5 and 1 on the 4:3 clip, the keyframe strings and their saved form, one undo
+step per call, the `shotcut:reframe` mark (a `filter_set` tweak is replaced, a user filter is
+not), `pad`, the 1% match refusal, and a 1 s export whose four corners are red (no black bars;
+the earlier export without the reframe has black corners). It ends by opening a timeline-only
+project and checking `project_set_format` is refused there. `MCP_APPDATA` must be set (it is a
+FAIL otherwise): the script checks that `shotcut.ini` has no saved `[player] profile`.
 
 Manual checks (they need a modified project, which the tools cannot create):
 

@@ -13,14 +13,26 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "mcpfiltercommands.h"
 #include "mcpfilters.h"
 #include "mcptools.h"
 #include "mcptoolsutil.h"
 
+#include "docks/timelinedock.h"
 #include "mainwindow.h"
 #include "mltcontroller.h"
+#include "models/multitrackmodel.h"
+
+#include <QJsonArray>
+#include <QRectF>
+#include <QUndoStack>
+
+#include <algorithm>
+#include <cmath>
+#include <memory>
 
 using namespace McpTools;
+using namespace McpFilters;
 
 namespace {
 
@@ -93,6 +105,198 @@ QJsonObject projectSetFormatTool(const QJsonObject &arguments)
                        {"dar", ratio(profile.display_aspect_num(), profile.display_aspect_den())}});
 }
 
+// Marks the filters clip_reframe added (filter_set keeps it): a later call replaces only these.
+const char *kReframeProperty = "shotcut:reframe";
+
+QString rectValue(double x, double y, double w, double h)
+{
+    return QStringLiteral("%1 %2 %3 %4 1").arg(num(x), num(y), num(w), num(h));
+}
+
+QJsonObject clipReframeTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0;
+    QString error;
+    if (!checkKeys(arguments,
+                   {"track", "clip", "mode", "focus_x", "keyframes", "interpolation"},
+                   error)
+        || !readTarget(arguments, track, clip, error))
+        return textResult(error, true);
+    const QString mode = arguments.value("mode").toString();
+    if (mode != "fill" && mode != "pad")
+        return textResult("mode must be \"fill\" or \"pad\".", true);
+    const bool fill = mode == "fill";
+    double focus = 0.5;
+    const FrameArg fo = readNumberArg(arguments, "focus_x", 0, 1, focus, error);
+    if (fo == FrameArg::Invalid)
+        return textResult(error, true);
+    const QJsonValue keyArg = arguments.value("keyframes");
+    const QJsonValue interpolation = arguments.value("interpolation");
+    if (!fill && (fo == FrameArg::Ok || !keyArg.isUndefined() || !interpolation.isUndefined()))
+        return textResult("focus_x, keyframes and interpolation are for mode \"fill\" only.",
+                          true);
+    if (fo == FrameArg::Ok && !keyArg.isUndefined())
+        return textResult("Give focus_x or keyframes, not both.", true);
+    if (!interpolation.isUndefined()
+        && (keyArg.isUndefined()
+            || (interpolation.toString() != "linear" && interpolation.toString() != "smooth")))
+        return textResult("interpolation (\"linear\" or \"smooth\") goes with keyframes only.",
+                          true);
+    const QString keyError = QStringLiteral(
+        "keyframes must be an array of 1 to 50 objects {frame, focus_x}: frame an integer of the "
+        "clip (0 is its first frame), strictly increasing; focus_x a number from 0 to 1.");
+    QList<QPair<int, double>> keys;
+    if (!keyArg.isUndefined()) {
+        const QJsonArray array = keyArg.toArray();
+        if (!keyArg.isArray() || array.isEmpty() || array.size() > 50)
+            return textResult(keyError, true);
+        for (const QJsonValue &v : array) {
+            const QJsonObject key = v.toObject();
+            int frame = 0;
+            double f = 0;
+            QString ignored;
+            if (!v.isObject() || key.size() != 2 || readFrame(key, "frame", frame) != FrameArg::Ok
+                || readNumberArg(key, "focus_x", 0, 1, f, ignored) != FrameArg::Ok
+                || (!keys.isEmpty() && frame <= keys.last().first))
+                return textResult(keyError, true);
+            keys.append({frame, f});
+        }
+    }
+
+    const FilterSpec *spec = recipeSpec(fill ? "size_position" : "blur_pad", error);
+    if (!spec)
+        return textResult(error, true);
+    MultitrackModel &model = *MAIN.timelineDock()->model();
+    std::unique_ptr<Mlt::ClipInfo> info = checkClip(model, track, clip, *spec, error);
+    if (!info)
+        return textResult(error, true);
+    if (!keys.isEmpty() && keys.last().first >= info->frame_count)
+        return textResult(QStringLiteral("Keyframe frame %1 is after the clip's last frame (%2).")
+                              .arg(keys.last().first)
+                              .arg(info->frame_count - 1),
+                          true);
+    // The clip's display aspect, from Size/Position's fit rect (w = h / sar * dar).
+    Mlt::Profile &profile = MLT.profile();
+    const double width = profile.width(), height = profile.height(), sar = profile.sar();
+    const QRectF fit = fitRect(info->producer, FilterParam::AffineFit);
+    const double srcDar = fit.width() * sar / fit.height();
+    if (std::abs(srcDar / profile.dar() - 1) < 0.01)
+        return textResult("The clip already matches the project format.", true);
+
+    QString value;
+    if (fill) {
+        // The fill (cover) rect: the picture scaled to cover the frame, its focus_x point at the
+        // frame's centre as far as the picture's edges allow.
+        double w, h;
+        if (srcDar > profile.dar()) {
+            h = height;
+            w = h / sar * srcDar;
+        } else {
+            w = width;
+            h = w * sar / srcDar;
+        }
+        const double y = (height - h) / 2;
+        const double minX = std::min(width - w, 0.0);
+        const auto xAt = [&](double f) { return std::clamp(width / 2 - w * f, minX, 0.0); };
+        if (keys.isEmpty()) {
+            value = rectValue(xAt(focus), y, w, h);
+        } else {
+            // MLT's keyframe type is on the keyframe a segment starts from: "~" on every one.
+            const QString type = interpolation.toString() == "smooth" ? "~" : "";
+            QStringList parts;
+            for (const auto &key : keys)
+                parts << QStringLiteral("%1%2=%3")
+                             .arg(key.first)
+                             .arg(type, rectValue(xAt(key.second), y, w, h));
+            value = parts.join(';');
+        }
+    } else {
+        const QRectF pad = fitRect(info->producer, FilterParam::PillarEchoFit);
+        value = rectValue(pad.x(), pad.y(), pad.width(), pad.height());
+    }
+    // The whole reframe on top of the spec's defaults, so a replaced one is reset too.
+    const auto extra = [fill, value](Mlt::Properties &p) {
+        p.set(kReframeProperty, 1);
+        if (fill) {
+            p.set("transition.rect", value.toUtf8().constData());
+            p.set("transition.fill", 1);
+            p.set("transition.distort", 0);
+            p.set("transition.fix_rotate_x", 0);
+            p.set("transition.valign", "middle");
+            p.set("transition.halign", "center");
+        } else {
+            p.set("rect", value.toUtf8().constData());
+            p.set("blur", 4);
+        }
+    };
+
+    // This tool's own filters: the first of this mode's kind is set, the others removed.
+    int target = -1;
+    QList<int> removals;
+    const QList<int> indices = McpFilter::userFilterIndices(*info->producer);
+    for (int i = 0; i < indices.size(); ++i) {
+        std::unique_ptr<Mlt::Filter> filter(info->producer->filter(indices.at(i)));
+        if (!filter || !filter->get_int(kReframeProperty))
+            continue;
+        if (target < 0 && specOf(*filter) == spec)
+            target = i;
+        else
+            removals.prepend(i);
+    }
+    info.reset();
+    const QString text = QObject::tr("Reframe clip (%1)").arg(mode);
+    QUndoStack *stack = MAIN.undoStack();
+    stack->beginMacro(text);
+    bool ok = true;
+    for (int i : removals) {
+        auto *command = new McpFilter::RemoveCommand(model,
+                                                     McpFilter::Target{track, clip},
+                                                     i,
+                                                     text);
+        ok = pushCommand(command, text, true, [command] { return command->removed(); }, error);
+        if (!ok)
+            break;
+        if (i < target)
+            --target;
+    }
+    int index = target;
+    if (ok) {
+        std::unique_ptr<Mlt::ClipInfo> now = model.getClipInfo(track, clip);
+        if (target >= 0) {
+            const QList<int> nowIndices = McpFilter::userFilterIndices(*now->producer);
+            std::unique_ptr<Mlt::Filter> filter(now->producer->filter(nowIndices.at(target)));
+            ok = setFilter(model,
+                           track,
+                           clip,
+                           target,
+                           *filter,
+                           *spec,
+                           {},
+                           text,
+                           true,
+                           error,
+                           extra);
+        } else {
+            ok = addFilter(model,
+                           track,
+                           clip,
+                           *now,
+                           *spec,
+                           {},
+                           text,
+                           true,
+                           error,
+                           &index,
+                           extra);
+        }
+    }
+    if (!finishMacro(stack, ok))
+        return textResult(error, true);
+    const QJsonObject filter{{"id", spec->id}, {"index", index}};
+    return jsonResult(
+        QJsonObject{{"filters", QJsonArray{filter}}, {"track", trackJson(model, track)}});
+}
+
 } // namespace
 
 QList<McpTool> McpTools::formatTools()
@@ -116,5 +320,38 @@ QList<McpTool> McpTools::formatTools()
              "fps":{"type":"number","enum":[23.976,24,25,29.97,30,50,59.94,60]}
            },"additionalProperties":false})"),
          projectSetFormatTool},
+        {"clip_reframe",
+         "Make a timeline clip of another shape fill the project's frame (say a 16:9 or 4:3 clip "
+         "in a 9:16 project) as ONE undo step (\"Reframe clip (fill)\" or \"(pad)\"). mode "
+         "\"fill\" crops: Shotcut's Size, Position & Rotate filter in Fill mode with the rect "
+         "that covers the frame (the picture scaled until its shorter side fits, centred "
+         "vertically); focus_x (0 to 1, default 0.5) is the point across the picture that is put "
+         "at the frame's centre as far as the picture's edges allow (0 = keep the left edge, 1 = "
+         "the right edge; no effect when the picture is taller than the frame). Or keyframes: 1 "
+         "to 50 {frame, focus_x} (frame counted from the clip's first frame, strictly "
+         "increasing, within the clip) to pan, with interpolation \"linear\" (default) or "
+         "\"smooth\". mode \"pad\" fits the whole picture over a blurred, enlarged copy of "
+         "itself (Shotcut's Blur: Pad, blur 4; no focus_x or keyframes). The filter is marked as "
+         "the clip's reframe (shotcut:reframe=1, kept by filter_set): a later call replaces it "
+         "(also when switching between fill and pad) instead of adding another; Size, Position "
+         "and Blur: Pad filters the tool did not add are left alone, and the reframe goes after "
+         "them. Refused (nothing changed): a clip whose shape is within 1% of the project's "
+         "(\"The clip already matches the project format.\"), unknown arguments, focus_x with "
+         "keyframes, focus_x, keyframes or interpolation with pad, a locked track, a blank or "
+         "transition, an audio track or audio-only clip. Returns {filters:[{id, index}], track} "
+         "(as filter_list_applied reports them).",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0},
+             "mode":{"type":"string","enum":["fill","pad"]},
+             "focus_x":{"type":"number","minimum":0,"maximum":1},
+             "keyframes":{"type":"array","minItems":1,"maxItems":50,"items":{
+               "type":"object","properties":{
+                 "frame":{"type":"integer","minimum":0},
+                 "focus_x":{"type":"number","minimum":0,"maximum":1}},
+               "required":["frame","focus_x"],"additionalProperties":false}},
+             "interpolation":{"type":"string","enum":["linear","smooth"]}
+           },"required":["track","clip","mode"],"additionalProperties":false})"),
+         clipReframeTool},
     };
 }
