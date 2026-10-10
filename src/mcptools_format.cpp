@@ -729,7 +729,7 @@ QJsonObject captionsFromTranscriptTool(const QJsonObject &arguments)
     QString language;
     const QJsonValue languageValue = arguments.value("language");
     if (!languageValue.isUndefined()) {
-        static const QRegularExpression code(QStringLiteral("^[a-z]{3}$"));
+        static const QRegularExpression code(QRegularExpression::anchoredPattern("[a-z]{3}"));
         language = languageValue.toString();
         if (!code.match(language).hasMatch()
             || QLocale::codeToLanguage(language, QLocale::ISO639Part2) == QLocale::AnyLanguage)
@@ -758,8 +758,9 @@ QJsonObject captionsFromTranscriptTool(const QJsonObject &arguments)
             return textResult("style must be an object.", true);
         if (!checkKeys(style,
                        {"size", "color", "outline_color", "bg_color", "valign", "position"},
-                       error)
-            || !readIntArg(style, "size", 8, 400, size, error)
+                       error))
+            return textResult("style: " + error, true);
+        if (!readIntArg(style, "size", 8, 400, size, error)
             || !readColorArg(style, "color", fgcolour, error)
             || !readColorArg(style, "outline_color", olcolour, error)
             || !readColorArg(style, "bg_color", bgcolour, error)
@@ -784,9 +785,7 @@ QJsonObject captionsFromTranscriptTool(const QJsonObject &arguments)
         return textResult(QStringLiteral("There is no transcript of %1: run transcribe on track %2 "
                                          "clip %3 (or supply one with transcribe {path, "
                                          "transcript}) first.")
-                              .arg(ref.path)
-                              .arg(track)
-                              .arg(clip),
+                              .arg(ref.path, QString::number(track), QString::number(clip)),
                           true);
     // A Whisper result covers only the range it was run on (a clip's range when it was run on a
     // clip), and the latest run on the file replaces it; a supplied transcript covers the file.
@@ -799,10 +798,13 @@ QJsonObject captionsFromTranscriptTool(const QJsonObject &arguments)
             return textResult(QStringLiteral("The transcript kept for %1 covers %2 to %3 s of it, "
                                              "not all of the clip's %4 to %5 s: run transcribe on "
                                              "track %6 clip %7 first.")
-                                  .arg(ref.path)
-                                  .arg(num(in), num(out), num(ref.inSeconds), num(ref.outSeconds))
-                                  .arg(track)
-                                  .arg(clip),
+                                  .arg(ref.path,
+                                       num(in),
+                                       num(out),
+                                       num(ref.inSeconds),
+                                       num(ref.outSeconds),
+                                       QString::number(track),
+                                       QString::number(clip)),
                               true);
     }
     const QList<Caption> captions
@@ -860,6 +862,7 @@ QJsonObject captionsFromTranscriptTool(const QJsonObject &arguments)
         if (!names.contains(candidate) && !feeds.contains(candidate))
             name = candidate;
     }
+    // Unreachable today: subtitles/meta.qml leaves allowMultiple at QmlMetadata's default (true).
     if (burnIn && !feeds.isEmpty()) {
         QmlMetadata *meta = MAIN.filterController()->metadata("subtitles");
         if (meta && !meta->allowMultiple())
@@ -929,6 +932,15 @@ QJsonObject captionsFromTranscriptTool(const QJsonObject &arguments)
 }
 
 } // namespace
+
+void McpTools::commitSubtitleFeeds()
+{
+    SubtitlesModel *subtitles = MAIN.timelineDock()->subtitlesModel();
+    if (!subtitles || !subtitles->isValid())
+        return;
+    for (int i = 0; i < subtitles->trackCount(); ++i)
+        writeFeedText(*subtitles, i);
+}
 
 QList<McpTool> McpTools::formatTools()
 {

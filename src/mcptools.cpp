@@ -130,6 +130,7 @@ QJsonObject openProject(const QJsonObject &arguments)
 
 QJsonObject saveProject(const QJsonObject &arguments)
 {
+    McpTools::commitSubtitleFeeds();
     const QJsonValue pathValue = arguments.value("path");
     if (pathValue.isUndefined() || pathValue.isNull()) {
         const QString current = MAIN.fileName();

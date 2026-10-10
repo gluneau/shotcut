@@ -568,6 +568,15 @@ expect_eq "style that is not an object is an error" true "$(cerr '{"track":0,"cl
 expect_eq "style with burn_in false is an error" true "$(cerr '{"track":0,"clip":1,"burn_in":false,"style":{"size":30}}')"
 expect_eq "an unknown argument is an error" true "$(cerr '{"track":0,"clip":1,"maxwords":5}')"
 expect_eq "the bad style error names style.color" true "$(tool_text captions_from_transcript '{"track":0,"clip":1,"style":{"color":"red"}}' | grep -q 'style.color' && echo true || echo false)"
+expect_eq "the unknown style key error reads style: Unknown argument 'font'" true "$(tool_text captions_from_transcript '{"track":0,"clip":1,"style":{"font":"Sans"}}' | grep -q "^style: Unknown argument 'font'; " && echo true || echo false)"
+expect_eq "language with a trailing newline is an error" true "$(cerr '{"track":0,"clip":1,"language":"eng\n"}')"
+# A path with %2 in it is quoted as it is in the errors (no QString::arg substitution into it).
+PCT="$MEDIA/pct%2x.mp4"
+cp "$TONE" "$PCT"
+expect_eq "insert pct%2x.mp4 at frame 1200 of track 0" false "$(tool_is_error timeline_insert_range "$(jq -nc --arg p "$PCT" '{path:$p,in_s:0,out_s:2,track:0,position:1200}')")"
+PCTCLIP="$(tool_json get_timeline '{}' | jq '.tracks[0].clips | length - 1')"
+expect_eq "the no-transcript error quotes the path with %2 unchanged" true "$(tool_text captions_from_transcript "{\"track\":0,\"clip\":$PCTCLIP}" | grep -qF "There is no transcript of $PCT: run transcribe on track 0 clip $PCTCLIP" && echo true || echo false)"
+tool_json undo '{}' >/dev/null
 save
 expect_eq "the refusals added no subtitle track" 0 "$(nsvc subtitle_feed)"
 expect_eq "the refusals added no subtitle filter" 0 "$(nsvc subtitle)"
@@ -612,9 +621,19 @@ save
 expect_eq "after undo: no subtitle track" 0 "$(nsvc subtitle_feed)"
 expect_eq "after undo: no subtitle filter" 0 "$(nsvc subtitle)"
 tool_json redo '{}' >/dev/null
-sleep 1
+# No sleep: Shotcut writes the SRT into the feed 500 ms after the redo; save_project writes it first.
 save
-expect_eq "redo: the track (with its SRT) and the filter are back" "1|1|$SRT" "$(nsvc subtitle_feed)|$(nsvc subtitle)|$(svc_prop subtitle_feed text)"
+expect_eq "redo then an immediate save_project copy: the track (with its SRT) and the filter" "1|1|$SRT" "$(nsvc subtitle_feed)|$(nsvc subtitle)|$(svc_prop subtitle_feed text)"
+tool_json undo '{}' >/dev/null
+tool_json redo '{}' >/dev/null
+CUR="$(tool_json get_state '{}' | jq -r '.project')"
+tool_json save_project '{}' >/dev/null
+expect_eq "redo then an immediate save_project to the project file: the SRT is in it" "$SRT" "$(SAVED="$CUR" svc_prop subtitle_feed text)"
+tool_json undo '{}' >/dev/null
+tool_json redo '{}' >/dev/null
+OUT5="$TMP/captioned-redo.mp4"
+expect_eq "redo then an immediate export_video succeeded" succeeded "$(export_wait "$OUT5")"
+expect_eq "that export has the caption at 3.4 s (YMAX >= 150)" true "$(awk -v y="$(ybottom "$OUT5" 3.4)" 'BEGIN{print (y != "" && y >= 150) ? "true" : "false"}')"
 tool_json undo '{}' >/dev/null
 
 echo "== captions_from_transcript: burn_in false, a second track"

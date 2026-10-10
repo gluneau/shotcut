@@ -1027,10 +1027,12 @@ There is no `captions_remove`: one `undo` removes the track and the filter toget
   (over whatever follows on the timeline).
 - The captions are not tied to the clip: moving, trimming or rippling the clip later does not
   move them; run the tool again (and undo or remove the old track in the Subtitles panel).
-- Shotcut writes a subtitle track's SRT into its `subtitle_feed` filter 500 ms after an edit;
-  the tool writes it at once so an immediate save or export has the captions, but after an
-  `undo`/`redo` of the step the text comes back only after that delay, as for Shotcut's own
-  edits.
+- Shotcut writes a subtitle track's SRT into its `subtitle_feed` filter 500 ms after an edit,
+  undo or redo. The tool writes it at once, and `save_project` and `export_video` write every
+  subtitle track's SRT before they serialise the project, so an immediate save or export after
+  an `undo`/`redo` has the captions (Shotcut's own Save and Export do not flush it, but a person
+  cannot reach them within 500 ms). `get_frame` and `get_overview` right after an `undo`/`redo`
+  may still show the burn-in without its text.
 - A speed-changed clip is refused (source and timeline times differ).
 - Fonts: the burn-in uses the font of Shotcut's filter (Sans on Linux); it must be installed
   where the project is rendered.
@@ -1144,8 +1146,10 @@ refused there. On that project (640x360, 25 fps) it checks `captions_from_transc
 supplied transcripts: the refusals, three captions from 12 known words with their exact
 millisecond times and SRT, the saved `subtitle_feed` and burn-in filter properties, an export
 with bright caption text in the bottom quarter during a caption and none between captions,
-one undo removing both, `burn_in: false`, a second track, `max_chars`, `style`, `language`, a
-trimmed clip, a speed-changed clip, and an audio-only clip (a pause and the minimum duration).
+one undo removing both, an immediate `save_project` (copy and project file) and `export_video`
+after a redo keeping the captions, `burn_in: false`, a second track, `max_chars`, `style`,
+`language`, a trimmed clip, a speed-changed clip, and an audio-only clip (a pause and the minimum
+duration).
 It ends by opening a 720x4920 project and checking the default title size is capped at 400.
 `MCP_APPDATA` must be set (it is a FAIL otherwise): the script checks that `shotcut.ini` has no
 saved `[player] profile`.

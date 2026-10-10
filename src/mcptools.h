@@ -49,6 +49,10 @@ QJsonObject imageResult(const QByteArray &bytes,
 // True while an export started by export_video is queued or running.
 bool exportBusy();
 
+// Writes every subtitle track's SRT into its subtitle_feed filter now. Shotcut writes it 500 ms
+// after an edit, undo or redo, so call this before the project is saved or exported.
+void commitSubtitleFeeds();
+
 // McpServer marks the span of every tools/call handler with these.
 void setToolCallRunning(bool running);
 bool toolCallRunning();

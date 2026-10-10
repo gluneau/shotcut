@@ -243,6 +243,7 @@ QJsonObject exportVideoTool(const QJsonObject &arguments)
                               + melt.filePath(),
                           true);
 
+    commitSubtitleFeeds();
     QString error;
     AbstractJob *job = MAIN.exportToFile(preset, path, error);
     if (!job)
