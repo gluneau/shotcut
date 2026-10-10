@@ -2515,6 +2515,11 @@ void UpdateCommand::setRippleAllTracks(bool ripple)
     m_rippleAllTracks = ripple;
 }
 
+void UpdateCommand::setRipple(bool ripple)
+{
+    m_ripple = ripple;
+}
+
 void UpdateCommand::redo()
 {
     LOG_DEBUG() << "trackIndex" << m_trackIndex << "clipIndex" << m_clipIndex << "position"

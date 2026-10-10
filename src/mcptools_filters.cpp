@@ -29,7 +29,9 @@
 #include "models/multitrackmodel.h"
 #include "qmltypes/qmlmetadata.h"
 #include "shotcut_mlt_properties.h"
+#include "util.h"
 
+#include <MltChain.h>
 #include <MltPlaylist.h>
 #include <MltTransition.h>
 #include <framework/mlt_version.h>
@@ -1587,6 +1589,184 @@ QJsonObject clipSetBlurTool(const QJsonObject &arguments)
     return runRecipe(track, clip, {r}, text);
 }
 
+// ---- Speed
+
+// True when a user filter of the clip has a fade (shotcut:animIn/animOut) or a value in MLT's
+// animation syntax ("0=1;24=1.5", "00:00:01.000~=2": a time, maybe a keyframe type, '=').
+// Shotcut does not move keyframes when the speed changes.
+bool hasFadesOrKeyframes(Mlt::Producer &producer)
+{
+    static const QRegularExpression re(QStringLiteral("^\\s*-?[0-9][0-9:.]*\\s*[^\\s0-9:.;=]?="));
+    for (int i : McpFilter::userFilterIndices(producer)) {
+        std::unique_ptr<Mlt::Filter> filter(producer.filter(i));
+        if (!filter || !filter->is_valid())
+            continue;
+        if (filter->get_int(kShotcutAnimInProperty) > 0
+            || filter->get_int(kShotcutAnimOutProperty) > 0)
+            return true;
+        for (int p = 0; p < filter->count(); ++p) {
+            const char *value = filter->get(p);
+            if (value && re.match(QString::fromUtf8(value)).hasMatch())
+                return true;
+        }
+    }
+    return false;
+}
+
+// Shotcut's speed change for a timeline clip (AvformatProducerWidget::recreateProducer and
+// TimelineDock::onProducerChanged) without the Properties panel or the selection.
+QJsonObject clipSetSpeedTool(const QJsonObject &arguments)
+{
+    int track = 0, clip = 0;
+    QString error;
+    if (!checkKeys(arguments, {"track", "clip", "speed", "keep_pitch"}, error)
+        || !readTarget(arguments, track, clip, error))
+        return textResult(error, true);
+    double speed = 1;
+    const FrameArg sp = readNumberArg(arguments, "speed", 0.1, 10, speed, error);
+    if (sp != FrameArg::Ok)
+        return textResult(sp == FrameArg::Missing
+                              ? QStringLiteral("speed is required (0.1 to 10, 1 = normal).")
+                              : error,
+                          true);
+    const QJsonValue pitchArg = arguments.value("keep_pitch");
+    if (!pitchArg.isUndefined() && !pitchArg.isBool())
+        return textResult("keep_pitch must be true or false.", true);
+    const bool keepPitch = pitchArg.toBool(true);
+
+    TimelineDock *dock = MAIN.timelineDock();
+    MultitrackModel &model = *dock->model();
+    std::unique_ptr<Mlt::ClipInfo> info = plainClip(model, track, clip, error);
+    if (!info)
+        return textResult(error, true);
+    Mlt::Producer &producer = *info->producer;
+    const QString service = QString::fromUtf8(producer.get("mlt_service"));
+    if (producer.get_int(kIsProxyProperty))
+        return textResult(QStringLiteral("Clip %1 on track %2 plays a proxy; turn proxy editing "
+                                         "off (Settings > Proxy > Use Proxy) and try again.")
+                              .arg(clip)
+                              .arg(track),
+                          true);
+    if (!(service.startsWith("avformat") || service == "timewarp") || MLT.isImageProducer(&producer)
+        || MLT.isLiveProducer(&producer))
+        return textResult(QStringLiteral("Clip %1 on track %2 is not a video or audio file "
+                                         "(a still image, generator, project or other "
+                                         "producer); clip_set_speed changes media file clips "
+                                         "only.")
+                              .arg(clip)
+                              .arg(track),
+                          true);
+    if (service == "timewarp" && producer.get_double("warp_speed") < 0)
+        return textResult(QStringLiteral("Clip %1 on track %2 plays in reverse; clip_set_speed "
+                                         "sets forward speeds only.")
+                              .arg(clip)
+                              .arg(track),
+                          true);
+    if (hasFadesOrKeyframes(producer))
+        return textResult(QStringLiteral("Clip %1 on track %2 has fades or keyframed filters, "
+                                         "which a speed change would not move. Remove fades and "
+                                         "keyframes first.")
+                              .arg(clip)
+                              .arg(track),
+                          true);
+    const int count = model.rowCount(model.index(track));
+    if ((clip > 0 && kindOf(model, track, clip - 1) == "transition")
+        || (clip + 1 < count && kindOf(model, track, clip + 1) == "transition"))
+        return textResult(QStringLiteral("Clip %1 on track %2 is part of a transition; remove the "
+                                         "transition first.")
+                              .arg(clip)
+                              .arg(track),
+                          true);
+
+    const double oldSpeed = Util::GetSpeedFromProducer(&producer);
+    const QString filename = Util::GetFilenameFromProducer(&producer, false);
+    std::unique_ptr<Mlt::Producer> np;
+    if (speed == 1.0) {
+        np.reset(new Mlt::Chain(MLT.profile(), filename.toUtf8().constData()));
+    } else {
+        // MLT formats the number (the locale of MLT and Qt can differ), as Shotcut does.
+        Mlt::Properties temp;
+        temp.set("speed", speed);
+        const QString id = QStringLiteral("timewarp:%1:%2")
+                               .arg(QString::fromLatin1(temp.get("speed")), filename);
+        np.reset(new Mlt::Producer(MLT.profile(), id.toUtf8().constData()));
+        np->set(kShotcutProducerProperty, "avformat");
+    }
+    if (!np->is_valid())
+        return textResult("Shotcut cannot open " + filename + " to change its speed.", true);
+    Util::passProducerProperties(&producer, np.get());
+    // After passProducerProperties, which copies the old clip's warp_pitch.
+    np->set("warp_pitch", keepPitch ? 1 : 0);
+    Util::updateCaption(np.get());
+    Mlt::Controller::copyFilters(producer, *np, false, Mlt::Controller::FILTER_INDEX_ALL);
+    const double ratio = oldSpeed / speed;
+    const int length = qRound(info->length * ratio);
+    const int in = qMin(qRound(info->frame_in * ratio), length - 1);
+    const int out = qMin(qRound(info->frame_out * ratio), length - 1);
+    np->set("length", np->frames_to_time(length, mlt_time_clock));
+    np->set_in_and_out(in, out);
+    // As AvformatProducerWidget::recreateProducer: a frame fills in the media properties
+    // (meta.media.*, audio_index), so the XML the command keeps does not depend on when the
+    // preview first renders the clip.
+    delete np->get_frame();
+    Mlt::Controller::adjustClipFilters(*np,
+                                       info->frame_in,
+                                       info->frame_out,
+                                       in - info->frame_in,
+                                       info->frame_out - out,
+                                       0);
+
+    // The clip keeps its start and nothing else moves: a longer clip must fit the gap after it.
+    const int frames = out - in + 1;
+    if (frames > info->frame_count && clip + 1 < count) {
+        const bool lastBlank = clip + 2 >= count && kindOf(model, track, clip + 1) == "blank";
+        const int gap = kindOf(model, track, clip + 1) == "blank"
+                            ? model.getClipInfo(track, clip + 1)->frame_count
+                            : 0;
+        if (!lastBlank && frames - info->frame_count > gap)
+            return textResult(QStringLiteral("At speed %1 clip %2 on track %3 would last %4 frames "
+                                             "(now %5), but only %6 frames are free after it "
+                                             "before the next clip. Make room first (move or "
+                                             "trim the next clip); nothing was changed.")
+                                  .arg(num(speed))
+                                  .arg(clip)
+                                  .arg(track)
+                                  .arg(frames)
+                                  .arg(info->frame_count)
+                                  .arg(gap),
+                              true);
+    }
+
+    const int start = info->start;
+    const QString text = QObject::tr("Set clip speed: %1x").arg(num(speed));
+    EditPreviewGuard previewGuard(false);
+    // As TimelineDock::onProducerChanged: Shotcut clears the selection before this command.
+    if (!dock->selection().isEmpty())
+        dock->setSelection();
+    // UpdateCommand records the track before the change; never ripple, so only this clip and the
+    // blank after it change.
+    auto *command = new Timeline::UpdateCommand(*dock, track, clip, start);
+    command->setXmlAfter(MLT.XML(np.get()));
+    command->setRippleAllTracks(false);
+    command->setRipple(false);
+    info.reset();
+    np.reset();
+    QUndoStack *stack = MAIN.undoStack();
+    stack->beginMacro(text);
+    stack->push(command);
+    std::unique_ptr<Mlt::ClipInfo> after = model.getClipInfo(track, clip);
+    const bool ok = after && after->start == start && after->frame_count == frames
+                    && after->frame_in == in
+                    && std::abs(Util::GetSpeedFromProducer(after->producer) - speed) < 1e-6;
+    after.reset();
+    if (!finishMacro(stack, ok))
+        return textResult("Shotcut did not change the clip's speed; nothing was changed.", true);
+    return jsonResult(QJsonObject{{"track", trackJson(model, track)},
+                                  {"clip", clip},
+                                  {"speed", speed},
+                                  {"duration", frames}});
+}
+
 } // namespace
 
 namespace McpFilters {
@@ -1930,5 +2110,26 @@ QList<McpTool> McpTools::filterTools()
              "radius":{"type":"integer","minimum":0,"maximum":100}
            },"required":["track","clip","mode"],"additionalProperties":false})"),
          clipSetBlurTool},
+        {"clip_set_speed",
+         "Change a timeline clip's playback speed as ONE undo step (\"Set clip speed: <speed>x\"), "
+         "as Shotcut's Properties panel does (MLT's timewarp producer): speed 0.1 to 10 (1 = "
+         "normal; no reverse), keep_pitch (default true: the sound keeps its pitch). The clip "
+         "keeps its start and its filters; its length, in and out scale by old speed / new speed "
+         "(2 halves a clip, 0.5 doubles it). Nothing else moves, whatever Shotcut's ripple "
+         "settings: a shorter clip leaves a gap after it, and a longer clip must fit the gap "
+         "before the next clip on its track (the error names the free frames; make room first). "
+         "Refused (nothing changed): unknown arguments, a locked track, a blank or transition, a "
+         "clip next to a transition, a still image, generator, project or other non-file clip, a "
+         "proxy clip (turn proxy editing off first), a clip playing in reverse, a clip with fades "
+         "or keyframed filters (\"Remove fades and keyframes first\": Shotcut does not move "
+         "keyframes either). Returns {track (as get_timeline), clip, speed, duration (the clip's "
+         "new frames)}.",
+         schema(R"({"type":"object","properties":{
+             "track":{"type":"integer","minimum":0},
+             "clip":{"type":"integer","minimum":0},
+             "speed":{"type":"number","minimum":0.1,"maximum":10},
+             "keep_pitch":{"type":"boolean"}
+           },"required":["track","clip","speed"],"additionalProperties":false})"),
+         clipSetSpeedTool},
     };
 }

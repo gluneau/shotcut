@@ -928,5 +928,172 @@ for c in "2 2" "317 2" "2 237" "317 237"; do
 done
 expect_eq "frame scale 0.5: the centre is red" true "$(pixel half 160 120 | awk '{print ($1 > 180 && $2 < 60 && $3 < 60) ? "true" : "false"}')"
 
+echo "== clip_set_speed"
+TOOLS="$(rpc '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -c '[.result.tools[].name]')"
+expect_eq "tools/list has clip_set_speed" true "$(echo "$TOOLS" | jq 'contains(["clip_set_speed"])')"
+ffmpeg -loglevel error -y -f lavfi -i "color=c=blue:size=320x240" -frames:v 1 "$TMP/still.png"
+# V1: 0 tone_av.mp4 0-249 with a gain of 6 dB [0,250), 1 blank [250,400), 2 tone_av.mp4 50-99
+# [400,450) (last on its track). V2: 0 a still image [0,50), 1 a colour generator [50,100),
+# 2 tone_av.mp4 with a fade-in [100,150), 3 tone_av.mp4 with a keyframed gain [150,200),
+# 4 tone_av.mp4 [200,250). A1: 0 audioonly.wav 0-49. (A proxy clip cannot be faked here: Shotcut
+# drops shotcut:proxy when it opens a project with proxy editing off.)
+cat > "$TMP/speed.mlt" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" producer="main_bin">
+  <profile description="320x240 25 fps" width="320" height="240" progressive="1" sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="4" display_aspect_den="3" frame_rate_num="25" frame_rate_den="1" colorspace="601"/>
+  <playlist id="main_bin"><property name="xml_retain">1</property></playlist>
+  <producer id="black" in="0" out="449"><property name="length">450</property><property name="resource">0</property><property name="mlt_service">color</property><property name="set.test_audio">0</property></producer>
+  <playlist id="background"><entry producer="black" in="0" out="449"/></playlist>
+  <chain id="chain0" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property>
+    <filter id="g0"><property name="mlt_service">volume</property><property name="shotcut:filter">audioGain</property><property name="level">6</property></filter>
+  </chain>
+  <chain id="chain1" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
+  <producer id="img" in="0" out="49"><property name="length">50</property><property name="resource">$TMP/still.png</property><property name="mlt_service">qimage</property></producer>
+  <producer id="col" in="0" out="49"><property name="length">50</property><property name="resource">#ff0000</property><property name="mlt_service">color</property><property name="shotcut:caption">red</property></producer>
+  <chain id="chain2" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property>
+    <filter id="f2"><property name="mlt_service">brightness</property><property name="shotcut:filter">fadeInBrightness</property><property name="alpha">1</property><property name="level">0=0;24=1</property><property name="shotcut:animIn">00:00:01.000</property></filter>
+  </chain>
+  <chain id="chain3" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property>
+    <filter id="g3"><property name="mlt_service">volume</property><property name="shotcut:filter">audioGain</property><property name="level">0=0;49=6</property></filter>
+  </chain>
+  <chain id="chain4" out="249"><property name="length">250</property><property name="resource">$MEDIA/tone_av.mp4</property><property name="mlt_service">avformat-novalidate</property></chain>
+  <chain id="chain5" out="249"><property name="length">250</property><property name="resource">$MEDIA/audioonly.wav</property><property name="mlt_service">avformat-novalidate</property></chain>
+  <playlist id="playlist0"><property name="shotcut:video">1</property><property name="shotcut:name">V1</property><entry producer="chain0" in="0" out="249"/><blank length="150"/><entry producer="chain1" in="50" out="99"/></playlist>
+  <playlist id="playlist1"><property name="shotcut:video">1</property><property name="shotcut:name">V2</property><entry producer="img" in="0" out="49"/><entry producer="col" in="0" out="49"/><entry producer="chain2" in="0" out="49"/><entry producer="chain3" in="0" out="49"/><entry producer="chain4" in="0" out="49"/></playlist>
+  <playlist id="playlist2"><property name="shotcut:audio">1</property><property name="shotcut:name">A1</property><entry producer="chain5" in="0" out="49"/></playlist>
+  <tractor id="tractor0" in="0" out="449">
+    <property name="shotcut">1</property>
+    <track producer="background"/>
+    <track producer="playlist0"/>
+    <track producer="playlist1"/>
+    <track producer="playlist2" hide="video"/>
+    <transition id="transition0"><property name="a_track">0</property><property name="b_track">1</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+    <transition id="transition1"><property name="a_track">0</property><property name="b_track">2</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+    <transition id="transition2"><property name="a_track">1</property><property name="b_track">2</property><property name="mlt_service">frei0r.cairoblend</property><property name="always_active">1</property></transition>
+    <transition id="transition3"><property name="a_track">0</property><property name="b_track">3</property><property name="mlt_service">mix</property><property name="always_active">1</property><property name="sum">1</property></transition>
+  </tractor>
+</mlt>
+XML
+open_fixture_project "$TMP/speed.mlt" >/dev/null
+sleep 1
+TL="$(tool_json get_timeline '{}')"
+V1="$(echo "$TL" | jq '.tracks[] | select(.name=="V1") | .index')"
+V2="$(echo "$TL" | jq '.tracks[] | select(.name=="V2") | .index')"
+A1="$(echo "$TL" | jq '.tracks[] | select(.name=="A1") | .index')"
+items() { tool_json get_timeline '{}' | jq -c "[.tracks[$1].clips[] | [.kind,.start,.duration]]"; }
+inout() { tool_json get_timeline '{}' | jq -c ".tracks[$1].clips[$2] | [.in,.out]"; }
+expect_eq "speed fixture: V1 items" '[["clip",0,250],["blank",250,150],["clip",400,50]]' "$(items "$V1")"
+expect_eq "speed fixture: V2 items" '[["clip",0,50],["clip",50,50],["clip",100,50],["clip",150,50],["clip",200,50]]' "$(items "$V2")"
+sstate() {
+  local t c s
+  s="$(tool_json get_timeline '{}' | jq -c 'del(.position)')"
+  for t in "$V1 0" "$V1 2" "$V2 2" "$V2 3" "$A1 0"; do s="$s|$(fa $t)"; done
+  echo "$s"
+}
+# Prints true when two saved projects are identical, else their first differences (on stderr).
+# meta.media.* lines are left out: MLT caches probe results there when it opens or decodes a file,
+# so an untouched clip that Shotcut's undo rebuilds from XML can gain some (seen: a neighbour's
+# meta.media.top_field_first and meta.media.progressive) depending on when the preview reads it.
+same_file() {
+  if cmp -s <(grep -v 'name="meta\.media\.' "$1") <(grep -v 'name="meta\.media\.' "$2"); then echo true
+  else diff <(grep -v 'name="meta\.media\.' "$1") <(grep -v 'name="meta\.media\.' "$2") | head -20 >&2; fi
+}
+speed() { tool_json clip_set_speed "$(jq -nc --argjson t "$1" --argjson c "$2" --argjson s "$3" '{track:$t,clip:$c,speed:$s}')"; }
+S0="$(sstate)"
+tool_json save_project "{\"path\":\"$TMP/speed0.mlt\"}" >/dev/null
+R="$(speed "$V1" 0 2)"
+expect_eq "speed 2: the 250-frame clip lasts 125 frames, in 0 out 124" '[0,125,0,124]' "$(echo "$R" | jq -c ".track.clips[0] | [.start,.duration,.in,.out]")"
+expect_eq "speed 2: the clip keeps its start; the gap grows; the next clip does not move" '[["clip",0,125],["blank",125,275],["clip",400,50]]' "$(items "$V1")"
+expect_eq "speed 2: result speed and frames" '{"duration":125,"speed":2}' "$(echo "$R" | jq -cS '{speed, duration}')"
+expect_eq "speed 2: the clip's gain filter is kept" "$(jn '[{"id":"gain","params":{"level":6}}]')" "$(fparams "$V1" 0)"
+expect_eq "speed 2: the clip's name shows the speed" true "$(tool_json get_timeline '{}' | jq ".tracks[$V1].clips[0].name | test(\"2x\")")"
+tool_json save_project "{\"path\":\"$TMP/speed2.mlt\"}" >/dev/null
+expect_eq "speed 2: saved as a timewarp producer with warp_speed 2" 1 "$(grep -c '<property name="warp_speed">2</property>' "$TMP/speed2.mlt")"
+expect_eq "speed 2: keep_pitch defaults to true (warp_pitch 1)" 1 "$(grep -c '<property name="warp_pitch">1</property>' "$TMP/speed2.mlt")"
+S1="$(sstate)"
+expect_eq "speed 2: one undo step" "Set clip speed: 2x" "$(undo_text)"
+expect_eq "speed 2: undo restores the timeline exactly" "$S0" "$(sstate)"
+tool_json save_project "{\"path\":\"$TMP/speed0u.mlt\"}" >/dev/null
+expect_eq "speed 2: the project saved after undo equals the one saved before" true "$(same_file "$TMP/speed0.mlt" "$TMP/speed0u.mlt")"
+redo_text >/dev/null
+expect_eq "speed 2: redo applies it again" "$S1" "$(sstate)"
+expect_eq "speed 0.5 after 2: lengthening into the next clip is an error" true "$(ferr clip_set_speed "{\"track\":$V1,\"clip\":0,\"speed\":0.5}")"
+expect_eq "speed 0.5 after 2: the error names the free frames (275)" true "$(tool_text clip_set_speed "{\"track\":$V1,\"clip\":0,\"speed\":0.5}" | grep -q '275' && echo true)"
+expect_eq "speed 0.5 after 2: nothing changed" "$S1" "$(sstate)"
+# A blank's in and out (offsets in MLT's blank producer) are not saved in a project and are not
+# kept by Shotcut's undo, which rebuilds a blank from its length: compare blanks by start and
+# duration here, and the saved projects byte for byte.
+sstate_nb() { local s; s="$(sstate)"; echo "$(jq -c '(.tracks[].clips[] | select(.kind=="blank")) |= del(.in,.out)' <<<"${s%%|*}")|${s#*|}"; }
+S1NB="$(sstate_nb)"
+tool_json save_project "{\"path\":\"$TMP/speed1.mlt\"}" >/dev/null
+R="$(speed "$V1" 0 1)"
+# Shotcut scales out, not the length: out 124 x 2 = 248, so 249 frames (250 +-1).
+expect_eq "speed 1 after 2: start 0, in 0, 250 frames +-1" true "$(echo "$R" | jq ".track.clips[0] | .start == 0 and .in == 0 and (.duration - 250 | fabs) <= 1")"
+expect_eq "speed 1 after 2: the next clip did not move" '["clip",400,50]' "$(items "$V1" | jq -c '.[-1]')"
+expect_eq "speed 1 after 2: one undo step" "Set clip speed: 1x" "$(undo_text)"
+expect_eq "speed 1 after 2: undo (blanks by start and duration)" "$S1NB" "$(sstate_nb)"
+tool_json save_project "{\"path\":\"$TMP/speed1u.mlt\"}" >/dev/null
+expect_eq "speed 1 after 2: the project saved after undo equals the one saved before" true "$(same_file "$TMP/speed1.mlt" "$TMP/speed1u.mlt")"
+undo_text >/dev/null
+expect_eq "speed: back to the start" "$S0" "$(sstate)"
+# The trimmed clip (in 50, out 99), last on its track.
+R="$(speed "$V1" 2 2)"
+expect_eq "speed 2 on a trimmed clip: start 400, in 25, duration 25 +-1" true "$(echo "$R" | jq ".track.clips[2] | .start == 400 and .in == 25 and (.duration - 25 | fabs) <= 1")"
+undo_text >/dev/null
+R="$(speed "$V1" 2 0.5)"
+expect_eq "speed 0.5 on the last clip: start 400, in 100, duration 100 +-1" true "$(echo "$R" | jq ".track.clips[2] | .start == 400 and .in == 100 and (.duration - 100 | fabs) <= 1")"
+expect_eq "speed 0.5: one undo step" "Set clip speed: 0.5x" "$(undo_text)"
+expect_eq "speed 0.5: undo" "$S0" "$(sstate)"
+R="$(tool_json clip_set_speed "{\"track\":$V1,\"clip\":2,\"speed\":1.5,\"keep_pitch\":false}")"
+tool_json save_project "{\"path\":\"$TMP/speedp.mlt\"}" >/dev/null
+expect_eq "speed keep_pitch false: warp_pitch 0" "1 0" "$(echo "$(grep -c '<property name="warp_pitch">0</property>' "$TMP/speedp.mlt") $(grep -c '<property name="warp_pitch">1</property>' "$TMP/speedp.mlt")")"
+undo_text >/dev/null
+R="$(speed "$A1" 0 2)"
+expect_eq "speed 2 on an audio clip: start 0, 25 frames +-1" true "$(echo "$R" | jq ".track.clips[0] | .start == 0 and (.duration - 25 | fabs) <= 1")"
+undo_text >/dev/null
+expect_eq "speed: back to the start again" "$S0" "$(sstate)"
+for a in "{\"track\":$V1,\"clip\":1,\"speed\":2}" "{\"track\":$V2,\"clip\":0,\"speed\":2}" "{\"track\":$V2,\"clip\":1,\"speed\":2}" \
+  "{\"track\":$V2,\"clip\":2,\"speed\":2}" "{\"track\":$V2,\"clip\":3,\"speed\":2}" \
+  "{\"track\":$V1,\"clip\":0,\"speed\":0}" "{\"track\":$V1,\"clip\":0,\"speed\":11}" "{\"track\":$V1,\"clip\":0,\"speed\":-2}" \
+  "{\"track\":$V1,\"clip\":0,\"speed\":0.09}" "{\"track\":$V1,\"clip\":0,\"speed\":\"2\"}" "{\"track\":$V1,\"clip\":0}" \
+  "{\"track\":$V1,\"clip\":0,\"speed\":2,\"keep_pitch\":\"yes\"}" "{\"track\":$V1,\"clip\":0,\"speed\":2,\"reverse\":true}" \
+  "{\"track\":$V1,\"clip\":9,\"speed\":2}" "{\"track\":$V1,\"speed\":2}"; do
+  expect_eq "speed: error for $a" true "$(ferr clip_set_speed "$a")"
+done
+expect_eq "speed: a fade is refused with 'Remove fades and keyframes first'" true "$(tool_text clip_set_speed "{\"track\":$V2,\"clip\":2,\"speed\":2}" | grep -q 'Remove fades and keyframes first' && echo true)"
+expect_eq "speed: keyframes are refused with 'Remove fades and keyframes first'" true "$(tool_text clip_set_speed "{\"track\":$V2,\"clip\":3,\"speed\":2}" | grep -q 'Remove fades and keyframes first' && echo true)"
+tool_json track_set "{\"track\":$V1,\"lock\":true}" >/dev/null
+expect_eq "speed: a locked track is an error" true "$(ferr clip_set_speed "{\"track\":$V1,\"clip\":0,\"speed\":2}")"
+tool_json track_set "{\"track\":$V1,\"lock\":false}" >/dev/null
+undo_text >/dev/null; undo_text >/dev/null
+expect_eq "speed: errors changed nothing" "$S0" "$(sstate)"
+
+echo "== clip_set_speed: transitions and export"
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+ins "$MEDIA/tone_av.mp4" 0 4 0 0
+ins "$MEDIA/tone_av.mp4" 4 8 0 100
+tool_json timeline_add_transition '{"track":0,"clip":1,"duration":10}' >/dev/null
+expect_eq "speed transition fixture: clip, transition, clip" '["clip","transition","clip"]' "$(tool_json get_timeline '{}' | jq -c '[.tracks[0].clips[].kind]')"
+for c in 0 1 2; do
+  expect_eq "speed: item $c next to or in a transition is an error" true "$(ferr clip_set_speed "{\"track\":0,\"clip\":$c,\"speed\":2}")"
+done
+open_fixture_project "$EMPTY" >/dev/null
+sleep 1
+ins "$MEDIA/tone_av.mp4" 0 10 0 0
+speed 0 0 2 >/dev/null
+EJ="$(tool_json export_video "$(jq -nc --arg p "$TMP/speed.mp4" '{path:$p,preset:"x264-medium"}')" | jq -r '.job_id')"
+ST=""
+for _ in $(seq 1 120); do
+  ST="$(tool_json get_export_status "{\"job_id\":$EJ}" | jq -r '.state')"
+  case "$ST" in succeeded|failed|stopped|removed) break ;; esac
+  sleep 1
+done
+expect_eq "speed export: succeeded" succeeded "$ST"
+DUR="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$TMP/speed.mp4")"
+echo "INFO  speed 2 export duration $DUR s (source 10 s)"
+expect_eq "speed export: 10 s at speed 2 lasts 5 s (+-0.2)" true "$(awk -v d="$DUR" 'BEGIN {print (d != "" && d >= 4.8 && d <= 5.2) ? "true" : "false"}')"
+expect_eq "speed export: has an audio stream" audio "$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$TMP/speed.mp4" | head -1)"
+
 # FOOTER (later tasks insert their blocks above this line)
 if [ "$failures" -eq 0 ]; then echo "All checks passed."; else echo "${failures} check(s) failed."; exit 1; fi

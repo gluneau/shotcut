@@ -689,6 +689,64 @@ without frei0r), and `scale: 0.5` leaves the corners black with the centre red.
 - Brightness, contrast and saturation are separate filters applied in the order they were
   added, as in Shotcut.
 
+### Clip speed
+
+`clip_set_speed` (51 tools in all) changes a timeline clip's playback speed as ONE undo step
+(`Set clip speed: <speed>x`), the way Shotcut's Properties panel does it
+(`AvformatProducerWidget::recreateProducer` and `TimelineDock::onProducerChanged`), without the
+panel or the selection.
+
+| Argument | Meaning |
+|----------|---------|
+| `track`, `clip` | The clip (a video or audio file clip) |
+| `speed` | 0.1..10, 1 = normal; no reverse |
+| `keep_pitch?` | Default true: the sound keeps its pitch (`warp_pitch` 1); false sets 0 |
+
+- The clip becomes MLT's `timewarp` producer of the same file (`timewarp:<speed>:<file>`, the
+  number formatted by MLT; speed 1 goes back to a plain `avformat` chain), with the clip's
+  properties (`Util::passProducerProperties`), caption (`name (2x)`) and filters. A frame is read
+  once so the media properties are filled in before the change is recorded.
+- Length, in and out scale with Shotcut's formula, ratio = old speed / new speed:
+  `length = round(length x ratio)`, `in = min(round(in x ratio), length - 1)`, `out =
+  min(round(out x ratio), length - 1)`; the filters' in and out follow
+  (`Controller::adjustClipFilters`). The clip's frames are therefore old frames / speed ratio
+  within one frame (a 250-frame clip at speed 2 lasts 125 frames; back at speed 1 it lasts 249,
+  because out 124 becomes 248).
+- The clip keeps its start and nothing else moves, whatever Shotcut's ripple settings: the tool
+  pushes Shotcut's `Timeline::UpdateCommand` with ripple and ripple-all-tracks off (a
+  `setRipple(false)` setter was added for this). A shorter clip leaves a gap after it. A longer
+  clip must fit the gap before the next clip on its track; otherwise the call is refused with the
+  frames it needs and the free frames ("make room first"); Shotcut's own panel instead cuts the
+  clip short (`limitClipOut`), which the tool never does.
+- Result `{track, clip, speed, duration}` (`duration` = the clip's new frames).
+- Refused, nothing changed: unknown arguments, a missing or out-of-range `speed`, a non-boolean
+  `keep_pitch`, a locked track, a blank or transition, a clip next to a transition, a still
+  image, generator, `.mlt` or other non-file clip, a proxy clip (turn proxy editing off first),
+  a clip already playing in reverse (negative `warp_speed`),
+  and a clip with fades (`shotcut:animIn`/`shotcut:animOut`) or any user filter value in MLT's
+  keyframe syntax ("Remove fades and keyframes first": Shotcut does not move keyframes when the
+  speed changes either).
+
+The smoke test checks a 250-frame clip at speed 2 (125 frames, in 0 out 124, filters kept,
+`warp_speed` 2 and `warp_pitch` 1 in the saved project), undo restoring `get_timeline` exactly and
+a saved copy of the project (apart from `meta.media.*` probe caches, which MLT can add to a clip
+Shotcut's undo rebuilds), redo, a refused lengthening into the next clip (the
+error names the 275 free frames), a trimmed clip at speed 2 and 0.5 (last on its track),
+`keep_pitch: false`, an audio clip, the refusals, and an export of a 10 s clip at speed 2 (5 s
+within 0.2 s, with an audio stream).
+
+### Known limits (clip speed)
+
+- A blank's in and out in `get_timeline` (offsets inside MLT's blank producer) can differ after
+  an undo: Shotcut's undo rebuilds a blank from its length. Blanks are saved by length only, so
+  the saved project is identical.
+- The proxy and reverse refusals are untested (reverse: no fixture). Proxy: Shotcut drops
+  `shotcut:proxy` when it opens a project with proxy editing off, so the smoke test cannot fake a
+  proxy clip.
+- Ripple settings: the smoke test runs with Shotcut's ripple setting off (the default); with
+  `ripple` and `rippleAllTracks` on, "nothing else moves" was checked by hand only.
+- The speed change re-reads the clip's file; the audio waveform is redrawn later, as in Shotcut.
+
 ## Security
 
 Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
