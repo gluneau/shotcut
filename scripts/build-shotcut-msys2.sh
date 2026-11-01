@@ -68,7 +68,7 @@ LADSPA_REVISION="origin/shotcut"
 MLT_DISABLE_SOX=0
 ENABLE_WHISPERCPP=1
 WHISPERCPP_HEAD=0
-WHISPERCPP_REVISION="v1.8.3"
+WHISPERCPP_REVISION="v1.9.5"
 ENABLE_RNNOISE=1
 RNNOISE_HEAD=1
 RNNOISE_REVISION=
@@ -375,7 +375,7 @@ function set_globals {
   # Subdirs list, for number of common operations
   # Note, the function to_key depends on this
   if [ -z "$SUBDIRS" ]; then
-    [ "$TARGET_ARCH" = "mingw64" ] && SUBDIRS="AMF nv-codec-headers"
+    [ "$TARGET_ARCH" = "ucrt64" ] && SUBDIRS="AMF nv-codec-headers"
     SUBDIRS="$SUBDIRS aom dav1d FFmpeg"
 
     if test "$ENABLE_MOVIT" = 1 && test "$MOVIT_HEAD" = 1 -o "$MOVIT_REVISION" != ""; then
@@ -656,6 +656,7 @@ function set_globals {
   # whisper.cpp
   CONFIG[9]="cmake -B build -G Ninja -D CMAKE_INSTALL_PREFIX=$FINAL_INSTALL_DIR $CMAKE_DEBUG_FLAG -D BUILD_SHARED_LIBS=ON -D GGML_VULKAN=1 -D GGML_NATIVE=OFF -D WHISPER_BUILD_SERVER=OFF -D WHISPER_BUILD_TESTS=OFF"
   if [ "$TARGET_ARCH" = "clangarm64" ]; then
+    CXXFLAGS_[9]="-include cstdlib -include algorithm -include atomic"
     CONFIG[9]="${CONFIG[9]} -D GGML_BLAS=OFF"
   else
     CONFIG[9]="${CONFIG[9]} -D GGML_AVX2=OFF -D GGML_BLAS=ON -D GGML_BLAS_VENDOR=OpenBLAS"
@@ -696,6 +697,8 @@ function set_globals {
     CONFIG[12]="${CONFIG[12]} --buildtype=release"
   fi
   CFLAGS_[12]="$CFLAGS"
+  # libc++ unqualified swap is ambiguous with svm.cpp's global swap template.
+  [ "$TARGET_ARCH" = "clangarm64" ] && PRECONFIG[12]="patch_vmaf_svm_swap"
   [ "$TARGET_ARCH" = "clangarm64" ] && LDFLAGS_[12]="$LDFLAGS -lwinpthread"
   BUILD[12]="ninja -C libvmaf/build -j $MAKEJ"
   INSTALL[12]="install_vmaf"
@@ -743,7 +746,7 @@ function set_globals {
   # rnnoise
   [ ! -e "$SOURCE_DIR"/rnnoise/configure ] && PRECONFIG[18]="./autogen.sh"
   CONFIG[18]="./configure --prefix=$FINAL_INSTALL_DIR --enable-shared --disable-static"
-  [ "$TARGET_ARCH" = "mingw64" ] && CONFIG[18]="${CONFIG[18]}  --enable-x86-rtcd"
+  [ "$TARGET_ARCH" = "ucrt64" ] && CONFIG[18]="${CONFIG[18]}  --enable-x86-rtcd"
   CFLAGS_[18]="$CFLAGS"
   LDFLAGS_[18]="$LDFLAGS"
   BUILD[18]="make -j$MAKEJ"
@@ -773,6 +776,13 @@ function install_shotcut {
 function install_ladspa-swh {
   cmd install -d "$FINAL_INSTALL_DIR"/lib/ladspa
   cmd install -p -c .libs/*.dll "$FINAL_INSTALL_DIR"/lib/ladspa
+}
+
+# v3.0.0 svm.cpp declares a global swap() template. libc++ instantiates
+# std::vector from that file and an unqualified swap is then ambiguous.
+function patch_vmaf_svm_swap {
+  cmd sed -i -E 's/(^|[^[:alnum:]_])swap\(/\1svm_swap(/g' libvmaf/src/svm.cpp \
+    || die "Unable to patch libvmaf svm.cpp"
 }
 
 function install_vmaf {
@@ -1278,8 +1288,8 @@ function deploy
 
   if [ "$TARGET_ARCH" = "clangarm64" ]; then
     log Copying some libs from msys2
-    cmd cp -p /${TARGET_ARCH}/bin/{libcrypto-3-arm64.dll,libjasper.dll,libjpeg-8.dll,libmng-2.dll,liblcms2-2.dll,libtiff-6.dll,libjbig-0.dll,libdeflate.dll,libLerc.dll,libunwind.dll,libwebpdemux-2.dll,libcairo-2.dll,libfontconfig-1.dll,libpixman-1-0.dll,libxml2-16.dll,libomp.dll,libebur128.dll,libsamplerate-0.dll,librubberband-2.dll,libsox-3.dll,libopencore-amrnb-0.dll,libvo-amrwbenc-0.dll,libFLAC.dll,libltdl-7.dll,libgsm.dll,libmad-0.dll,libao-4.dll,libid3tag-0.dll,libtwolame-0.dll,libvorbisfile-3.dll,libwavpack-1.dll,libsndfile-1.dll,libopencore-amrwb-0.dll,libmpg123-0.dll,libopusfile-0.dll,libmysofa.dll,libvidstab.dll,libexpat-1.dll,liblz4.dll,libfftw3f-3.dll,liblilv-0.dll,libserd-0.dll,libsord-0.dll,libsratom-0.dll,libzix-0.dll} .
-    # possibly needed on mingw64: libcrypto-3-x64.dll,liblz4.dll,libunwind.dll
+    cmd cp -p /${TARGET_ARCH}/bin/{libcrypto-3-arm64.dll,libjasper.dll,libjpeg-8.dll,libmng-2.dll,liblcms2-2.dll,libtiff-6.dll,libjbig-0.dll,libdeflate.dll,libLerc.dll,libunwind.dll,libwebpdemux-2.dll,libcairo-2.dll,libfontconfig-1.dll,libpixman-1-0.dll,libxml2-16.dll,libomp.dll,libebur128.dll,libsamplerate-0.dll,librubberband-3.dll,libsox-3.dll,libopencore-amrnb-0.dll,libvo-amrwbenc-0.dll,libFLAC.dll,libltdl-7.dll,libgsm.dll,libmad-0.dll,libao-4.dll,libid3tag-0.dll,libtwolame-0.dll,libvorbisfile-3.dll,libwavpack-1.dll,libsndfile-1.dll,libopencore-amrwb-0.dll,libmpg123-0.dll,libopusfile-0.dll,libmysofa.dll,libvidstab.dll,libexpat-1.dll,liblz4.dll,libfftw3f-3.dll,liblilv-0.dll,libserd-0.dll,libsord-0.dll,libsratom-0.dll,libzix-0.dll} .
+    # possibly needed on ucrt64: libcrypto-3-x64.dll,liblz4.dll,libunwind.dll
   fi
   if [ "$DEBUG_BUILD" = "1" -o "$SDK" = "1" ]; then
     [ "$TARGET_ARCH" != "clangarm64" ] && cmd cp -p "$SOURCE_DIR"/shotcut/drmingw/x64/bin/*.{dll,yes} .

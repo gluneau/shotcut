@@ -11,12 +11,14 @@ TimeSpinner 1.0 TimeSpinner.qml
 SaveDefaultButton 1.0 SaveDefaultButton.qml
 SliderSpinner 1.0 SliderSpinner.qml
 RectangleControl 1.0 RectangleControl.qml
+RectangleVui 1.0 RectangleVui.qml
 SimplePropertyUI 1.0 SimplePropertyUI.qml
 TextFilterUi 1.0 TextFilterUi.qml
 TextFilterVui 1.0 TextFilterVui.qml
 ToggleButton 1.0 ToggleButton.qml
 VuiBase 1.0 VuiBase.qml
 KeyframableFilter 1.0 KeyframableFilter.qml
+AudioMixingAssistantTag 1.0 AudioMixingAssistantTag.qml
 ToolButton 1.0 ToolButton.qml
 HoverTip 1.0 HoverTip.qml
 ComboBox 1.0 ComboBox.qml

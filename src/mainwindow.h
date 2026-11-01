@@ -192,6 +192,7 @@ private:
     bool confirmRestartExternalMonitor();
     void resetFilterMenuIfNeeded();
     void updateDecklinkActions();
+    void syncTimelineKeyframesZoom(double scale);
 
     Ui::MainWindow *ui;
     Player *m_player;
@@ -240,6 +241,7 @@ private:
     ElementsDock *m_elementsDock;
     ScreenCapture *m_screenCapture;
     HdrPreviewWindow *m_hdrPreviewWindow{nullptr};
+    bool m_syncingZoom{false};
 
 public slots:
     bool isCompatibleWithProcessingMode(MltXmlChecker &checker, QString &fileName, bool &converted);

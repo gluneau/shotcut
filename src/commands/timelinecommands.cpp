@@ -675,6 +675,31 @@ void NameTrackCommand::undo()
     m_model.setTrackName(m_trackIndex, m_oldName);
 }
 
+ChangeTrackRoleCommand::ChangeTrackRoleCommand(MultitrackModel &model,
+                                               int trackIndex,
+                                               AudioTrackRole role,
+                                               QUndoCommand *parent)
+    : QUndoCommand(parent)
+    , m_model(model)
+    , m_trackIndex(qBound(0, trackIndex, qMax(model.rowCount() - 1, 0)))
+    , m_role(role)
+    , m_oldRole(model.getTrackRole(trackIndex))
+{
+    setText(QObject::tr("Change track role"));
+}
+
+void ChangeTrackRoleCommand::redo()
+{
+    LOG_DEBUG() << "trackIndex" << m_trackIndex << "role" << m_role;
+    m_model.setTrackRole(m_trackIndex, m_role);
+}
+
+void ChangeTrackRoleCommand::undo()
+{
+    LOG_DEBUG() << "trackIndex" << m_trackIndex << "role" << m_oldRole;
+    m_model.setTrackRole(m_trackIndex, m_oldRole);
+}
+
 MergeCommand::MergeCommand(MultitrackModel &model,
                            int trackIndex,
                            int clipIndex,
@@ -879,7 +904,11 @@ void MoveClipCommand::redo()
             int newStart = m_clips.first().start + m_positionDelta;
             auto targetIndex = playlist.get_clip_index_at(newStart);
             auto clipIndex = m_clips.first().clipIndex;
-            if (targetIndex >= clipIndex || // pushing clips on same track
+            const bool resizeTransitionIn = !m_ripple
+                                            && m_model.resizeTransitionInByMoveValid(trackIndex,
+                                                                                     clipIndex,
+                                                                                     newStart);
+            if (resizeTransitionIn || targetIndex >= clipIndex || // pushing clips on same track
                 // pulling clips on same track
                 (playlist.is_blank_at(newStart) && targetIndex == clipIndex - 1)) {
                 bool done = true;
@@ -903,8 +932,7 @@ void MoveClipCommand::redo()
                                            newStart,
                                            m_clips.first().uuid,
                                            m_clips.first().group);
-                } else if (targetIndex >= clipIndex
-                           && m_model.isTransition(playlist, clipIndex + 1)) {
+                } else if (resizeTransitionIn) {
                     // Increase duration of transition
                     m_specialMove = GrowTransitionIn;
                     m_model.trimTransitionIn(trackIndex, clipIndex, -m_positionDelta, true);

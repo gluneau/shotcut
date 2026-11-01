@@ -2,6 +2,11 @@ name: build-shotcut-windows-arm64
 
 on:
   workflow_dispatch:
+    inputs:
+      version-manual:
+        description: Optional Shotcut version (for example 26.6.18). If empty, use today's date.
+        required: false
+        type: string
 
 jobs:
   build:
@@ -22,14 +27,21 @@ jobs:
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: false
           install: >-
             unzip zip xz
 
       - name: Set version
         shell: msys2 {0}
-        run: echo "VERSION=$(date +"%y.%-m.%-d")" >> "$GITHUB_ENV"
+        run: |
+          VERSION_MANUAL="${{ inputs['version-manual'] }}"
+          if [ -n "$VERSION_MANUAL" ]; then
+            VERSION="$VERSION_MANUAL"
+          else
+            VERSION="$(date +"%y.%-m.%-d")"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Download from S3
         shell: bash
@@ -83,8 +95,9 @@ jobs:
         run: |
           mkdir -p "$HOME/bin"
           pushd "$HOME/bin"
-          curl -kLO --no-progress-meter https://s3.amazonaws.com/misc.meltymedia/shotcut-build/iscc632.txz
-          tar -xJf iscc632.txz
+          curl -kLO --no-progress-meter https://s3.amazonaws.com/misc.meltymedia/shotcut-build/iscc-6.7.3.txz
+          tar -xJf iscc-6.7.3.txz
+          rm iscc-6.7.3.txz
           popd
 
       - name: Package installer
@@ -96,6 +109,8 @@ jobs:
           tar -xJf innosetup-opera-1.txz
           rm innosetup-opera-1.txz
           cp packaging/windows/shotcut.iss .
+          cp icons/shotcut-logo-64.png .
+          sed -i "s/YY.MM.DD/$VERSION/" shotcut.iss
           echo Running Inno Setup Compiler
           ISCC -Q -O. shotcut.iss
 

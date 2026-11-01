@@ -1118,6 +1118,38 @@ void ShotcutSettings::setTimelineShowThumbnails(bool b)
 }
 
 /*!
+    \qmlproperty bool Settings::timelineRoundedCorners
+    \brief Whether timeline clips are drawn with rounded corners.
+*/
+
+bool ShotcutSettings::timelineRoundedCorners() const
+{
+    return settings.value("timeline/roundedCorners", true).toBool();
+}
+
+void ShotcutSettings::setTimelineRoundedCorners(bool b)
+{
+    settings.setValue("timeline/roundedCorners", b);
+    emit timelineRoundedCornersChanged();
+}
+
+/*!
+    \qmlproperty bool Settings::timelineSyncZoomKeyframes
+    \brief Whether Timeline and Keyframes use the same horizontal zoom. Defaults to off.
+*/
+
+bool ShotcutSettings::timelineSyncZoomKeyframes() const
+{
+    return settings.value("timeline/syncZoomKeyframes", false).toBool();
+}
+
+void ShotcutSettings::setTimelineSyncZoomKeyframes(bool b)
+{
+    settings.setValue("timeline/syncZoomKeyframes", b);
+    emit timelineSyncZoomKeyframesChanged();
+}
+
+/*!
     \qmlproperty bool Settings::timelineRipple
     \brief Whether ripple editing is enabled on the timeline.
 */
