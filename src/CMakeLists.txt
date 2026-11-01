@@ -90,6 +90,25 @@ add_executable(shotcut WIN32 MACOSX_BUNDLE
   main.cpp
   mainwindow.cpp mainwindow.h
   mainwindow.ui
+  mcpanalysis.cpp mcpanalysis.h
+  mcpfiltercommands.cpp mcpfiltercommands.h
+  mcpfilters.h
+  mcpguide.cpp
+  mcpjobs.cpp mcpjobs.h
+  mcpserver.cpp mcpserver.h
+  mcptools.cpp mcptools.h
+  mcptools_analysis.cpp
+  mcptools_audio.cpp
+  mcptools_export.cpp
+  mcptools_filters.cpp
+  mcptools_format.cpp
+  mcptools_frame.cpp
+  mcptools_overview.cpp
+  mcptools_picture.cpp
+  mcptools_structure.cpp
+  mcptools_timeline.cpp
+  mcptools_transcribe.cpp
+  mcptoolsutil.cpp mcptoolsutil.h
   mltcontroller.cpp mltcontroller.h
   mltxmlchecker.cpp mltxmlchecker.h
   models/actionsmodel.cpp models/actionsmodel.h

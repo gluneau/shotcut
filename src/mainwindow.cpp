@@ -53,6 +53,7 @@
 #include "hdrpreviewwindow.h"
 #include "jobqueue.h"
 #include "jobs/screencapturejob.h"
+#include "mcpserver.h"
 #include "models/audiolevelstask.h"
 #include "models/keyframesmodel.h"
 #include "models/motiontrackermodel.h"
@@ -225,6 +226,7 @@ MainWindow::MainWindow()
     setupAndConnectPlayerWidget();
 
     setupSettingsMenu();
+    setupMcpServer();
     readPlayerSettings();
     configureVideoWidget();
 
@@ -1118,6 +1120,49 @@ MainWindow::~MainWindow()
 {
     delete ui;
     Mlt::Controller::destroy();
+}
+
+void MainWindow::setupMcpServer()
+{
+    m_mcpServer = new McpServer(this);
+
+    QMenu *menu = ui->menuSettings->addMenu(tr("MCP Server"));
+    QAction *enable = menu->addAction(tr("Enable"));
+    enable->setObjectName("mcpServerEnableAction");
+    enable->setCheckable(true);
+    QAction *copyToken = menu->addAction(tr("Copy Token to Clipboard"));
+    copyToken->setObjectName("mcpServerCopyTokenAction");
+    QAction *regenerate = menu->addAction(tr("Regenerate Token"));
+    regenerate->setObjectName("mcpServerRegenerateTokenAction");
+
+    connect(enable, &QAction::toggled, this, [this, enable](bool on) {
+        Settings.setMcpServerEnabled(on);
+        if (!on) {
+            m_mcpServer->stop();
+            showStatusMessage(tr("MCP server stopped"));
+        } else if (m_mcpServer->start(Settings.mcpServerPort(), Settings.mcpServerToken())) {
+            showStatusMessage(tr("MCP server listening on 127.0.0.1:%1").arg(Settings.mcpServerPort()));
+        } else {
+            showStatusMessage(tr("MCP server failed to start: %1").arg(m_mcpServer->errorString()));
+            // Not persisted as disabled, so the next launch retries after a transient port clash.
+            QSignalBlocker blocker(enable); // keep the failure message visible
+            enable->setChecked(false);
+        }
+    });
+    connect(copyToken, &QAction::triggered, this, [this]() {
+        QGuiApplication::clipboard()->setText(Settings.mcpServerToken());
+        showStatusMessage(tr("MCP token copied to the clipboard"));
+    });
+    connect(regenerate, &QAction::triggered, this, [this]() {
+        Settings.regenerateMcpServerToken();
+        m_mcpServer->setToken(Settings.mcpServerToken());
+        showStatusMessage(tr("MCP token regenerated"));
+    });
+
+    // Start after the constructor finishes so no request can reach a half-built MainWindow.
+    QTimer::singleShot(0, this, [this, enable]() {
+        enable->setChecked(Settings.mcpServerEnabled()); // starts the server when enabled
+    });
 }
 
 void MainWindow::setupSettingsMenu()
@@ -2120,6 +2165,35 @@ void MainWindow::setProfile(const QString &profile_name)
     LOG_DEBUG() << profile_name;
     MLT.setProfile(profile_name);
     emit profileChanged();
+}
+
+bool MainWindow::setVideoMode(int width, int height, int fpsNum, int fpsDen, QString &error)
+{
+    if ((MLT.producer() && MLT.producer()->is_valid()) || isMultitrackValid()
+        || isPlaylistValid()) {
+        error = tr("The project must be empty: start a new project first.");
+        return false;
+    }
+    // Same as an unnamed custom Video Mode (on_actionAddCustomProfile_triggered with
+    // CustomProfileDialog::on_buttonBox_accepted): square pixels, progressive, BT.709, SDR. The
+    // saved Video Mode setting is left alone.
+    const auto gcd = Util::greatestCommonDivisor(width, height);
+    MLT.profile().set_explicit(1);
+    MLT.profile().set_width(width);
+    MLT.profile().set_height(height);
+    MLT.profile().set_display_aspect(width / gcd, height / gcd);
+    MLT.profile().set_sample_aspect(1, 1);
+    MLT.profile().set_frame_rate(fpsNum, fpsDen);
+    MLT.profile().set_progressive(1);
+    MLT.profile().set_colorspace(709);
+    MLT.updatePreviewProfile();
+    MLT.setPreviewScale(Settings.playerPreviewScale());
+    MLT.setColorTrc(QString());
+    // No menu entry matches; this also stops open() from returning to Automatic mode.
+    if (m_profileGroup->checkedAction())
+        m_profileGroup->checkedAction()->setChecked(false);
+    emit profileChanged();
+    return true;
 }
 
 bool MainWindow::isSourceClipMyProject(QString resource, bool withDialog)
@@ -3816,6 +3890,30 @@ bool MainWindow::continueModified()
     return true;
 }
 
+QSharedPointer<AutoSaveFile> MainWindow::discardModified()
+{
+    setWindowModified(false);
+    // Hand the handle back instead of resetting it so the recovery file survives until the caller
+    // knows the new project really opened.
+    QMutexLocker locker(&m_autosaveMutex);
+    QSharedPointer<AutoSaveFile> old;
+    old.swap(m_autosaveFile);
+    return old;
+}
+
+void MainWindow::restoreDiscardedModified(QSharedPointer<AutoSaveFile> autosave)
+{
+    {
+        QMutexLocker locker(&m_autosaveMutex);
+        // A non-null handle means open() already installed its own for the new project, which
+        // must keep it; the old handle then just goes out of scope like the GUI's "No" branch.
+        if (m_autosaveFile)
+            return;
+        m_autosaveFile = autosave;
+    }
+    setWindowModified(true);
+}
+
 bool MainWindow::continueJobsRunning()
 {
     if (JOBS.hasIncomplete()) {
@@ -4375,6 +4473,13 @@ Mlt::Playlist *MainWindow::playlist() const
 bool MainWindow::isPlaylistValid() const
 {
     return m_playlistDock->model()->playlist() && m_playlistDock->model()->rowCount() > 0;
+}
+
+AbstractJob *MainWindow::exportToFile(const QString &presetName,
+                                      const QString &path,
+                                      QString &error)
+{
+    return m_encodeDock->exportToFile(presetName, path, error);
 }
 
 Mlt::Producer *MainWindow::multitrack() const

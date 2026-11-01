@@ -56,6 +56,21 @@ public:
 
     void loadPresetFromProperties(Mlt::Properties &);
     bool isExportInProgress() const;
+    // Renders the current project to `path` with a stock or custom preset without any dialog.
+    // Returns the queued job, or nullptr with `error` set.
+    // Path-safety checks (normalized path, symlinks, project media identity, hard links, free
+    // space) live in the MCP tool layer (src/mcptools_export.cpp); callers must apply them.
+    AbstractJob *exportToFile(const QString &presetName, const QString &path, QString &error);
+    // The preset exportToFile uses for presetName (a stock name relative to consumer/avformat/,
+    // or a custom preset's file name), or nullptr; the caller deletes it. profileFolder is set
+    // to the profile folder a stock preset is in, if any.
+    Mlt::Properties *exportPreset(const QString &presetName,
+                                  QString *profileFolder = nullptr) const;
+    // The names the presets tree shows as files: custom preset files, or stock presets (not
+    // hidden) relative to consumer/avformat/. exportPreset may still refuse some.
+    QStringList exportPresetNames(bool custom) const;
+    // True when presetName names a stock preset (hidden or not), which exportPreset prefers.
+    bool isStockPreset(const QString &presetName) const;
 
 signals:
     void captureStateChanged(bool);
@@ -192,7 +207,8 @@ private:
                            const QString &target,
                            int realtime,
                            int pass = 0,
-                           const QThread::Priority priority = Settings.jobPriority());
+                           const QThread::Priority priority = Settings.jobPriority(),
+                           QString *error = nullptr);
     void runMelt(const QString &target, int realtime = -1);
     void enqueueAnalysis();
     void enqueueMelt(const QStringList &targets, int realtime);

@@ -42,6 +42,8 @@ class EncodeDock;
 class JobsDock;
 class PlaylistDock;
 class QUndoStack;
+class McpServer;
+class AbstractJob;
 class QActionGroup;
 class FilterController;
 class ScopeController;
@@ -69,21 +71,26 @@ public:
     ~MainWindow();
     void open(Mlt::Producer *producer, bool play = true);
     bool continueModified();
+    QSharedPointer<AutoSaveFile> discardModified();
+    void restoreDiscardedModified(QSharedPointer<AutoSaveFile> autosave);
     bool continueJobsRunning();
     QUndoStack *undoStack() const;
     bool saveXML(const QString &filename, bool withRelativePaths = true);
     static void changeTheme(const QString &theme);
     PlaylistDock *playlistDock() const { return m_playlistDock; }
     TimelineDock *timelineDock() const { return m_timelineDock; }
+    EncodeDock *encodeDock() const { return m_encodeDock; }
     FilterController *filterController() const { return m_filterController; }
     Mlt::Playlist *playlist() const;
     bool isPlaylistValid() const;
+    AbstractJob *exportToFile(const QString &presetName, const QString &path, QString &error);
     Mlt::Producer *multitrack() const;
     bool isMultitrackValid() const;
     void doAutosave();
     void setFullScreen(bool isFullScreen);
     QString untitledFileName() const;
     void setProfile(const QString &profile_name);
+    bool setVideoMode(int width, int height, int fpsNum, int fpsDen, QString &error);
     QString fileName() const { return m_currentFile; }
     bool isSourceClipMyProject(QString resource = MLT.resource(), bool withDialog = true);
     bool keyframesDockIsVisible() const;
@@ -152,6 +159,7 @@ private:
     void setupMenuView();
     void connectVideoWidgetSignals();
     void setupSettingsMenu();
+    void setupMcpServer();
     void setupOpenOtherMenu();
     void setupActions();
     void mirrorViewActionShortcuts();
@@ -197,6 +205,7 @@ private:
     QString m_currentFile;
     bool m_isKKeyPressed;
     QUndoStack *m_undoStack;
+    McpServer *m_mcpServer = nullptr;
     QDockWidget *m_historyDock;
     QActionGroup *m_profileGroup;
     QActionGroup *m_externalGroup;

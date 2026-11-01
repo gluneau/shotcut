@@ -178,7 +178,8 @@ void NewProjectFolder::on_actionAddCustomProfile_triggered()
         } else if (m_profileGroup->checkedAction()) {
             ui->videoModeButton->setText(tr("Custom"));
             m_profileGroup->checkedAction()->setChecked(false);
-            MAIN.profileGroup()->checkedAction()->setChecked(false);
+            if (MAIN.profileGroup()->checkedAction())
+                MAIN.profileGroup()->checkedAction()->setChecked(false);
         }
         // Use the new profile.
         emit MAIN.profileChanged();

@@ -1,0 +1,1444 @@
+# MCP server
+
+Shotcut can run a local [Model Context Protocol](https://modelcontextprotocol.io) server so an
+MCP client (for example Claude Code) can control it. It is off by default.
+
+## Tool index
+
+All 58 tools, by the stage (and part) that added them; the stage sections below give their
+arguments, results, refusals and limits. `get_editing_guide` returns recipes that chain them for
+four common edits.
+
+| Tool | Purpose | Stage |
+|------|---------|-------|
+| `get_state` | Project path, modified flag, playback, position, video format | 1 |
+| `open_project` | Opens a project or media file | 1 |
+| `save_project` | Saves the project, or writes a copy | 1 |
+| `play` | Starts playback | 1 |
+| `pause` | Pauses, optionally at a frame | 1 |
+| `seek` | Moves the playhead to a frame | 1 |
+| `list_actions` | Lists the player actions `trigger_action` runs | 1 |
+| `trigger_action` | Runs one allowlisted player action | 1 |
+| `get_frame` | An image of one frame | 2 |
+| `get_playlist` | Lists the playlist items | 2 |
+| `get_timeline` | Tracks with their clips, blanks and transitions | 2 |
+| `playlist_add` | Adds a media file to the playlist | 2 |
+| `timeline_add_playlist` | Appends every playlist item to a video track | 2 |
+| `timeline_split` | Splits a clip at a frame | 2 |
+| `timeline_remove` | Removes (ripple) or lifts a clip | 2 |
+| `timeline_trim` | Moves a clip's in or out edge | 2 |
+| `timeline_move` | Moves a clip to a frame, or to another track | 2 |
+| `timeline_add_transition` | A dissolve between two touching clips | 2 |
+| `timeline_fade` | A clip's fade-in and fade-out | 2 |
+| `undo` | Undoes the last edit | 2 |
+| `redo` | Redoes the last undone edit | 2 |
+| `export_video` | Renders the project to a file in the background | 2 |
+| `get_export_status` | Progress and result of an export | 2 |
+| `get_job` | Status and result of a background analysis job | 3A |
+| `analyze_media` | Duration, picture size, frame rate and streams of a file (ffprobe) | 3A |
+| `detect_silence` | Silent and spoken stretches of a source's audio | 3A |
+| `audio_levels` | Loudness (LUFS, LRA, true peak) and levels over time | 3A |
+| `detect_scenes` | Scene changes (cuts) in a source's video | 3A |
+| `transcribe` | Speech to text with word times (Whisper), or a supplied transcript | 3A |
+| `get_overview` | One contact-sheet image of the whole timeline | 3A |
+| `timeline_insert_range` | Puts a range of a file on a track (insert or overwrite) | 3A |
+| `timeline_remove_ranges` | Cuts the same frame ranges out of several tracks at once | 3A |
+| `track_add` | Adds a video or audio track | 3A |
+| `track_remove` | Removes a track | 3A |
+| `track_set` | A track's name, mute, lock, hide, compositing and gain | 3A |
+| `marker_add` | Adds a point or range marker | 3A |
+| `marker_list` | Lists the markers | 3A |
+| `marker_remove` | Removes a marker | 3A |
+| `filter_list_available` | The allowlisted filters with their parameters | 3B |
+| `filter_list_applied` | A clip's filters in processing order | 3B |
+| `filter_add` | Adds an allowlisted filter to a clip | 3B |
+| `filter_set` | Changes parameters of a clip's filter | 3B |
+| `filter_remove` | Removes a clip's filter | 3B |
+| `clip_set_volume` | A clip's volume in dB | 3B |
+| `clip_normalize` | Measures a clip's loudness and sets its volume to a target | 3B |
+| `track_set_ducking` | Dips a track while the tracks above it are loud | 3B |
+| `clip_detach_audio` | Moves a video clip's sound to an audio track | 3B |
+| `clip_set_color` | A clip's brightness, contrast, saturation and colour temperature | 3B |
+| `clip_set_transform` | A clip's size, position, rotation and crop | 3B |
+| `clip_set_blur` | A box blur, or the picture over a blurred pad | 3B |
+| `clip_set_speed` | A clip's playback speed | 3B |
+| `project_set_format` | The video format of an empty project (16:9, 9:16, 1:1, 4:5, custom) | 3C |
+| `clip_reframe` | Makes a clip of another shape fill the frame (crop or pad) | 3C |
+| `title_add` | A text clip (title) on a video track | 3C |
+| `lower_third_add` | A name and second line on a bar across the lower part of the frame | 3C |
+| `captions_from_transcript` | Captions (burned in by default) from a clip's transcript | 3C |
+| `export_presets_list` | The presets `export_video` accepts | 3C |
+| `get_editing_guide` | A step-by-step recipe for a common edit | 3C |
+
+## Enable
+
+1. Settings > MCP Server > Enable. The server listens on `127.0.0.1:7468` only.
+2. Settings > MCP Server > Copy Token to Clipboard.
+3. Connect a client, for example:
+
+       claude mcp add --transport http shotcut http://127.0.0.1:7468/mcp \
+         --header "Authorization: Bearer <token>"
+
+The port is read from `mcpServer/port` (1024-65535, default 7468) in Shotcut's settings file when
+the server starts, so toggle Enable off and on after changing it. An invalid value silently falls
+back to 7468. "Regenerate Token" invalidates
+the old token immediately.
+
+If the port is busy at startup or when you tick Enable, Shotcut shows a status message, unchecks
+the menu item and keeps the saved setting, so it retries on the next launch. To stop retrying, free
+the port or change `mcpServer/port`.
+
+The server speaks MCP over HTTP with a handshake: `initialize` is required first. Supported
+protocol versions are 2025-11-25, 2025-06-18, 2025-03-26 and 2024-11-05. The stateless 2026-07-28
+revision is not supported.
+
+## Stage 1: project and transport
+
+| Tool | What it does |
+|------|--------------|
+| `get_state` | Project path, modified flag, loaded/playing, position, duration, fps, profile |
+| `open_project` | Open a project or media file (absolute path of an existing file) |
+| `save_project` | Save the project, or write a copy |
+| `play`, `pause`, `seek` | Transport control (frame numbers) |
+| `list_actions`, `trigger_action` | List and trigger a fixed allowlist of 17 player actions |
+
+`open_project` refuses if the project has unsaved changes unless `discard_changes` is true, and
+refuses if an auto-save file exists for the project (`.mlt`/`.xml` project files only).
+`discard_changes` applies only when a project file (`.mlt`/`.xml`, case-sensitive) is opened or no
+project is loaded; opening a media file while a timeline or playlist project is loaded neither
+needs it nor touches the project or its modified flag. It returns an error (and restores the
+modified flag) if Shotcut did not actually open the file. Rare project-repair or compatibility
+dialogs inside Shotcut's open code can still appear for unusual project files and block the
+request until they are answered; call `get_state` to confirm the result.
+
+`save_project` without `path` saves to the current file (error if the project is untitled; Shotcut
+may show its own save-error dialog if the write itself fails). With `path` (absolute, must end in
+`.mlt`) it writes a copy and leaves the current file and the modified flag unchanged.
+
+`seek` is clamped to the last frame (the timeline length when a timeline project is open). Whether
+playback continues after a seek follows Shotcut's "pause after seek" player setting; `pause` always
+stops playback.
+
+`trigger_action` accepts only these player actions (also returned by `list_actions`):
+`playerPlayPauseAction`, `playerPauseAction`, `playerRewindAction`, `playerFastForwardAction`,
+`playerSeekStartAction`, `playerSeekEndAction`, `playerNextFrameAction`,
+`playerPreviousFrameAction`, `playerForwardOneSecondAction`, `playerBackwardOneSecondAction`,
+`playerForwardFiveSecondsAction`, `playerBackwardFiveSecondsAction`,
+`playerForwardTenSecondsAction`, `playerBackwardTenSecondsAction`, `playerSkipNextAction`,
+`playerSkipPreviousAction`, `playerLoopAction`.
+
+## Stage 2: seeing, editing and exporting
+
+Stage 2 adds 15 tools (23 in all) so a client can build a playlist, edit the timeline, look at the
+result and render it.
+
+Key arguments (the tool index says what each tool does):
+
+- `get_frame`: `position?`, `max_width?` (64-1920, default 640), `format?` (`jpeg` default,
+  `png`)
+- `get_playlist`, `get_timeline`, `undo`, `redo` (in Shotcut's history): none
+- `playlist_add`: `path`
+- `timeline_add_playlist`: `track?` (default V1)
+- `timeline_split`: `track`, `position` (strictly inside the clip)
+- `timeline_remove`: `track`, `clip`, `ripple?` (default true; false lifts it, leaving a blank)
+- `timeline_trim`: `track`, `clip`, `edge`, one of `frame` or `delta`, `ripple?` (default false)
+- `timeline_move`: `track`, `clip`, `to_start`, `to_track?`
+- `timeline_add_transition` (Shotcut's default dissolve): `track`, `clip` (the incoming, later
+  clip), `duration`
+- `timeline_fade`: `track`, `clip`, `fade_in?`, `fade_out?` (0 removes a fade)
+- `export_video` (a background job): `path`, `preset?`, `overwrite?`
+- `get_export_status`: `job_id?` (default: the latest)
+
+Positions and `to_start` are absolute timeline frames; `frame` in `timeline_trim` is the absolute
+timeline frame the edge moves to. Tool arguments are validated strictly (the tools of stages 1
+and 2 ignore unknown argument names; every stage 3 tool refuses them) and no stage 2 tool
+opens a dialog.
+
+### Editing rules
+
+- Every edit is undoable with Shotcut's own Edit > Undo and with the `undo`/`redo` tools. These
+  also undo and redo edits made in the Shotcut window.
+- Indexes shift after a split, remove or transition. Every edit returns the updated track (same
+  shape as one `tracks[]` entry of `get_timeline`), so use that instead of guessing.
+- Track 0 is the TOPMOST video track; `get_timeline` reports each track's `name` ("V1", "A1").
+- These are refused with an error and change nothing: locked tracks; blank or transition items
+  where a clip is needed; invalid trims (including an extension longer than the neighbouring
+  gap); overlapping moves; moving a clip that is joined to a transition; a transition whose
+  incoming clip follows a blank, a transition or nothing, or already has a transition after it.
+- `playlist_add` accepts media files and still images (added with Shotcut's default image
+  duration), not project files (use `open_project`) or generators. With nothing loaded, the first
+  file also becomes the loaded clip, as in Shotcut's Add Files. When the window has unsaved
+  changes and nothing is loaded it returns an error instead of asking in a dialog.
+- `timeline_add_playlist` appends all playlist items after the existing clips of the track in one
+  undo step. The default track is V1, and the timeline is created if there is none.
+- Each `timeline_trim` is one undo step.
+- `timeline_add_transition` uses Shotcut's default dissolve with an audio cross-fade, with
+  ripple: the clips overlap by `duration`, so later clips on the track move earlier by `duration`
+  and the timeline gets shorter. Other tracks ripple according to Shotcut's own ripple setting.
+- `timeline_fade` sets both fades in one undo step; a fade cannot be longer than the clip.
+
+### get_frame
+
+Returns an image content item (JPEG, 640 px wide by default, or PNG) plus a text item with
+`position`, `width`, `height`, `format` and `proxy`. Images are never upscaled. Without `position`
+it returns the frame shown now. With `position` it pauses, moves the playhead like `seek` (clamped
+to the last frame) and waits for the displayed frame at that timeline frame, up to 3 s; on timeout
+it returns an error rather than a wrong picture.
+
+The width and height follow the player: with the player's preview scale or in GPU mode the frame
+can be smaller than the project resolution, and `width`/`height` report what you got. Known limit:
+the settling rule waits for a few displayed frames (more when Player > Realtime is off), so a stale
+picture is theoretically possible with Realtime off or a very loaded GUI.
+
+### Export
+
+`export_video` renders the timeline (else the current playlist bin, else the loaded clip) as a
+background job that shows as a row in the Jobs dock, and returns `{job_id, output, preset}` at
+once. The preset defaults to `x264-medium` (H.264 + AAC, `.mp4`, the project's resolution and
+frame rate). It can be any stock preset name, or a custom preset by plain file name from
+`<appdata>/presets/encode`; paths are not accepted (`export_presets_list`, stage 3C, lists the
+names). Preconditions, each a tool error:
+
+- something is loaded and no export is already running (one at a time);
+- `path` is absolute, normalized (no `./`, `../`, doubled slashes) and not a symbolic link or
+  directory, and its extension matches the preset's;
+- the folder exists and is writable, with at least 1 GiB free;
+- the file does not exist, unless `overwrite: true`;
+- the melt program exists next to the Shotcut binary. It is named `melt-7` on Linux and `melt` on
+  Windows and macOS. In a Linux dev tree link it in (adjust to your MLT prefix):
+
+      ln -s <mlt prefix>/bin/melt-7 build/cc-debug-linux/src/melt-7
+
+Safety: an export never overwrites media used by the project: timeline clips, playlist items, the
+loaded clip and the project file, checked by path and by file identity. A hard-linked target and
+anything in the autosave folder are also refused. The guard has a blind spot: files referenced only
+inside filters or nested project clips are not seen, so do not pass `overwrite: true` for a file
+you did not create.
+
+Side effects: the preset overwrites the Export panel's settings and its "export from" choice
+(the panel's hardware-encoder and proxy/preview-scale choices may still apply). The export skips
+the missing-files check and the analysis prompts, so analysis filters are not run. Dual-pass
+presets are not honored (the render is single pass). Parallel processing follows the Export
+panel's setting.
+
+`get_export_status` returns `{job_id, state, percent, output, output_exists, output_bytes,
+exit_code, elapsed_ms, error}`. `state` is one of `pending`, `running`, `paused`, `succeeded`,
+`failed`, `stopped`, `removed` (taken out of the Jobs dock before it finished) or `idle` (no
+export started yet). `output_exists` says whether the output file is on disk now, `output_bytes`
+is its size (0 if absent) and `elapsed_ms` is the run time so far, or the total once the job has
+finished. `exit_code` is the raw process code; a render that reached 99% or more counts as
+succeeded. `error` is the end of the render log when it failed.
+
+## Stage 3A: perception and structure
+
+Stage 3A adds 15 tools (38 in all) so a client can hear and read footage, look at the whole
+timeline at once and cut it by frame ranges, and manage tracks and markers.
+
+Key arguments:
+
+- `get_job`: `job_id`
+- `analyze_media` (ffprobe): `path`
+- `detect_silence`: source, `noise_db?`, `min_s?`, `wait_ms?`
+- `audio_levels` (loudness and per-slice RMS/peak levels): source, `buckets?`, `wait_ms?`
+- `detect_scenes`: source, `threshold?`, `wait_ms?`
+- `transcribe`: source, `language?`, `wait_ms?`; or `path` + `transcript` (stores a supplied
+  transcript)
+- `get_overview`: `columns?`, `rows?`, `tile_width?`, `format?`
+- `timeline_insert_range`: `path` or `playlist_index`, `in_s`, `out_s`, `track`, `position`,
+  `mode?`
+- `timeline_remove_ranges`: `tracks`, `ranges`, `ripple?` (default true)
+- `track_add` (an empty track): `type`, `name?`
+- `track_remove`: `track`, `force?`
+- `track_set`: `track` plus at least one of name, mute, lock, hide, composite, gain_db
+- `marker_add`: `start`, `end?`, `text`, `color?`
+- `marker_list` (in index order): none
+- `marker_remove`: `index`
+
+Every stage 3A tool refuses an unknown argument name before doing anything ("Unknown argument
+'x'; the arguments are: ..."; their schemas say `additionalProperties: false`), so a misspelt
+optional argument (`riple`, `noise`, `transcrip`) never runs with its default or starts a job.
+
+"Source" means exactly one of `path` (absolute path of an existing file) or `track` and `clip` (a
+timeline clip: only its trimmed range is analysed; a locked track is fine). All result times are
+seconds in the SOURCE file. For a clip source, results also carry `timeline_frames`: timeline
+frame numbers (`[{start, end}]` with `end` exclusive, or a single frame for `detect_scenes`),
+empty or omitted when a time does not map onto the clip, and always for a clip with a speed
+change.
+
+### Background jobs
+
+The analysis tools run external programs in the background. `wait_ms` (integer 0 to 20000,
+default 0) makes the call wait for the result; without it, or when the job is slower, the call
+returns `{job_id, state}` at once. Poll it with `get_job {job_id}`, which returns `{job_id, kind,
+state, percent?, result?, error?, elapsed_ms}`; `state` is `running`, `succeeded`, `failed` or
+`cancelled`, `result` is present once it succeeded and `error` (with the end of the program's
+output) once it failed. An identical call while the first still runs returns the same job. Jobs
+live in memory until Shotcut quits, also after the project is closed; beyond 200 jobs the
+oldest FINISHED ones are dropped (running jobs are never dropped, and at most 4 run). A job is
+killed after 600 s (`transcribe`: 600 s plus the length of the audio, at most 4 h).
+`analyze_media` always waits up to 5 s. The other analysis tools probe the source with ffprobe
+first (the same probe as `analyze_media`, cached per file), so the first call on a file may take
+up to 10 s while ffprobe runs, even with `wait_ms` 0.
+
+At most 4 jobs run at once, and at most one of them is a `transcribe`: a call that would start
+another returns the error "Too many analysis jobs are running; wait for one with get_job." (or "A
+transcription is already running; wait for it with get_job."). A cached result and a call
+identical to a running job (which returns that job) are never refused.
+
+Programs are looked up in Shotcut's application folder first, then on `PATH`: `ffmpeg` and
+`ffprobe` (both ship with Shotcut). A missing program is a tool error naming the program and where
+it looked (untested: the smoke scripts always run with both installed, and Whisper's "not
+configured" error is tested instead). Arguments are passed as a list, never through a shell.
+Temporary files (`transcribe`'s decoded audio) are deleted when the job ends.
+
+Results are cached in memory, keyed by the file's path, size and modification time, the tool and
+its parameters (and for a clip, its position and trim, since `timeline_frames` depend on them). A
+cached result comes back at once with `"cached": true`. The cache keeps the 200 most recent
+results, has no size budget and is lost when Shotcut quits. Editing a file in place without
+changing its size or modification time is not noticed.
+
+### Analysis tools
+
+- `analyze_media {path}` returns `{path, duration_s, size_bytes, video, audio}`: `video` is
+  `{width, height, fps, codec, rotation, pix_fmt}` or null, `audio` is `{channels, sample_rate,
+  codec}` or null; first video and first audio stream only; `rotation` is degrees as ffprobe
+  reports it (may be negative). `duration_s` is null when unknown. Errors: relative or missing
+  path, a directory, a Qt resource path, a file that is not media (the job fails). Stage 3A also
+  adds `width`, `height`, `has_audio`, `rotation` and `fps` of the source to clips in
+  `get_playlist` and `get_timeline` (omitted when unknown).
+- `detect_silence` (`noise_db` -90 to -10, default -35; `min_s` 0.05 to 30, default 0.4)
+  returns `{path, in_s, out_s, ranges, speech_ranges, total_silence_s}`; `ranges` are the silent
+  stretches and `speech_ranges` the rest of `[in_s, out_s]`, each `{start_s, end_s,
+  duration_s, timeline_frames?}`. Boundaries are approximate (about 0.1 s). A silence running
+  to the end is closed at `out_s`. A source without audio is an error.
+- `audio_levels` (`buckets` 1 to 600, default 60) returns `{path, in_s, out_s, integrated_lufs,
+  loudness_range_lu, true_peak_dbtp, buckets:[{start_s, end_s, rms_db, peak_db}]}`. Levels are
+  dBFS with a floor of -120; `integrated_lufs` reads -70 for silence (ebur128's floor). A source
+  without audio, or longer than 7200 s, is an error (analyse a clip range instead).
+- `detect_scenes` (`threshold` 0.05 to 0.9, default 0.3) returns `{path, in_s, out_s,
+  scenes:[{time_s, score, timeline_frames?}]}`; `time_s` is the first frame of the new scene,
+  `score` (0 to 1, 3 decimals) how different it is from the frame before. A hard cut scores
+  about 1, a change between similar pictures less (the fixture's red-to-green cut scores 0.64),
+  so a high threshold misses soft cuts. A cut on the very first frame of the analysed range is
+  never reported (there is no frame before it). A source without video is an error.
+- `get_overview` (`columns` and `rows` 1 to 8, default 4; `tile_width` 96 to 640, default 320;
+  `format` `jpeg` or `png`) returns one image of `columns*rows` frames evenly spaced from frame
+  0 to the last frame, each labelled with its timecode and frame number, plus `{columns, rows,
+  tile_width, positions}` with the values actually used. Limits: a timeline with fewer frames
+  than tiles gets one tile per frame; `tile_width` is reduced (not below 96) so neither side of
+  the image exceeds 4096 px; every tile waits at most 3 s for its frame and the whole sheet at
+  most 45 s, else an error. The playhead is put back and playback resumes; a source clip shown
+  in the player is replaced by the timeline. Refused with no timeline, an empty timeline, or
+  while an export started with `export_video` runs; stopped with an error if the timeline
+  changes meanwhile (detected as a different timeline object or a different length: a timeline
+  replaced by another of the same length at the same address is not noticed).
+
+### transcribe and Whisper
+
+`transcribe` runs the Whisper.cpp program and model configured in Shotcut: Settings are in the
+Subtitles panel > Speech to Text... > Configuration (the `whisper-cli` executable and a GGML model
+file; nothing is downloaded). When either is missing the call returns "Whisper is not
+configured" at once, without starting a job. The audio is decoded with ffmpeg to 16 kHz mono and
+passed to `whisper-cli ... -ojf`; GPU use follows the dialog's Use GPU option, and a failed run is
+not retried (the error carries the program's message and, with the GPU on, a hint to turn it
+off). `language` is `auto` (default) or a Whisper code (`en`, `fr`, ...; also `haw`, `yue`);
+whisper-cli itself rejects unknown codes.
+
+The result is `{path, in_s, out_s, language, granularity, segments:[{start_s, end_s, text,
+words:[{start_s, end_s, text}], timeline_frames?}]}`. `granularity` is `word`, or `segment` when
+Whisper gave no word times. Words lie inside their segment, in order, and may have `start_s ==
+end_s`. Punctuation tokens (ASCII, and Unicode punctuation such as an ellipsis or an em dash)
+join a word's text without extending its end time. A segment that has no length once clamped to
+the analysed range is dropped. Audio without speech gives `segments: []`.
+
+Bring your own transcript instead: `transcribe {path, transcript}` (nothing else) stores
+`transcript` = `{segments:[{start_s, end_s, text, words?}]}` for that file: 1 to 5000 segments
+sorted by `start_s`, `0 <= start_s < end_s <= 86400`, non-empty text of at most 2000
+characters (Unicode code points, so an emoji counts once), words (at most 2000 per segment)
+inside their segment and in order. It is returned with `"supplied": true` by later `transcribe
+{path}` calls and wins over Whisper results. A track and clip call always runs Whisper. Supplied
+transcripts are never evicted, but at most 200 files may hold one: storing for a 201st file is an
+error, replacing the transcript of a file that has one is allowed. The last 50 Whisper results
+are also kept per file for later tools.
+
+### Structure tools
+
+- `timeline_insert_range` puts `[in_s, out_s)` of a media file (`path`) or of a playlist item
+  (`playlist_index`, whose own in/out is the default range; its filters are not carried over and
+  an item with a speed change is refused) on `track` at the absolute frame `position`, as one
+  undo step, and returns `{track, inserted:{start, duration}, ripple:{all_tracks, markers}}`.
+  `mode` `insert` (default) splits a clip at `position` and pushes later items right; whether
+  other tracks and markers also move follows Shotcut's own ripple settings, reported in
+  `ripple` and in `get_timeline`'s `settings`. `overwrite` replaces what is under the range and
+  never ripples. With no timeline, `track` must be 0 and the first video track is created, plus
+  an audio track A1 when Shotcut's Timeline > Automatically Add Tracks setting is on, as
+  `timeline_add_playlist` does; both are part of the same undo step. Refused:
+  locked tracks, still images, generators, project files, a range beyond the file or shorter
+  than one frame, a position more than one hour after the end of the track, a position inside a
+  transition and an overwrite covering part of one. Inserting exactly at a transition's start
+  puts the new clip before the transition, which then plays after the new clip instead of at the
+  end of the previous clip; inserting exactly at its end puts the new clip between the
+  transition and the next clip. An overwrite covering a whole transition replaces it.
+- `timeline_remove_ranges` cuts the same `ranges` (absolute frames `{start, end}`, `end`
+  exclusive, up to 500) out of every listed track (1 to 8) as one undo step, and returns
+  `{tracks, removed_frames, ranges_applied, ripple}`. Ranges are sorted, overlapping or touching
+  ones merged, clamped to the end of the longest listed track and dropped past it. With `ripple`
+  true (default) each range is closed on every listed track, gaps included, so the tracks stay
+  aligned; unlisted tracks are never touched, whatever Shotcut's ripple-all-tracks setting is
+  (the tool turns it off while it works and restores it). Markers follow Shotcut's
+  ripple-markers setting: markers inside a range are deleted and later ones shift once, with the
+  track that loses the most. With `ripple` false the clips are lifted and gaps remain. A range
+  that overlaps or touches a transition is refused before anything changes (keep a one-frame
+  margin).
+
+  Work cap: at most 120 cuts per call (ranges after merging times listed tracks, for example 60
+  ranges on 2 tracks); more is refused up front with nothing changed. Every split and remove
+  makes Shotcut snapshot the whole track for undo and a split reopens the media, so the cost
+  grows faster than the number of cuts (on a debug build 120 cuts take about 12 s and memory
+  grows by roughly 0.6 GB). 120 is the previous cap, re-measured against the undo-snapshot race
+  described below with the preview guard in place (see there for the numbers). For more ranges
+  send chunks from the END of the timeline to the start, so ripple never shifts a range you have
+  not sent yet (or re-read `get_timeline` between chunks); each call is one undo step, and
+  `save_project` first is a good idea.
+- `track_add {type, name?}` adds an empty track as one undo step and returns `{tracks, added}`.
+  A video track goes on top (index 0, so every index shifts by one), an audio track at the
+  bottom. A track head selected in the timeline is deselected, as Shotcut's own Add Track does.
+- `track_remove {track, force?}` removes a track as one undo step; a track holding clips needs
+  `force: true`. Undo restores its clips, filters, name, mute, hide, gain and compositing on/off
+  (not a custom blend mode). The bottom video track is refused: a timeline needs one, and
+  Shotcut's own Remove Track, when undone with other video tracks present, reconnects their
+  blend transitions to the wrong tracks. Remove its clips with `timeline_remove_ranges` instead.
+- `track_set` sets `name`, `mute`, `lock`, `hide` and `composite` (video only; the bottom video
+  track cannot composite) and `gain_db` (-70 to 24, any track) as one undo step. Values are set,
+  not toggled; a call that changes nothing adds no undo step. A locked track only accepts
+  `lock: false` (optionally with other properties, applied after unlocking). A gain with
+  keyframes is refused.
+- Names (tracks, 1 to 64) and marker texts (1 to 200) count characters as Unicode code points
+  and must not be blank.
+- `marker_add {start, end?, text, color?}` adds a point or range marker (inclusive frames as in
+  Shotcut; `start` and `end` at most one hour of frames after the end of the timeline; `color`
+  `#rrggbb`) and returns `{index, marker, markers_count}`. Markers are listed by `marker_list`
+  in the order they were added, not by time. `marker_remove {index}` removes one; later indexes
+  shift down.
+
+`get_timeline` tracks now also report `gain_db` and, for video tracks, `composite`.
+
+### Known upstream issue: undo snapshots can be corrupted
+
+Two related Shotcut/MLT thread-safety problems were found while testing; the MCP server works
+around the first one.
+
+- **Undo-snapshot corruption (the path the mitigation targets).** Shotcut writes an undo
+  snapshot of the track (and sometimes of the clip) with every split or remove, on the GUI
+  thread, while the preview thread may be rendering those same clips; rendering rewrites their
+  `meta.media.*` properties, and MLT's XML writer can then copy freed memory into the snapshot.
+  Undoing such a step aborts a debug build ("Missing snapshot for restored clip"); in a release
+  build the code skips the clip, so it would silently disappear or come back with missing
+  properties (inferred from the code, not measured). A long `timeline_remove_ranges` call
+  (hundreds of commands in one burst, repeated by its redo) makes it much more likely: without
+  the guard, 2 of 20 debug runs of a 120-cut call plus undo, redo and undo aborted.
+- **Render-thread crash in the Shotcut window.** Pressing Shift+S (Split All Tracks At
+  Playhead) every 150 ms during playback crashed 3 of 10 debug sessions of about 135 splits with
+  a SIGSEGV in the preview render thread (MLT property and producer state used by two threads).
+  This is a related MLT race in plain GUI use; the MCP server does not touch that path.
+- **Read-ahead frame during a track edit.** A frame the preview's read-ahead thread is still
+  rendering (for example the one refreshed after the previous call) used to run while the next
+  call changed tracks and transitions on the GUI thread: a loop of `track_remove` on the middle
+  of three video tracks with undo, redo and undo crashed a debug build within 4 to 16 rounds
+  (SIGSEGV in `transition_get_frame`, or "corrupted double-linked list" during
+  `RemoveTrackCommand::undo`). Since the guard stops the preview consumer, 150 rounds ran clean.
+
+The MCP server's preview guard: every tool that changes the timeline's structure
+(`timeline_remove_ranges`, `timeline_insert_range`, `timeline_add_playlist`, `timeline_split`,
+`timeline_trim`, `timeline_move`, `timeline_remove`, `timeline_add_transition`, `timeline_fade`,
+`track_add`, `track_remove`, `track_set` with `composite`, `clip_detach_audio`, `clip_set_speed`)
+and the `undo`/`redo` tools pause playback, block the preview refresh and stop the preview consumer
+(which waits for a frame it is rendering) while they run, then restart it and refresh once. The
+stopped consumer does not stay stopped: Shotcut seeks the player after every duration change, and
+that seek starts a stopped consumer again DURING the guard (seen in 21 of 24 guarded calls of the
+smoke test's longest-track loop). So on a timeline the guard also connects the consumer to a black
+stand-in at the same position, and the seek renders that instead of the clips being edited. For
+large work, `timeline_remove_ranges` always and `undo`/`redo` of a step with more than 8 commands (a
+`timeline_remove_ranges` call of 3 or more cuts), the consumer is started on the stand-in at once,
+so the preview shows black while they run. The timeline is reconnected afterwards. Guards do not
+nest (only the outermost acts).
+
+Measured on a debug build (a 120-cut call plus undo, redo and undo per run): blocking the
+refresh alone left a corrupt snapshot in about 3-7% of runs wherever 30 or more runs were made,
+at every cap from 20 to 120 cuts, so a lower cap does not help; with the stand-in, the final
+code gave no abort and no corrupt snapshot in 32 consecutive runs (95% upper bound about 9%;
+earlier, 75 runs pooled over two stand-in variants also gave none). This narrows the race but
+cannot rule it out. Call `save_project` before large cuts and send them in chunks.
+
+Residual risks:
+
+- Undo/Redo and History jumps in the Shotcut window are not guarded.
+- The edit tools that are not guarded (the filter tools and recipes other than
+  `clip_detach_audio` and `clip_set_speed`, markers, `track_set` without `composite`) keep the
+  exposure: they only pause.
+- Every guarded call restarts the audio device when the preview was running.
+- Inserting into an empty timeline creates the timeline inside the guard, while the player still
+  shows the old producer; nothing is swapped then.
+- Shotcut's autosave runs on a worker thread and may serialize the project while a guarded call
+  is half done.
+- GPU (Movit) processing mode was not tested.
+- During a guarded large call the preview shows black, the scopes freeze and the audio device is
+  restarted (the preview consumer is stopped and started twice).
+- Unverified: a `seeked` signal emitted by a redone command might move the playhead during the
+  guard.
+
+### Known limits and residual risks (stage 3A)
+
+- Undoing an overwrite onto an empty or short track leaves the extra gap that Shotcut's own
+  Overwrite command creates (the same happens in the GUI).
+- Removing a track whose gain has keyframes and undoing brings the keyframes back in an
+  ordinary Gain/Volume filter (Shotcut's Remove Track copies filters without the track-gain
+  marker): it sounds the same, but `gain_db` then reports 0.
+- Proxy clips may report the proxy's dimensions in `get_playlist`/`get_timeline`.
+- `get_overview` does not detect an export started from the Shotcut window (those use melt, not
+  the player), and uses the player while it runs.
+- A clip with a speed change has no `timeline_frames`, and its `in_s`/`out_s` are its trimmed
+  frames divided by the frame rate, not true source seconds.
+- Memory grows with every split `timeline_remove_ranges` makes (each split reopens the media);
+  a long session of many cuts can use several GB on a debug build.
+- The analysis cache and Whisper results have no size budget beyond their entry counts.
+- Transcripts are kept under the file's absolute, cleaned path, not its canonical one: a clip
+  whose resource is a symbolic link and a transcript supplied under the link's target (or the
+  other way round) never meet; supply it under the path the clip uses.
+- The "missing program" errors of the analysis tools are untested (see Background jobs).
+
+## Stage 3B: filters
+
+Stage 3B adds 13 tools (51 in all) that change how TIMELINE clips look and sound: five generic
+filter tools over an allowlist of Shotcut filters, and eight plain-language recipes built on them
+and on Shotcut's own commands.
+
+- Filters (below): `filter_list_available`, `filter_list_applied`, `filter_add`, `filter_set`,
+  `filter_remove`
+- Audio recipes: `clip_set_volume`, `clip_normalize`, `track_set_ducking`, `clip_detach_audio`
+- Picture recipes: `clip_set_color`, `clip_set_transform`, `clip_set_blur`
+- Clip speed: `clip_set_speed`
+
+Every 3B edit is at most ONE undo step with its own text, finds its clip by `(track, clip)` from
+`get_timeline` (never through the selection or the Filters panel), and changes nothing when it
+is refused. All 13 refuse an unknown argument name ("Unknown argument 'x'; the arguments are:
+..."; their schemas say `additionalProperties: false`; unknown names inside `params` are errors
+too). The residual risks of the whole part are summed up at the end of this section.
+
+The five generic filter tools (43 tools in all at that point) add, change and remove filters on
+timeline clips:
+
+- `filter_list_available` (the allowlist below with parameters, ranges, defaults and units): none
+- `filter_list_applied` (a clip's user filters in processing order): `track`, `clip`
+- `filter_add` (after the clip's existing filters): `track`, `clip`, `filter`, `params?`
+- `filter_set` (an allowlisted filter): `track`, `clip`, `index`, `params`
+- `filter_remove` (any listed filter; undo puts it back in place): `track`, `clip`, `index`
+
+`filter_list_applied` returns `{filters:[{index, id, service, disabled, params}]}`; the edit tools
+return `{index, track}` (the track as `get_timeline` reports it). `filter_list_applied` lists
+the clip's user filters in MLT (processing) order: hidden internal filters (such as the audio
+level meter) are never listed and keep their place, and chain links, which Shotcut's Filters
+panel lists first, are not included, so its indexes can differ from the panel's rows. Filters are
+appended in call order; Shotcut's panel sorts video filters before audio ones when it adds them,
+which gives the same result because they act on different streams.
+
+### The allowlist
+
+Parameters, ranges and defaults are those of Shotcut's own filter UIs (`src/qml/filters/`): the
+tool sets the defaults itself, because Shotcut applies them only when its UI first shows a new
+filter. Missing params take the defaults; unknown names, wrong types and values out of range are
+errors. A rect is `{x, y, w, h}` in pixels of the video mode (stored as `"x y w h 1"`); its
+default `fit` is the clip's picture fitted into the frame and centered.
+
+Each entry: id (MLT service, kind): parameters (range, default, unit); set automatically.
+
+- `gain` (`volume`, audio): `level` -70..24, 0 dB.
+- `normalize_one_pass` (`dynamic_loudness`, audio): `target_loudness` -50..-10, -23 LUFS;
+  `window` 2..600, 10 s; `max_gain` 0..30, 15 dB; `min_gain` -30..0, -15 dB; `max_rate` 0.5..9,
+  3 dB/s; set: `discontinuity_reset` 1.
+- `brightness` (`brightness`, video): `level` 0..2, 1 (1 = unchanged); set: `rgb_only` 1.
+- `color_grading` (`lift_gamma_gain`, video): `lift_r/g/b` -1..1, 0; `gamma_r/g/b` and
+  `gain_r/g/b` 0.5..2, 1 (raw MLT values; Shotcut's wheels show other numbers); set:
+  `shotcut:filter_version` 1.
+- `contrast` (`lift_gamma_gain` with `shotcut:filter` `contrast`, video): `gamma_r/g/b` and
+  `gain_r/g/b` 0..2, 1 (raw MLT values; Shotcut's Contrast slider at level L sets every gain to
+  L x 2 and every gamma to (1 - L) x 2).
+- `saturation` (`frei0r.saturat0r`, video): `saturation` 0..3, 1 (a multiplier; stored as
+  multiplier x 0.125 in property `0`); set: `threads` 0.
+- `white_balance` (`frei0r.colgate`, video): `neutral_color` `#rrggbb`, `#7f7f7f`;
+  `temperature_k` 1000..15000, 6500 K (stored as K / 15000 in property `1`); set: `threads` 0.
+- `box_blur` (`box_blur`, video): `hradius`, `vradius` integers 0..100, 5 px.
+- `blur_pad` (`pillar_echo`, video): `blur` 0..10, 4 %; `rect` rect, fit.
+- `size_position` (`affine`, video): `rect` (property `transition.rect`) rect, fit; `rotation`
+  (property `transition.fix_rotate_x`) -360..360, 0 degrees; set: `transition.fill` 1,
+  `transition.distort` 0, `transition.valign` middle, `transition.halign` center, `background`
+  `color:#00000000`, `transition.threads` 0.
+- `crop` (`crop`, video, once per clip): `left`, `right` integers 0..video width; `top`,
+  `bottom` 0..video height; 0 px (left + right and top + bottom must leave a picture); set:
+  `use_profile` 1, `center` 0, `center_bias` 0.
+
+A row whose MLT service is missing (for example the frei0r plugins are not installed) is listed
+under `unavailable` with the reason, and cannot be added. GPU-only (Movit) filters are never
+offered.
+
+`filter_list_applied` reports allowlisted filters with the tool-facing names and units above (a
+value with keyframes is shown as its raw MLT string). Other filters report their Shotcut id (or
+MLT service) and empty `params`; `filter_set` refuses them, `filter_remove` removes them.
+
+### Rules
+
+- Every call is ONE undo step with its own text: `Add <label> filter`, `Set <label>:
+  name=value, ...` (two `filter_set` calls are always two undo steps, even with equal values) and
+  `Remove <label> filter`, where label is Shotcut's name of the filter (for example "Gain /
+  Volume").
+- The tools work by `(track, clip)` through the timeline model, never through the Filters panel:
+  they do not change the selection, and the clip opened in the Source player cannot be targeted
+  (Shotcut has no undo for filters there).
+- `shotcut:filter` is set to the id Shotcut uses (the filter UI's objectName, for example
+  `audioGain`, `affineSizePosition`, `blur_pad`) and left out when Shotcut has none (Shotcut
+  then identifies the filter by its MLT service), so the Filters panel shows tool-made filters
+  under their real names. `_shotcut:newFilter` is never set, so opening the filter in the panel
+  does not reset its values to the UI's defaults.
+- A clip's filter is attached to the clip's parent producer, as in Shotcut, with the clip's in
+  and out; it follows the clip when it is moved or trimmed.
+- The undo commands find the filter again by the clip's `(track, clip)` and the filter's index
+  at every undo and redo (checking its service and `shotcut:filter`), because Shotcut's undo of
+  many timeline edits (move, insert, transitions, ripple removes, trims, splits) rebuilds the
+  clip and its filters from saved XML.
+- Refused: a locked track (`filter_list_applied` works on one), a blank or a transition, an audio
+  filter on a clip whose media has no audio stream (clips with no audio information at all, such
+  as images and colour clips, accept audio filters as in Shotcut), a picture filter on an
+  audio-only clip or on an audio track, a second filter of a kind that allows only one (`crop`;
+  Shotcut's GPU crop counts), an index not in `filter_list_applied`.
+
+### Known limits and residual risks (stage 3B filters)
+
+- Keyframes are not edited: `filter_set` refuses a parameter that has keyframes.
+- Filters on the clip opened in the Source player, on tracks and on the timeline output are not
+  reachable through the filter tools. The commands' timeline-output target is used only by
+  `captions_from_transcript`'s burn-in (stage 3C), which the format smoke script tests.
+- If the Filters panel shows a filter that `filter_set` changes, the panel reloads it; other
+  panel state (the selected filter) may reset when a tool adds or removes a filter of the clip it
+  shows.
+
+### Audio recipes
+
+Four plain-language audio tools (47 tools in all) built on the filter engine and Shotcut's own
+timeline commands:
+
+- `clip_set_volume` (one `gain` filter): `track`, `clip`, `gain_db`
+- `clip_normalize`: `track`, `clip`, `target_lufs?`, `wait_ms?`
+- `track_set_ducking` (Shotcut's automatic track audio ducking): `track`, `threshold_db?`,
+  `reduction_db?`, `fade_in_ms?`, `fade_out_ms?`, `enabled?`
+- `clip_detach_audio` (Shotcut's Detach Audio): `track`, `clip`
+
+`clip_set_volume`: `gain_db` -70 to 24. It changes the clip's first enabled `gain` filter (an
+`audioGain` volume filter; Shotcut's fade-in, fade-out and mute filters use the same MLT service
+but are never touched) or adds one; `gain_db: 0` removes it, so a volume never stacks. One undo
+step, `Set clip volume to <n> dB` or `Reset clip volume to 0 dB`. A call that would change nothing
+(the same value again, or 0 on a clip without a gain filter) pushes no undo step and returns
+`changed: false`. Result `{track, gain_db, changed, index?}`, `index` being the gain filter's
+`filter_list_applied` index while one exists. Refused: a locked track, a blank or transition, a
+clip without audio, a gain filter with keyframes.
+
+`clip_normalize`: `target_lufs` -30 to -6 (default -16), `wait_ms` 0 to 20000 (default 0). It
+measures the clip's source range with the `audio_levels` code (EBU R128 integrated loudness of the
+clip's own audio, before any filter; the measurement is cached and shared with `audio_levels` of
+the same clip) and sets the clip's volume to `target - measured`, rounded to 0.01 dB and clamped
+to -70..24, with `clip_set_volume`'s logic and the undo text `Normalize to <t> LUFS`.
+
+- When the measurement is done within `wait_ms` (or cached) the call returns `{measured_lufs,
+  applied_gain_db, target_lufs, changed, clip, track, index?}` and the edit is already made
+  (`clip` and `track` say where the clip was found, see below).
+- Otherwise it returns `{job_id, state: "running", measure_job_id}` at once (`measure_job_id` is
+  the `audio_levels` job). The gain is then applied AUTOMATICALLY when the measurement ends:
+  `get_job(job_id)` shows `succeeded` with the same result object, or `failed` with the reason,
+  and the change is an ordinary undo step made at that moment: it lands on top of whatever the
+  user or other tools did meanwhile and, like any edit, discards the redo history. The
+  application waits until no tool call is running and no modal dialog or popup menu is open
+  (`McpTools::runWhenIdle`, checked every 100 ms), so it never interleaves with another tool's
+  undo macro or runs inside a waiting call's event loop (the smoke test checks the order of two
+  overlapping normalizations).
+- Before editing, the call checks that the timeline it measured is still open: a timeline that
+  was closed, reopened or replaced by another project fails with "The project was closed or
+  replaced while measuring" (a counter of timeline creations and closings; saving the project,
+  also under a new name, does not count). It then finds the clip again by identity, not by index:
+  the same in, out and source file, and the same start, or, if it was moved, the same Shotcut
+  clip id (the parent producer's `_shotcut:uuid`, stamped at call time as Shotcut's undo helper
+  does; moves keep it). A match on the original track wins; exactly one match is required. So a
+  split of an earlier clip, a new video track shifting the rows, or a move of the clip itself do
+  not matter, while a trim, a removal or a replacement of the clip fails with "The clip changed
+  while measuring". In both failure cases nothing is edited.
+- A computed gain of exactly 0.00 dB removes an existing gain filter of the clip (as
+  `gain_db: 0` does); the indexes of the clip's later filters then shift down by one.
+- Refused: a locked track (also when it is locked by the time the measurement ends), a blank or
+  transition, a clip without audio, a clip with a speed change (its source range is not
+  measured correctly), and a silent source: `audio_levels` reports -70 LUFS for silence, and a
+  measurement at or below -70 LUFS is an error.
+- Not taken into account: fades, the track's gain, other filters, and Shotcut's own loudness
+  normalization filters. The smoke test exports a normalized 10 s clip of the gated tone fixture
+  (440 Hz with silent gaps; ebur128 gates the silence out of both measurements) and measures the
+  export: -16.1 LUFS for a -16 target (measured -24.2 LUFS, gain 8.2 dB).
+
+`track_set_ducking`: makes a track (usually music) dip while the tracks above it are louder than
+the threshold, through the track's audio `mix` transition, with Shotcut's
+`ChangeDuckThresholdCommand` and `ChangeTransitionPropertyCommand` (`duck_attenuation`,
+`duck_fade_in`, `duck_fade_out`) in ONE undo step (`Set track <n> audio ducking`, or `Disable
+track <n> audio ducking` with `enabled: false`). Defaults and ranges are those of Shotcut's
+Properties panel: `threshold_db` -70..0 (-12), `reduction_db` -70..0 (-12), `fade_in_ms` and
+`fade_out_ms` 0..5000 (1500 and 250). Result `{track, ducking:{enabled, threshold_db,
+reduction_db, fade_in_ms, fade_out_ms, duck_threshold}}`, `duck_threshold` read back from the
+transition (0 when disabled). Refused: track 0 (the top track, as in Shotcut), a locked track, a
+track without an audio mix transition ("Track <n> has no audio mix transition."), and an MLT
+older than 7.41. MLT's mix transition gained ducking in 7.41 and Shotcut shows the controls only
+when built against it; on an older MLT the tool returns "Audio ducking needs MLT 7.41 or newer
+(this is 7.36.1)." and changes nothing. `tools/mcp-smoke-ducking.sh` measures the effect in an
+export on MLT 7.42: -12 dB gives a dip of 11.5 dB. The check is made at run time (`mlt_version_get_int()`), after the track checks. Shotcut's ducking
+commands look the transition up in the player's producer, so the tool switches the player to the
+timeline when it shows a source clip. Undo of an `enabled: false` call leaves ducking OFF:
+Shotcut's `ChangeDuckThresholdCommand::undo` reads `shotcut:duck_enabled` after its own redo
+changed it (Shotcut's own enable checkbox has the same bug). Undo of an enabling call restores the
+previous state.
+
+`clip_detach_audio`: Shotcut's Detach Audio (`TimelineDock::detachAudio`, no dialog, explicit
+indexes) as ONE undo step `Detach audio`: the video clip keeps its place with its audio switched
+off and its audio filters removed; an audio-only copy of the same range, with the audio filters,
+goes to the first audio track that is blank over the whole range, else to a new audio track added
+at the bottom (a new, empty audio track does not count: Shotcut keeps a one-frame blank on it).
+Result `{tracks, audio_track}`: every track as `get_timeline` reports it (re-read indexes) and the
+track that got the audio. Refused: an audio track, a locked track, a locked target audio track
+(Shotcut itself does not check locks here), a blank or transition, a clip without audio (also a
+clip whose audio was already detached). Speed-changed clips work. Shotcut selects the video clip
+afterwards.
+
+### Known limits and residual risks (audio recipes)
+
+- `clip_normalize` measures the clip's source, not the mix: track gain, fades, ducking and other
+  filters are ignored. The gain is computed once: trimming the clip later does not update it.
+- A background `clip_normalize` application runs from the GUI event loop when no tool call is
+  running. The idle check sees only QWidget modal dialogs and popups: a QML context menu, a
+  native file dialog or a Shotcut operation that spins its own event loop without a modal
+  QWidget could, in principle, see the edit land in the middle of it.
+- A queued application still runs when the MCP server is stopped in the meantime (the job then
+  ends as usual; it is only visible again through `get_job` once the server runs).
+- A clip removed and put back with the same file, trim and start (without its Shotcut clip id)
+  is taken for the same clip.
+- `track_set_ducking`: besides the `enabled: false` undo above, Shotcut's `ChangeDuckThresholdCommand::undo` leaves its `shotcut:duck_enabled` and
+  `shotcut:duck_threshold` shadow properties on the transition, and
+  `ChangeTransitionPropertyCommand::undo` writes 0 for a property that was not set before. All
+  upstream behaviour, not compensated by the tool.
+- Test coverage gaps: no test of the "no audio mix transition" error (Shotcut gives every track
+  one), no test of `clip_normalize` refused by the 4-running-jobs cap, and the failure branches of the filter commands' undo (a failed detach or
+  re-attach cannot be provoked through the tools).
+- `clip_detach_audio` uses Shotcut's command, whose undo snapshots are subject to the upstream
+  snapshot race described in stage 3A; the tool wraps it in the same preview guard as the other
+  structural edits.
+
+### Picture recipes
+
+Three plain-language picture tools (50 tools in all) built on the filter engine. Each call is ONE
+undo step, changes the clip's first filter of each kind it needs or adds one (repeated calls
+update rather than stack), and returns `{filters:[{id, index}], track}` with the ids and
+indexes `filter_list_applied` reports. All three take picture filters only: refused are a
+locked track, a blank or transition, an audio track or an audio-only clip, a value with
+keyframes, unknown argument names, and filters this Shotcut cannot use (GPU-only rows are never
+offered). Any refusal changes nothing (a failure inside the call rolls the whole call back).
+
+- `clip_set_color`: `track`, `clip`, `brightness?`, `contrast?`, `saturation?`,
+  `temperature_k?`
+- `clip_set_transform`: `track`, `clip`, `scale?`, `x?`, `y?`, `rotation?`, `crop?`
+- `clip_set_blur` (a box blur or a blurred pad behind the picture): `track`, `clip`, `mode`,
+  `radius?`
+
+`clip_set_color` (undo text `Set clip color: name=value, ...`; give at least one value):
+
+- `brightness` -1..1 (0 unchanged): `brightness`, `level` = 1 + brightness.
+- `contrast` -1..1 (0 unchanged): `contrast` (`lift_gamma_gain`, `shotcut:filter` `contrast`):
+  Shotcut's slider level L = (contrast + 1) / 2, every `gain_*` = L x 2, every `gamma_*` =
+  (1 - L) x 2 (`src/qml/filters/contrast/ui.qml`, `gainFactor`/`gammaFactor` 2).
+- `saturation` 0..3 (1 unchanged; 0 is grey): `saturation` (`frei0r.saturat0r`), property `0` =
+  saturation x 0.125.
+- `temperature_k` 2000..15000 (6500 unchanged): `white_balance` (`frei0r.colgate`), property
+  `1` = kelvin / 15000.
+
+`saturation` and `temperature_k` need MLT's frei0r plugins; without them the call is refused
+with the reason ("The saturation filter is not available: this MLT has no frei0r.saturat0r
+service."); the smoke test then checks that refusal and prints SKIP for their value and
+exported-frame checks.
+
+`clip_set_transform` (undo text `Set clip transform: scale=..., x=..., y=..., rotation=...,
+crop left=... top=...`, naming the given values; give at least one):
+
+- `scale` (0.05..8, 1 = the picture fitted into the frame), `x`, `y` (pixels of the video mode:
+  the picture's centre offset from the frame centre, default 0) and `rotation` (-360..360
+  degrees) set `size_position` (the `affine` filter). A new filter, and any call giving `scale`,
+  `x` or `y`, puts it in Shotcut's Fit mode (`transition.fill` 0, `transition.distort` 0: the
+  picture keeps its shape inside the rect; the transparent background shows lower tracks, or
+  black on the bottom track). `rotation` alone keeps an existing filter's mode (for example the
+  Fill mode of one added with `filter_add`).
+- The rect is the `fit` rect of the allowlist (the clip's picture fitted into the frame with the
+  formula of `SizePositionUI.qml`) scaled about its centre and moved by `(x, y)`:
+  `w = fit.w x scale`, `h = fit.h x scale`, `x = fit.x + (fit.w - w) / 2 + x`, `y = fit.y +
+  (fit.h - h) / 2 + y`. When any of `scale`, `x`, `y` is given the missing ones take their
+  defaults; `rotation` alone keeps the current rect. A rect whose top-left corner would be more
+  than 100000 pixels from the frame's is refused, naming `x` and `y`.
+- `crop` `{left, right, top, bottom}` (integer pixels of the video mode, only the given sides
+  change) sets `crop` (Crop: Source); left + right and top + bottom must leave a picture.
+- When both are new, the crop is added before the size filter. Filters are appended after the
+  clip's existing ones (Shotcut does the same), so a crop added to a clip that already has a
+  Size/Position filter comes after it and crops the composited frame (the sized picture and its
+  transparent surround), not the source picture.
+- Picture-in-picture on a 1920x1080 project: `{scale: 0.3, x: 560, y: -300}` on the upper
+  track's clip (a 576x324 picture near the top-right corner).
+
+`clip_set_blur`: `mode` `box` sets `box_blur` with `hradius` = `vradius` = `radius` (integer
+0..100, default 5; undo text `Set clip blur: box radius=<n>`); `mode` `pad` sets `blur_pad`
+(`pillar_echo`) with `blur` 4 and the default fit rect (undo text `Set clip blur: pad`;
+`radius` is refused). A clip that already has that blur gets it replaced with these values.
+
+The smoke test checks the MLT values read back through `filter_list_applied` and the saved
+project, the undo steps, and exported frames of a red 1 s clip: `brightness: -0.5` lowers the
+luma average (ffmpeg `signalstats` YAVG), `saturation: 0` gives equal R, G and B means (skipped
+without frei0r), and `scale: 0.5` leaves the corners black with the centre red.
+
+### Known limits (picture recipes)
+
+- The fit rect uses the clip's media size and sample aspect ratio (`meta.media.width`,
+  `meta.media.height`, `meta.media.sample_aspect_num/den`), falling back to the video mode's
+  aspect; a source with rotation metadata is not taken into account.
+- The tools never add keyframes and refuse values that have them.
+- Brightness, contrast and saturation are separate filters applied in the order they were
+  added, as in Shotcut.
+
+### Clip speed
+
+`clip_set_speed` (51 tools in all) changes a timeline clip's playback speed as ONE undo step
+(`Set clip speed: <speed>x`), the way Shotcut's Properties panel does it
+(`AvformatProducerWidget::recreateProducer` and `TimelineDock::onProducerChanged`), without the
+panel or the selection.
+
+- `track`, `clip`: the clip (a video or audio file clip).
+- `speed`: 0.1..10, 1 = normal; no reverse.
+- `keep_pitch?`: default true: the sound keeps its pitch (`warp_pitch` 1); false sets 0. Ignored
+  at speed 1 (the clip keeps its old `warp_pitch`, as in Shotcut).
+
+- The clip becomes MLT's `timewarp` producer of the same file (`timewarp:<speed>:<file>`, the
+  number formatted by MLT; speed 1 goes back to a plain `avformat` chain), with the clip's
+  properties (`Util::passProducerProperties`), caption (`name (2x)`) and filters. A frame is read
+  once so the media properties are filled in before the change is recorded.
+- Length, in and out scale with Shotcut's formula, ratio = old speed / new speed:
+  `length = round(length x ratio)`, `in = min(round(in x ratio), length - 1)`, `out =
+  min(round(out x ratio), length - 1)`; the filters' in and out follow
+  (`Controller::adjustClipFilters`). The clip's frames are therefore old frames / speed ratio
+  within one frame (a 250-frame clip at speed 2 lasts 125 frames; back at speed 1 it lasts 249,
+  because out 124 becomes 248).
+- The clip keeps its start and nothing else moves, whatever Shotcut's ripple settings: the tool
+  pushes Shotcut's `Timeline::UpdateCommand` with ripple and ripple-all-tracks off (a
+  `setRipple(false)` setter was added for this). A shorter clip leaves a gap after it. A longer
+  clip must fit the gap before the next clip on its track; otherwise the call is refused with the
+  frames it needs and the free frames ("make room first"); Shotcut's own panel instead cuts the
+  clip short (`limitClipOut`), which the tool never does.
+- Result `{track, clip, speed, duration, changed}` (`duration` = the clip's new frames). A clip
+  that already plays at `speed` (within 1e-6) is left alone: `changed: false` and no undo step
+  (`keep_pitch` is not applied then).
+- Refused, nothing changed: unknown arguments, a missing or out-of-range `speed`, a non-boolean
+  `keep_pitch`, a locked track, a blank or transition, a clip next to a transition, a still
+  image, generator, `.mlt` or other non-file clip, a proxy clip (turn proxy editing off first),
+  a clip already playing in reverse (negative `warp_speed`), and a clip with fades
+  (`shotcut:animIn`/`shotcut:animOut`) or any user filter value in MLT's keyframe syntax ("Remove
+  fades and keyframes first": Shotcut does not move keyframes when the speed changes either).
+
+The smoke test checks a 250-frame clip at speed 2 (125 frames, in 0 out 124, filters kept,
+`warp_speed` 2 and `warp_pitch` 1 in the saved project), undo restoring `get_timeline` exactly and
+the saved project apart from `shotcut:caption` lines (Shotcut's undo selects the clip, and the
+Properties panel writes its caption on its own timer, before or after the save), redo, a refused
+lengthening into the next clip (the error names the 275 free frames), speed 1 after 2 undone (the
+saved project equal apart from `meta.media.*` probe caches, which MLT can add to a clip Shotcut's
+undo rebuilds; those are exactly the lines the upstream snapshot race corrupts, so that saved-file
+compare cannot see the race, while the `get_timeline` compare stays exact), a trimmed clip at speed
+2 and 0.5 (last on its track), `keep_pitch: false`, an audio clip, the refusals (among them a fade
+set by `shotcut:animIn` alone and a `.mlt` project clip), and an export of a 10 s clip at speed 2 (5
+s within 0.2 s, with an audio stream).
+
+### Known limits (clip speed)
+
+- A blank's in and out in `get_timeline` (offsets inside MLT's blank producer) can differ after
+  an undo: Shotcut's undo rebuilds a blank from its length. Blanks are saved by length only, so
+  the saved project is identical.
+- The proxy and reverse refusals are untested (reverse: no fixture). Proxy: Shotcut drops
+  `shotcut:proxy` when it opens a project with proxy editing off, so the smoke test cannot fake a
+  proxy clip.
+- Ripple settings: the smoke test runs with Shotcut's ripple setting off (the default); with
+  `ripple` and `rippleAllTracks` on, "nothing else moves" was checked by hand only.
+- The speed change re-reads the clip's file; the audio waveform is redrawn later, as in Shotcut.
+
+### Residual risks (stage 3B)
+
+The details are in the known-limits lists above; in short:
+
+- The filter commands find their filter again at undo and redo by the clip, the filter's index,
+  its MLT service and `shotcut:filter`. If the user reorders two filters of the same kind in
+  the Filters panel between a call and its undo, the undo can act on the other one.
+- Keyframes are never edited, moved or rescaled. `filter_set` and the recipes refuse a value that
+  has keyframes, and `clip_set_speed` refuses a clip with fades or keyframed filters, because
+  neither the tool nor Shotcut would rescale them to the new length.
+- GPU (Movit) filters are never offered, and the tools are untested in Shotcut's GPU mode. A GPU
+  crop on a clip counts as its one crop.
+- Only timeline clips are reachable by the filter tools: filters on the clip open in the Source
+  player (Shotcut has no undo there), on tracks and on the timeline output are not supported.
+  The output target of the filter commands is used only by the caption burn-in of stage 3C.
+- `track_set_ducking` needs MLT 7.41 or newer (MLT's mix transition gained ducking in 7.41); on an
+  older MLT the tool refuses with "Audio ducking needs MLT 7.41 or newer". Undo of
+  `enabled: false` leaves ducking off (an upstream Shotcut bug).
+- `saturation` and `white_balance` (and so `clip_set_color`'s `saturation` and `temperature_k`)
+  need MLT's frei0r plugins; without them they are listed as unavailable and refused.
+- A background `clip_normalize` edit lands when Shotcut is idle; the idle check sees only QWidget
+  modal dialogs and popups.
+- Untested: the proxy and reverse refusals of `clip_set_speed`, ripple-on speed changes, and the
+  failure branches of the filter commands' undo.
+
+## Stage 3C: format, text and delivery
+
+Stage 3C adds 7 tools (58 in all) for the deliverable itself: the project's shape
+(`project_set_format`), clips of another shape (`clip_reframe`), text on the picture (`title_add`,
+`lower_third_add`, `captions_from_transcript`), the export presets (`export_presets_list`) and
+step-by-step recipes (`get_editing_guide`). Every edit tool of the part is at most ONE undo step,
+refuses unknown argument names (`additionalProperties: false`) and changes nothing when it is
+refused. The finished file is checked with the stage 3A tools (see Delivery checks).
+
+### Project format
+
+`project_set_format` (52 tools in all) sets the project's video format (Shotcut's Video Mode) on
+an EMPTY project, so a client can make a vertical short before adding any media.
+
+| Argument | Meaning |
+|----------|---------|
+| `preset?` | `16:9` (1920x1080), `9:16` (1080x1920), `1:1` (1080x1080) or `4:5` (1080x1350) |
+| `width?`, `height?` | Instead of `preset`: both, even integers 64..7680 |
+| `fps?` | 23.976, 24, 25, 29.97, 30, 50, 59.94 or 60; default 30 (the NTSC rates are N/1001) |
+
+Pass exactly one of `preset` or `width` and `height`; unknown argument names are refused. The
+result is `{width, height, fps_num, fps_den, sar, dar}` with `sar` and `dar` as `"num:den"`, and
+`get_state` reports the current format as `profile: {width, height, fps_num, fps_den}`.
+
+- It does what Shotcut's unnamed custom Video Mode does (`CustomProfileDialog`, OK with no name):
+  square pixels, progressive, BT.709, SDR, the display aspect reduced from width and height, then
+  the preview profile refresh. It is a new public `MainWindow::setVideoMode`.
+- Refused, changing nothing, once anything is loaded: a clip in the player, a playlist item or a
+  timeline ("The project must be empty: start a new project first."). Shotcut would reload every
+  producer and clear the undo history on a mid-project change; the tool never does.
+- Call it before adding media: the first file added no longer sets the format (the profile is
+  explicit). It may be called again while the project is still empty.
+- Not an undo step (there is nothing to undo on an empty project), and the project is not marked
+  modified. A saved project keeps the format (it is written into the project file).
+
+### Known limits (project format)
+
+- The saved Video Mode setting (`[player] profile` in `shotcut.ini`) is not changed, so closing
+  the project or starting a new one returns to the saved mode.
+- The Video Mode menu is not synced to the new format: as after Shotcut's own unnamed custom mode,
+  no mode is checked until the project is closed (which re-checks the saved mode). Choosing a
+  Video Mode in the menu afterwards replaces the tool's format as usual.
+- The start screen's own Video Mode button still shows the saved mode, and clicking Start there
+  replaces the tool's format with it.
+- Interlaced, non-square-pixel, BT.601/BT.2020 and HDR formats are not offered.
+
+### Reframe
+
+`clip_reframe` (53 tools in all) makes a timeline clip of another shape fill the project's frame,
+say a 16:9 or 4:3 clip in a 9:16 project, as ONE undo step ("Reframe clip (fill)" or "(pad)").
+
+| Argument | Meaning |
+|----------|---------|
+| `track`, `clip` | The timeline clip (a picture clip on a video track) |
+| `mode` | `fill` (crop to cover the frame) or `pad` (fit over a blurred copy) |
+| `focus_x?` | `fill` only, 0..1, default 0.5: the picture's point put at the frame centre |
+| `keyframes?` | `fill` only, instead of `focus_x`: 1..50 `{frame, focus_x}` to pan |
+| `interpolation?` | With `keyframes`: `linear` (default) or `smooth` |
+
+- `fill` sets Shotcut's Size, Position & Rotate filter (`affine`) in Fill mode
+  (`transition.fill 1`, `transition.distort 0`, centred, no rotation) with the cover rect. With
+  the clip's display aspect `srcDAR` and the video mode's `PW`, `PH`, `sar` and DAR: if
+  `srcDAR > DAR` then `h = PH`, `w = h / sar * srcDAR`, else `w = PW`, `h = w * sar / srcDAR`;
+  `x = PW/2 - w * focus_x` clamped to `[PW - w, 0]`, `y = (PH - h) / 2`; no rounding. A 4:3
+  clip in 1080x1920 gets `-740 0 2560 1920 1`; `focus_x` 0 keeps its left edge (`x = 0`) and 1
+  its right edge (`x = -1480`). `focus_x` changes nothing when the picture is taller than the
+  frame (it is cropped top and bottom, centred).
+- `keyframes` frames count from the clip's first frame (0), strictly increasing and within the
+  clip. They become an MLT animation string on `transition.rect`, e.g.
+  `0=0 0 2560 1920 1;60=-1480 0 2560 1920 1`; `smooth` puts `~` on EVERY keyframe
+  (`0~=...;60~=...`), because MLT takes a segment's interpolation from the keyframe it starts at.
+  MLT reads it like Shotcut's own keyframes (a saved project stores the keyframes as times). Before
+  the first keyframe the picture holds the first position, after the last the last.
+- `pad` sets Shotcut's Blur: Pad (`pillar_echo`, blur 4, its default fit rect), as
+  `clip_set_blur` mode `pad` does.
+- The filter is marked `shotcut:reframe=1`. A later `clip_reframe` on the clip replaces the marked
+  filter (switching between `fill` and `pad` removes the other one in the same undo step) instead
+  of adding another. Plain `filter_set` tweaks keep the mark, so the next `clip_reframe` replaces
+  the tweaked filter too.
+- A Size, Position & Rotate or Blur: Pad filter the tool did not add (from the Filters panel,
+  `filter_add`, `clip_set_transform` or `clip_set_blur`) makes the call fail: that filter
+  already renders the frame at the project's shape, so a reframe after it would compute its
+  rect for the wrong picture (a 4:3 cover rect over a 9:16 frame zooms about 2.4x). Remove or
+  adjust it first.
+- Refused (nothing changed): a clip with such a filter of its own, a clip whose display aspect
+  is within 1% of the video mode's (`|srcDAR / DAR - 1| < 0.01`: "The clip already matches the
+  project format."), unknown arguments (also inside a keyframe), `focus_x` with `keyframes`,
+  `interpolation` without `keyframes`, `focus_x`, `keyframes` or `interpolation` with `pad`, a
+  keyframe after the clip's last frame, a locked track, a blank or transition, an audio track or
+  audio-only clip.
+- Returns `{filters: [{id, index}], track}` as the picture recipes do.
+
+### Known limits (reframe)
+
+- The rect is computed from the clip and the format at call time: change the format or the
+  clip's source and call `clip_reframe` again.
+- `clip_set_transform` changes the clip's first Size, Position & Rotate filter, which can be the
+  reframe: it is then put in Fit mode and stays marked.
+- The clip's shape comes from its media (`meta.media.*`, as Size, Position & Rotate's fit rect):
+  an aspect ratio override set in the Properties panel (`force_aspect_ratio`) is not used.
+
+### Titles and lower thirds
+
+`title_add` (54 tools in all) and `lower_third_add` (55) put a text clip on a video track as ONE
+undo step ("Add title", "Add lower third"). The clip is what Shotcut's Open Other > Text makes:
+a transparent `color:` producer (`#00000000`, `mlt_image_format rgba`) carrying Shotcut's
+Text: Simple filter (`dynamictext`, `shotcut:filter dynamicText`), so it shows over the tracks
+below it. Put it on an upper track (for example one made with `track_add`).
+
+| Argument | Meaning |
+|----------|---------|
+| `text` | `title_add`: 1..256 characters, newlines (`\r\n`, `\r` too) make more lines |
+| `line1`, `line2?` | `lower_third_add`: 1..200 characters each, no line breaks (`\n`, `\r`) |
+| `track`, `position` | A video track (track 0 when there is no timeline yet); absolute frame |
+| `duration` | 1..100000 frames |
+| `font?` | A font family name (1..100 characters); default the filter's own, Sans |
+| `size?` | `title_add`: 8..400 pixels, default the project height / 12, at most 400 |
+| `color?` | Text colour, `#rrggbb` or `#aarrggbb`, default `#ffffffff` |
+| `bg_color?` | `title_add`: a box behind the text, default `#00000000` (none) |
+| `bar_color?` | `lower_third_add`: the bar behind the text, default `#99000000` |
+| `outline?` | `title_add`: 0..20 pixels, default 3 (outline colour `#aa000000`) |
+| `align?`, `valign?` | `title_add`: `left`/`center`/`right`, `top`/`middle`/`bottom` |
+| `mode?` | `overwrite` (default, never ripples) or `insert` (as `timeline_insert_range`) |
+
+- A title fills the whole frame (`geometry 0%/0%:100%x100%`) and is placed in it by `align`
+  (default `center`) and `valign` (default `middle`).
+- A lower third uses Shotcut's Lower Third preset geometry `0%/76%:100%x14%` (the band from 76%
+  to 90% of the frame height) with `halign left`, `valign bottom`, size = project height / 20,
+  `bgcolour` = `bar_color`, and the text `line1` or `line1\nline2`.
+- Both are bold (`weight 700`), `style normal`, `olcolour #aa000000`; `family` is set only when
+  `font` is given. Colours are stored as `#aarrggbb` (`#rrggbb` gets `ff` alpha).
+- A `#` in the text is stored as `\#`, so it shows as typed instead of starting a keyword such
+  as `#timecode#`.
+- `shotcut:usePointSize 1` with `shotcut:pointSize` = size in points at the screen's resolution,
+  as Open Other > Text does. With 0 the Filters panel would replace `size` by height / lines
+  when it shows the filter.
+- The clip is named (`shotcut:caption`, `shotcut:detail`) after the first line that is not blank
+  (`line1` for a lower third).
+- Placement goes through the same code as `timeline_insert_range`: from the track's end on the
+  clip is appended (after a gap), `position` may be at most one hour after the end of the
+  track, and a position inside a transition is refused.
+- Refused (nothing changed): unknown arguments, an empty or blank text or line, more than 256
+  characters once each `#` is doubled (UTF-16 units, so an emoji counts twice) or more than 511
+  bytes in UTF-8 (the error names `text`, or `line1` and `line2` together), a bad colour,
+  out-of-range numbers, an unknown `mode`, `align` or `valign`, a line break in `line1` or
+  `line2`, an audio track, a locked track, a missing track.
+- Returns `{track, clip: {start, duration}}`; edit the text later in Shotcut's Filters panel.
+
+### Known limits (titles)
+
+- The text length limits are Shotcut's and MLT's: the Filters panel cuts the text to 256
+  characters when it shows the filter, and MLT's `dynamictext` renders at most 511 bytes.
+- The Filters panel sets `size` from the point size when it shows the filter, which can move it
+  by about a pixel (as for Shotcut's own text clips).
+- No animation, shadow, rich text or typewriter effect; use the Filters panel for those.
+- The font must be installed where the project is rendered; an unknown family falls back to the
+  system's default font.
+- Without `font` the family is MLT's default, "Sans", whereas Open Other > Text uses Verdana on
+  Windows and Helvetica on macOS.
+
+### Captions from a transcript
+
+`captions_from_transcript` (56 tools in all) captions a timeline clip from the transcript kept for
+its source file as ONE undo step ("Captions from transcript"): a new Shotcut subtitle track and,
+by default, the Subtitle Burn In filter on the timeline output, so the captions are in the
+exported picture (Shotcut's soft subtitle streams are often ignored by players and uploaders).
+There is no `captions_remove`: one `undo` removes the track and the filter together.
+
+| Argument | Meaning |
+|----------|---------|
+| `track`, `clip` | The clip whose trimmed range is captioned (any track; audio-only, locked) |
+| `max_words?` | 1..20 words per caption, default 7 |
+| `max_chars?` | 10..100 characters per caption (Unicode code points), default 42 |
+| `min_duration_ms?` | 200..5000, default 700 |
+| `language?` | The subtitle track's ISO 639-2 code (`eng`, `fra`, ...) |
+| `style?` | Burn-in only: `{size?, color?, outline_color?, bg_color?, valign?, position?}` |
+| `burn_in?` | Default true; false makes only the subtitle track |
+
+- The transcript is what `transcribe` keeps for the clip's source file (`McpTranscripts`): a
+  supplied one (it covers the whole file), or the last Whisper result for the file. A Whisper
+  run on another clip of the same file covers only that clip's range and replaces the file's
+  entry, so a stored `in_s`..`out_s` that does not cover the clip's range (within a frame) is
+  refused: run `transcribe` on this clip first. No transcript at all is refused the same way.
+- Words: a transcript with word times uses its words; a segment without words is split into its
+  whitespace-separated words, evenly timed over the segment. A word is kept when its START
+  frame, `round(start_s * fps)`, is inside the clip's source range; its end is clamped to the
+  clip's end. No word inside the clip is an error.
+- Grouping, in order: a caption takes words until the next would make more than `max_words`
+  words or more than `max_chars` characters (words joined by single spaces, text trimmed), and
+  it always ends at a segment end and at a pause over 0.8 s (word start minus the previous
+  word's end, in source seconds). A single word longer than `max_chars` is a caption of its own.
+  A word that starts in the same frame as the caption it would end joins that caption instead,
+  so no caption is empty.
+- Times: SubtitlesModel items are milliseconds on the TIMELINE. A caption starts at
+  `((clip start + first word's source frame - clip in) / fps) * 1000` and ends at the same
+  mapping of its last word's end frame, rounded to the millisecond. It is then lengthened to
+  `min_duration_ms` unless the next caption starts sooner (it ends there). At 25 fps every time
+  is a multiple of 40 ms.
+- The track is named `Captions N`, the first N not used by a subtitle track or by a burn-in
+  filter's `feed`. `language` defaults to the transcript's (Whisper's ISO 639-1 code turned into
+  ISO 639-2), else the system language, as the Subtitles panel's first track does.
+- Burn-in: the `subtitle` filter (`shotcut:filter subtitles`) on the multitrack with the
+  properties `SubtitlesDock::burnInOnTimeline` sets: `fgcolour #ffffffff`, `bgcolour #00000000`,
+  `olcolour #aa000000`, `outline 3`, `weight 700`, `style normal`, `shotcut:usePointSize 1`,
+  `size` = project height / 20, `geometry 20%/75%:60%x20%`, `valign bottom`, `halign center`,
+  `feed` = the track name, `typewriter 0` (and its defaults); `family` Verdana on Windows and
+  Helvetica on macOS, as there. `style` changes `size` (8..400), `color`, `outline_color`,
+  `bg_color`, `position` (`bottom`, `middle` = `20%/40%:...`, `top` = `20%/5%:...`) and `valign`
+  (default the position). It is added after the output's user filters, so it renders after them.
+- Refused (nothing changed): unknown arguments (also inside `style`), out-of-range numbers, a
+  `language` that is not a known three-letter code, `style` with `burn_in: false`, a blank,
+  transition or missing clip, a speed-changed clip, no transcript or one that does not cover the
+  clip, and a burn-in when the output already has one and Shotcut's filter did not allow
+  several (it does allow several today, so this cannot happen with stock Shotcut).
+- Returns `{track_name, language, captions, first: {start_ms, end_ms, text}, last: {...},
+  burn_in}`. Edit the captions later in Shotcut's Subtitles panel; export the `.srt` there.
+
+### Known limits (captions)
+
+- Times come from the transcript's word times rounded to frames; Whisper's word times are
+  approximate (often a little early or late), so captions can lead or lag speech by a few
+  frames. A word that starts just before the clip's in point is dropped even if most of it is
+  inside.
+- The minimum duration may carry the last caption up to `min_duration_ms` past the clip's end
+  (over whatever follows on the timeline).
+- The captions are not tied to the clip: moving, trimming or rippling the clip later does not
+  move them; run the tool again (and undo or remove the old track in the Subtitles panel).
+- Shotcut writes a subtitle track's SRT into its `subtitle_feed` filter 500 ms after an edit,
+  undo or redo. The tool writes it at once, and `save_project` and `export_video` write every
+  subtitle track's SRT before they serialise the project, so an immediate save or export after
+  an `undo`/`redo` has the captions (Shotcut's own Save and Export do not flush it, but a person
+  cannot reach them within 500 ms). `get_frame` and `get_overview` right after an `undo`/`redo`
+  may still show the burn-in without its text.
+- A speed-changed clip is refused (source and timeline times differ).
+- Fonts: the burn-in uses the font of Shotcut's filter (Sans on Linux); it must be installed
+  where the project is rendered.
+
+### Export presets
+
+`export_presets_list` (57 tools in all; no arguments) lists the presets `export_video` accepts as
+`{presets: [{name, source, extension, video_codec?, audio_codec?, width?, height?, fps?,
+description}]}`. It uses the same lookup as `export_video` (`EncodeDock::exportPreset`), so every
+listed `name` works as `export_video`'s `preset`.
+
+- `source` `stock`: the presets under `consumer/avformat/` of MLT's repository that the Export
+  panel's Stock branch shows (`meta.preset.hidden` ones, such as the `-pass1` presets, are left
+  out), named relative to that folder (`x264-medium`, `lossless/FFV1`, `atsc_1080p_25/DNxHD`).
+- `source` `custom`: the files in `<appdata>/presets/encode` (the Custom branch). A file with the
+  name of a stock preset, hidden ones included, is left out (`export_video` finds the stock one
+  first), as is one without `meta.preset.extension` or with a name `export_video` refuses (`..`,
+  a leading dot).
+- `extension` is the preset's `meta.preset.extension`: the output path must end in it.
+- `video_codec` and `audio_codec` are the preset's FFmpeg `vcodec` and `acodec`, left out when the
+  preset sets none or turns that stream off.
+- `width`, `height` and `fps` are what `export_video` renders at when the preset fixes them: the
+  video mode of a preset inside a mode folder (DV, HDV, ATSC), as a click on it in the Export
+  panel applies it, overridden by the preset's own `width`, `height`, `r` or
+  `frame_rate_num`/`frame_rate_den` (Shotcut's Export panel saves a custom preset with all of
+  them; among the stock presets only `Sony-PSP` sets a size, 480x272, and none sets a rate).
+  Missing fields mean the project's size or frame rate.
+- `description` is built only from the codecs (a fixed table of readable names), the extension,
+  the video mode and the name (`named for YouTube`, `in Shotcut's lossless group`); it does not
+  guess quality or purpose.
+- Order: stock, then custom, each sorted by name (case-insensitive).
+
+### Editing guides
+
+`get_editing_guide` (58 tools in all) returns a fixed recipe for `use_case` `interview`, `short`,
+`tutorial` or `montage`: `{use_case, title, steps: [{n, tool, why, arguments_example}],
+defaults: {...}, notes: [...]}`. It reads nothing from the project and changes nothing. The text
+lives in `src/mcpguide.cpp`; the format smoke script checks that every step's `tool` is in
+`tools/list` and that its `arguments_example` fits that tool's input schema (known and required
+keys, enums, integer and range limits), so a renamed argument breaks the test, not the guide.
+
+- `interview`: `analyze_media`, `transcribe`, insert the recording, `audio_levels`,
+  `clip_normalize` -16 LUFS (before the cuts, so the pieces keep the gain), `detect_silence`
+  (-35 dB, 0.6 s), `save_project`, `timeline_remove_ranges` (each pause shrunk by 0.15 s at both
+  ends), `get_overview`, `captions_from_transcript` (7 words), `export_video` (`x264-medium`),
+  `audio_levels` on the output (-16 LUFS within 1.5 LU).
+- `short`: `project_set_format` 9:16, `playlist_add`, `transcribe`, insert 30-60 s, `get_frame`,
+  `clip_reframe` fill with `focus_x`, `clip_normalize` -14, `detect_silence`,
+  `timeline_remove_ranges`, `captions_from_transcript` (4 words, size 120, middle), `track_add`,
+  a 2 s `title_add` hook, `get_overview`, export.
+- `tutorial`: `project_set_format` 16:9, the screen recording, `track_add`, the camera on top,
+  `clip_set_transform` scale 0.25 in the lower-right corner, `transcribe`, `clip_normalize`,
+  `detect_silence` and `timeline_remove_ranges` on both tracks, `track_add`, `lower_third_add`
+  and `marker_add` per chapter, captions, export.
+- `montage`: `analyze_media`, `detect_scenes`, `detect_silence` on the music (it finds quiet
+  breaks, not beats), equal-length shots, `clip_set_speed` accents (each slowed before the next
+  shot is placed, which then goes at the slowed shot's end), `clip_set_color`,
+  `timeline_add_transition` from the first clip forwards, a music track, `track_set_ducking`,
+  `get_overview`, export.
+
+The notes are honest about the limits the steps run into: one `undo` per call, index shifting
+(re-read `get_timeline`), captions being one clip per call (a clip in which no word starts is
+refused and skipped) and not following later edits, ducking needing MLT 7.41 or newer,
+`saturation` and `temperature_k` needing frei0r, and the 120-cut cap of
+`timeline_remove_ranges`. Frame numbers in the examples assume 30 fps.
+
+The end-to-end smoke script (`tools/mcp-smoke-e2e.sh`, see Testing) follows each guide on the
+generated fixtures and found three places where following it literally failed; the guide text
+now says what to do instead:
+
+- Transitions added "from the last clip backwards" are refused: the second call's incoming clip
+  then already has a transition after it. They are added from the first clip forwards, and each
+  transition is a new item, so the next incoming clip is 2 indexes further (1, 3, 5).
+- A shot slowed to 0.5 lasts twice as long LESS ONE FRAME (`clip_set_speed`'s formula: a
+  25-frame clip becomes 49 frames), so a next shot placed at the precomputed position leaves a
+  1-frame blank; it goes at the end the speed call returns.
+- `captions_from_transcript` on "every clip the cuts left" is refused for a clip in which no word
+  starts (a pause kept by the pads, a short tail); such clips are skipped. A pause at the very
+  start or end of a clip is cut whole: a pad there leaves a stub of a few frames.
+
+### Delivery checks
+
+No separate tool checks an export: the stage 3A tools take any file path, so a client checks the
+finished file the way the guides end:
+
+- `analyze_media` on the output: its duration, picture size, frame rate and streams (for
+  example 1080x1920 for a vertical short, an audio stream after a music track).
+- `audio_levels` on the output: its integrated loudness against the target (the interview
+  guide's -16 LUFS within 1.5 LU, its delivery tolerance; -14 LUFS for a short). The smoke
+  scripts check 1 LU: the exports measured -16.0 and -13.7 LUFS.
+- `get_frame` and `get_overview` look at the timeline before rendering; `get_export_status`
+  reports the render itself.
+
+### Known limits (presets and guides)
+
+- `export_presets_list` does not say whether this FFmpeg build has the preset's encoders (for
+  example `libsvtav1` or `prores_ks`); an export with a missing encoder fails in the job.
+- The image presets (`stills/...`, and `libwebp` or `mjpeg` with format `image2`) write numbered
+  image files `<base>-00001.<ext>` (base: the output file name up to its first dot), not the
+  path given, so `export_video`'s `output` and `get_export_status`'s `output_exists` do not
+  name them; their description says so. The smoke script checks every listed name is found but
+  renders only with video presets.
+- `captions_from_transcript` captions one clip per call, so after silence cuts the guides call it
+  once per kept clip, which makes one subtitle track (and burn-in) per clip.
+- The guides are fixed text; their numbers are starting points, not measurements of the media.
+
+## Security
+
+Off by default; loopback only; every request needs the bearer token; requests carrying an `Origin`
+header or a foreign `Host` header are rejected, which blocks web pages and DNS rebinding. The token
+is stored unencrypted in the settings file.
+
+There is no connection cap and no idle timeout after a reply, so each pending connection can hold
+up to about 1 MB for up to 10 s. That is acceptable because the server is loopback only and
+token-gated.
+
+Stage 2 widens what the token allows. It can now edit the open project (every edit is undoable)
+and write one video file to any folder the user can write, never over media used by the project
+(see Export, with the caveat described there). `export_video`'s `preset` can only name a stock
+preset or a plain custom preset file, not a path. Tool calls are refused while a Shotcut dialog is
+open (close it and try again).
+
+Stage 3A lets the token make Shotcut read any file the user can read with ffprobe, ffmpeg and the
+configured Whisper program (only results come back, never the file's bytes), keep transcripts and
+analysis results in memory, and write short-lived temporary files (decoded audio) in the system
+temp folder. Programs get argument lists, never a shell command line.
+
+Stages 3B and 3C add no new reach: their tools edit the open project (each edit undoable;
+`project_set_format` works only on an empty project) and `export_presets_list` reads the names
+and properties of MLT's and Shotcut's preset files.
+
+## Testing
+
+    MCP_TOKEN=<token> tools/mcp-smoke.sh
+
+Needs curl and jq, plus ffmpeg for the media checks; takes roughly 25 s. The test opens and replaces
+whatever is loaded in the target Shotcut, so run it against a throwaway session (the headless
+recipe below); it aborts if the project has unsaved changes unless `MCP_SMOKE_FORCE=1` is set.
+Shotcut can be run
+headless for it: pre-seed `<scratch dir>/shotcut.ini` with a `[mcpServer]` section containing
+`enabled=true` and a `token=` value, then start
+`xvfb-run -a build/cc-debug-linux/src/shotcut --appdata <scratch dir>`.
+To avoid the default port also add `port=<test port>` (for example 18999) and pass
+`MCP_PORT=<test port>` to the scripts.
+
+Stage 2 has its own script:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] [MCP_APPDATA=<scratch dir>] tools/mcp-smoke-edit.sh
+
+It needs bash, curl, jq, ffmpeg, ffprobe, xxd, md5sum and base64, and a FRESH throwaway Shotcut:
+it adds clips, edits the timeline, exports a video, and creates symlinks and hard links in its
+temp dir. It aborts unless the session is fresh (nothing loaded, not modified), or
+`MCP_SMOKE_FORCE=1` is set. The export checks need `melt-7` (see Export). Set `MCP_APPDATA` to the
+`--appdata` directory of the Shotcut under test: the script then writes a deliberately slow custom
+preset there and uses it for deterministic checks of "a second export is refused while one runs"
+and "a custom preset is applied". Without it those two checks race the fast render and can flake.
+Both scripts must pass: every check prints PASS and the script ends with "All checks passed."
+(exit code 0).
+
+Stage 3A has two scripts, each needing its own FRESH throwaway Shotcut like the stage 2 script:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] [MCP_APPDATA=<scratch dir>] tools/mcp-smoke-media.sh
+    MCP_TOKEN=<token> [MCP_PORT=<port>] tools/mcp-smoke-ripple.sh
+
+They need bash, curl, jq, ffmpeg, ffprobe, xxd, md5sum and base64; `tools/mcp-fixtures.sh` (run by
+the scripts) generates the test media with ffmpeg. `mcp-smoke-media.sh` covers every stage 3A
+tool and takes a few minutes on a debug build. `MCP_APPDATA` enables the "get_overview while an
+export runs" checks (they write a slow custom preset there, as stage 2 does). Its Whisper checks
+depend on the Whisper program configured in that Shotcut (pre-seed a `[subtitles]` section with
+`whisperExe=<path of whisper-cli>` and `whisperModel=<path of a GGML model>` in `shotcut.ini`):
+
+- not configured: it checks the "Whisper is not configured" error and skips the rest;
+- configured with a real whisper-cli: it transcribes whisper.cpp's `samples/jfk.wav` (set
+  `JFK_WAV` if it is not at `~/GitHub/whisper.cpp/samples/jfk.wav`);
+- configured with `tools/mcp-fake-whisper.sh` (any existing file as the model): it checks the
+  parser on a canned transcript (Unicode punctuation, a segment clamped to nothing), no model
+  needed.
+
+Run it in all three setups. `mcp-smoke-ripple.sh` checks that `timeline_remove_ranges` overrides
+the user's ripple settings and puts them back: pre-seed a `[timeline]` section with
+`rippleAllTracks=true` and `rippleMarkers=true` in that Shotcut's `shotcut.ini`. Without them it
+prints SKIP and exits 2, which is not a pass. Each script ends with "All checks passed." (exit
+code 0) when it passes.
+
+Stage 3B has its own script, also needing a FRESH throwaway Shotcut:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] tools/mcp-smoke-polish.sh
+
+It needs bash, curl, jq and ffmpeg. It builds a timeline from the generated fixtures, adds,
+changes and removes filters with their undo and redo, saves and reopens a copy of the project,
+and checks the refusals. The audio recipe checks export a normalized clip (`x264-medium`, needs
+`melt-7` as for stage 2) and run several background `clip_normalize` jobs on generated 2400 s
+and 3600 s files (about 7 and 10 s each on a debug build); if a measurement ends before the
+script can change the clip, that check prints SKIP. The idle-gate check (a background apply waits
+for a running tool call) is probabilistic for the same reason: it depends on the two
+measurements overlapping, prints SKIP when they do not (once in four recent debug-build runs) and
+may skip every time on a faster release build. The picture recipe checks export four 1 s
+clips and read pixels with ffmpeg and od; without frei0r the saturation and temperature checks
+print SKIP. The `clip_set_speed` checks export a 10 s clip at speed 2 (`melt-7` again). Last,
+it calls every tool whose schema says `additionalProperties: false` with an unknown name and
+checks that the refusal lists exactly the schema's properties (the media script checks that the
+3A tools refuse a misspelt argument, change nothing and start no job).
+
+Stage 3C has its own script, also needing a FRESH throwaway Shotcut:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] MCP_APPDATA=<scratch dir> tools/mcp-smoke-format.sh
+
+It needs bash, curl, jq, ffmpeg and ffprobe. It checks the `project_set_format` refusals and every
+preset on the empty session, then sets 9:16, adds a 320x240 25 fps clip and builds a timeline,
+checks the format is kept, the tool is refused, and an export (`x264-medium`, `melt-7`) is
+1080x1920 at 30 fps. It then checks `clip_reframe`: argument refusals, the exact fill rects for
+`focus_x` 0, 0.25, 0.5 and 1 on the 4:3 clip, the keyframe strings and their saved form, one undo
+step per call, the `shotcut:reframe` mark (a `filter_set` tweak and a reframe restored by undo
+are replaced), the refusal on a clip with its own Size/Position or Blur: Pad, `pad`, the 1%
+match refusal, keyframes on a clip with a non-zero in point, and a 1 s export whose four
+corners are red (no black bars; the earlier export without the reframe has black corners).
+It then checks `title_add` and `lower_third_add` on a new top track: argument refusals, the
+clip's place, length and name, the saved filter properties (exact text, geometry, colours,
+size within a pixel), one undo restoring the track, insert mode, `#` escaping, and an export
+whose centre band has white text (`signalstats` YMAX >= 235; the same frame of the earlier
+export has none). It then opens a timeline-only project and checks `project_set_format` is
+refused there. On that project (640x360, 25 fps) it checks `captions_from_transcript` with
+supplied transcripts: the refusals, three captions from 12 known words with their exact
+millisecond times and SRT, the saved `subtitle_feed` and burn-in filter properties, an export
+with bright caption text in the bottom quarter during a caption and none between captions,
+one undo removing both, an immediate `save_project` (copy and project file) and `export_video`
+after a redo keeping the captions, `burn_in: false`, a second track, `max_chars`, `style`,
+`language`, a trimmed clip, a speed-changed clip, and an audio-only clip (a pause and the minimum
+duration).
+It then opens a 720x4920 project and checks the default title size is capped at 400. Last, it
+writes custom presets into `$MCP_APPDATA/presets/encode` and checks `export_presets_list` (stock
+and custom entries, hidden and shadowed presets left out, a video mode preset's size and rate) and
+that `export_video` finds every listed name (a `.zzz` path fails only on the extension), then
+checks `get_editing_guide`: its refusals, four guides with numbered steps, every step's tool in
+`tools/list` with an `arguments_example` that fits the tool's schema, and the key numbers.
+`MCP_APPDATA` must be set (it is a FAIL otherwise): the script checks that `shotcut.ini` has no
+saved `[player] profile`. With `WHISPER_EXE` set to a real whisper-cli (configured in the Shotcut
+under test, as for the media script) and whisper.cpp's `samples/jfk.wav` (`JFK_WAV`), it also
+transcribes jfk.wav on the timeline and checks that its captions have more than 15 words in the
+saved SRT; otherwise that check prints SKIP.
+
+`track_set_ducking` has its own script, also needing a FRESH throwaway Shotcut:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] tools/mcp-smoke-ducking.sh
+
+It needs bash, curl, jq, ffmpeg and `melt-7`. It exports a 1 kHz tone that starts halfway through,
+above a steady 200 Hz music track, and measures how far the music falls: about 12 dB with ducking,
+level after undo, about 12 dB after redo, level when disabled. On MLT older than 7.41 it exits 2
+(not a pass).
+
+The end-to-end script runs one use case of `get_editing_guide` per FRESH throwaway Shotcut:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] tools/mcp-smoke-e2e.sh interview|short|tutorial|montage
+
+It needs bash, curl, jq, ffmpeg, ffprobe, od and awk, and `melt-7` for the exports. Each case
+follows the guide's steps on the generated fixtures, exports with `x264-medium` and probes the
+file:
+
+- `interview`: `tone_av.mp4` with a supplied JFK-style transcript, its sound detached to an
+  audio track, normalized to -16 LUFS, both pauses cut from both tracks in one
+  `timeline_remove_ranges` call, captions on every kept clip; the export lasts the source minus
+  the cut frames (within 0.3 s), measures -16 LUFS within 1 LU and its SRTs hold the 22 words.
+- `short`: 9:16, `scenes.mp4` from the playlist reframed with `fill`, -14 LUFS, dead air cut,
+  4-word captions in the middle, a hook title on a new top track; the export is 1080x1920 with
+  no black bars, white hook text in the top band only while the hook lasts, white captions in
+  the middle band, the expected duration and -14 LUFS within 1 LU.
+- `tutorial`: 16:9, the screen (`scenes.mp4`) and the face (`tone_av.mp4`, mode overwrite) on two
+  tracks, the face at scale 0.25 in the top-right corner (the guide's note for a lower third),
+  the pauses cut from both tracks, two lower thirds and two markers; a frame of the export shows
+  both layers (the face's corner is not the screen's red, the centre and the corner area beside
+  the face are) and the lower third's text.
+- `montage`: three 2 s shots from `scenes.mp4` (the scene cuts found at 3 and 6 s), the middle
+  one slowed to 0.5, the guide's colour on each, two 10-frame dissolves, the music on a new audio
+  track (ducking is refused on MLT older than 7.41 and reported); the export has exactly 129
+  frames (149 minus the two overlaps), red, green and blue at the right times and a mix
+  mid-dissolve.
+- `interview-whisper` (needs `WHISPER_EXE`, else it exits 2): the interview with a real Whisper
+  transcript of jfk.wav muxed with a test picture (pauses found at -25 dB: the recording's noise
+  floor is above the guide's -35 dB).
+
+Start a new headless Shotcut (the recipe above) for every case; `interview-whisper` also needs
+the `[subtitles]` Whisper settings in its `shotcut.ini`, as for the media script.
+
+Manual checks (they need a modified project, which the tools cannot create):
+
+- With an edited project loaded, wait for the first autosave tick (the file under
+  `<appdata>/autosave` only exists after it), then call `open_project` with
+  `discard_changes: true` on a broken `.mlt`. It must error, the project must stay modified, and
+  its file under `<appdata>/autosave` must still exist and keep being updated.
+- Open a media file into a loaded timeline: no discard is needed and the modified flag is unchanged.
+
+Manual checks for stage 2 (GUI only; the headless script cannot cover them):
+
+- Play the exported file, and compare it visually with Shotcut's own export of the same project.
+- Lock a track in the GUI, then call each edit tool on it: all must refuse.
+- Open a project with proxies, then call `get_frame` and `export_video`.
+- The Jobs dock shows a sensible row for an MCP export.
+- Edit > Undo shows sensible names for the tool-made edits.
+- The GUI export dialog still works unchanged.
+- GPU mode: `get_frame` and `export_video` (not tested headless).
+- A timeline with several video tracks: index 0 is the topmost.
+- `get_frame` while playing, and with a reduced preview scale.
+- Remove a running MCP export job from the Jobs dock: `get_export_status` reports `removed`.
+- Rename or remove the dev-tree `melt-7` link: `export_video` reports a clear error (or a failed
+  job with the start-failure text).
+- With a dialog open (for example Settings), a tool call returns "A dialog is open in Shotcut".
+
+## Known limits
+
+Not covered by the tools or not tested headless: GPU mode, proxies, generators (other than the text
+clips of `title_add` and `lower_third_add`), filters outside the stage 3B allowlist, subtitles
+(other than `captions_from_transcript`), two-pass encoding and export ranges.

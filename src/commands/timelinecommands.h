@@ -919,6 +919,7 @@ public:
     void setXmlAfter(const QString &xml);
     void setPosition(int trackIndex, int clipIndex, int position);
     void setRippleAllTracks(bool);
+    void setRipple(bool);
     int trackIndex() const { return m_trackIndex; }
     int clipIndex() const { return m_clipIndex; }
     int position() const { return m_position; }
