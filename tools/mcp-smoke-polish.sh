@@ -372,10 +372,11 @@ OS="$(tool_json get_timeline '{}')|$O"
 expect_eq "other filters: remove works on any user filter" false "$(ferr filter_remove '{"track":0,"clip":0,"index":0}')"
 expect_eq "other filters: remove text names the service" "Remove sepia filter" "$(undo_text)"
 expect_eq "other filters: undo restores" "$OS" "$(tool_json get_timeline '{}')|$(fa 0 0)"
-# MLT order of the clip's filters (hidden ones included) in a saved copy.
+# MLT order of the clip's filters (hidden ones included) in a saved copy. Only the clip: on MLT 7.41
+# or newer Shotcut also puts an audiolevel filter on the track for its level meter.
 order() {
   tool_json save_project "{\"path\":\"$TMP/order.mlt\"}" >/dev/null
-  grep -o 'name="mlt_service">\(audiolevel\|sepia\|volume\|brightness\)<' "$TMP/order.mlt" | sed 's/.*">//; s/<$//' | tr '\n' ' '
+  sed -n '/<chain /,/<\/chain>/p' "$TMP/order.mlt" | grep -o 'name="mlt_service">\(audiolevel\|sepia\|volume\|brightness\)<' | sed 's/.*">//; s/<$//' | tr '\n' ' '
 }
 expect_eq "hidden filters: undo of a remove puts the filter back between them" "audiolevel sepia volume volume audiolevel " "$(order)"
 add '{"track":0,"clip":0,"filter":"brightness"}' >/dev/null
