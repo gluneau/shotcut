@@ -691,9 +691,9 @@ reduction_db, fade_in_ms, fade_out_ms, duck_threshold}}`, `duck_threshold` read 
 transition (0 when disabled). Refused: track 0 (the top track, as in Shotcut), a locked track, a
 track without an audio mix transition ("Track <n> has no audio mix transition."), and an MLT
 older than 7.41. MLT's mix transition gained ducking in 7.41 and Shotcut shows the controls only
-when built against it; THIS build uses MLT 7.36.1, where the tool returns "Audio ducking needs MLT
-7.41 or newer (this is 7.36.1)." and changes nothing, so the editing path is untested here. The
-check is made at run time (`mlt_version_get_int()`), after the track checks. Shotcut's ducking
+when built against it; on an older MLT the tool returns "Audio ducking needs MLT 7.41 or newer
+(this is 7.36.1)." and changes nothing. `tools/mcp-smoke-ducking.sh` measures the effect in an
+export on MLT 7.42: -12 dB gives a dip of 11.5 dB. The check is made at run time (`mlt_version_get_int()`), after the track checks. Shotcut's ducking
 commands look the transition up in the player's producer, so the tool switches the player to the
 timeline when it shows a source clip. Undo of an `enabled: false` call leaves ducking OFF:
 Shotcut's `ChangeDuckThresholdCommand::undo` reads `shotcut:duck_enabled` after its own redo
@@ -723,14 +723,12 @@ afterwards.
   ends as usual; it is only visible again through `get_job` once the server runs).
 - A clip removed and put back with the same file, trim and start (without its Shotcut clip id)
   is taken for the same clip.
-- `track_set_ducking` is untested end to end (MLT 7.36.1 here). Besides the `enabled: false` undo
-  above, Shotcut's `ChangeDuckThresholdCommand::undo` leaves its `shotcut:duck_enabled` and
+- `track_set_ducking`: besides the `enabled: false` undo above, Shotcut's `ChangeDuckThresholdCommand::undo` leaves its `shotcut:duck_enabled` and
   `shotcut:duck_threshold` shadow properties on the transition, and
   `ChangeTransitionPropertyCommand::undo` writes 0 for a property that was not set before. All
   upstream behaviour, not compensated by the tool.
 - Test coverage gaps: no test of the "no audio mix transition" error (Shotcut gives every track
-  one), no test of `clip_normalize` refused by the 4-running-jobs cap, the ducking edit path
-  (needs MLT 7.41), and the failure branches of the filter commands' undo (a failed detach or
+  one), no test of `clip_normalize` refused by the 4-running-jobs cap, and the failure branches of the filter commands' undo (a failed detach or
   re-attach cannot be provoked through the tools).
 - `clip_detach_audio` uses Shotcut's command, whose undo snapshots are subject to the upstream
   snapshot race described in stage 3A; the tool wraps it in the same preview guard as the other
@@ -889,8 +887,8 @@ The details are in the known-limits lists above; in short:
 - Only timeline clips are reachable by the filter tools: filters on the clip open in the Source
   player (Shotcut has no undo there), on tracks and on the timeline output are not supported.
   The output target of the filter commands is used only by the caption burn-in of stage 3C.
-- `track_set_ducking` is untested end to end: MLT's mix transition gained ducking in 7.41, and on
-  this build (MLT 7.36.1) the tool refuses with "Audio ducking needs MLT 7.41 or newer". Undo of
+- `track_set_ducking` needs MLT 7.41 or newer (MLT's mix transition gained ducking in 7.41); on an
+  older MLT the tool refuses with "Audio ducking needs MLT 7.41 or newer". Undo of
   `enabled: false` leaves ducking off (an upstream Shotcut bug).
 - `saturation` and `white_balance` (and so `clip_set_color`'s `saturation` and `temperature_k`)
   need MLT's frei0r plugins; without them they are listed as unavailable and refused.
@@ -1372,6 +1370,15 @@ saved `[player] profile`. With `WHISPER_EXE` set to a real whisper-cli (configur
 under test, as for the media script) and whisper.cpp's `samples/jfk.wav` (`JFK_WAV`), it also
 transcribes jfk.wav on the timeline and checks that its captions have more than 15 words in the
 saved SRT; otherwise that check prints SKIP.
+
+`track_set_ducking` has its own script, also needing a FRESH throwaway Shotcut:
+
+    MCP_TOKEN=<token> [MCP_PORT=<port>] tools/mcp-smoke-ducking.sh
+
+It needs bash, curl, jq, ffmpeg and `melt-7`. It exports a 1 kHz tone that starts halfway through,
+above a steady 200 Hz music track, and measures how far the music falls: about 12 dB with ducking,
+level after undo, about 12 dB after redo, level when disabled. On MLT older than 7.41 it exits 2
+(not a pass).
 
 The end-to-end script runs one use case of `get_editing_guide` per FRESH throwaway Shotcut:
 
