@@ -496,7 +496,7 @@ void EncodeDock::loadPresetFromProperties(Mlt::Properties &preset)
             ui->videoQualitySpinner->setValue(TO_RELATIVE(31, 1, videoQuality));
         }
     }
-    onVideoCodecComboChanged(ui->videoCodecCombo->currentIndex(), false);
+    onVideoCodecComboChanged(ui->videoCodecCombo->currentIndex(), true, false);
     on_audioRateControlCombo_activated(ui->audioRateControlCombo->currentIndex());
     on_videoRateControlCombo_activated(ui->videoRateControlCombo->currentIndex());
     if (m_extension.isEmpty()) {
